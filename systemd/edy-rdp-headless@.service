@@ -1,0 +1,12 @@
+[Unit]
+Description=edy-rdp per-user isolated headless GNOME session (uid %i)
+Documentation=file:///usr/share/cockpit/guac-rdp/README.md
+After=edy-rdp-guacd.service
+# %i is the numeric uid of the target user.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/edy-rdp/edy-rdp-headless-start %i
+ExecStop=/usr/libexec/edy-rdp/edy-rdp-headless-stop %i
+TimeoutStartSec=90

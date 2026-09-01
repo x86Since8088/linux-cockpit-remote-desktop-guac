@@ -1,0 +1,11 @@
+[Unit]
+Description=edy-rdp session reaper (prune registry; close idle greeters after 60s)
+Documentation=file:///usr/share/cockpit/guac-rdp/README.md
+After=edy-rdp-control.socket edy-rdp-relay.service
+Wants=edy-rdp-control.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/edy-rdp/edy_rdp_reaper.py --control /run/edy-rdp/control.sock --greeter-ttl 60
+User=root
+NoNewPrivileges=yes

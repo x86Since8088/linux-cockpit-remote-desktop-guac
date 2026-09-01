@@ -1,0 +1,9 @@
+[Unit]
+Description=edy-rdp rotate the 3390 Remote-Login (rdplogin) door credential
+After=gnome-remote-desktop.service
+Wants=gnome-remote-desktop.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/edy-rdp/edy-rdp-rotate-rdplogin
+# writes the system grd credential + restarts the system daemon; needs root

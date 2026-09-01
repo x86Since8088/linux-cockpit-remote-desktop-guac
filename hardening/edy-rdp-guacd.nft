@@ -1,0 +1,14 @@
+#!/usr/sbin/nft -f
+# Only the relay's uid (and root) may reach guacd on 127.0.0.1:4822. Every other
+# local uid is dropped, so the ONLY way to guacd is through the authenticated
+# relay -- closing the no-auth / join-by-UUID hijack without network isolation.
+# @RELAY_UID@ is substituted by install.sh with edy-relay's uid.
+table inet edy_rdp_guacd
+delete table inet edy_rdp_guacd
+table inet edy_rdp_guacd {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        ip daddr 127.0.0.1 tcp dport 4822 meta skuid { 0, @RELAY_UID@ } accept
+        ip daddr 127.0.0.1 tcp dport 4822 drop
+    }
+}

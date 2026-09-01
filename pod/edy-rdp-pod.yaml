@@ -1,0 +1,67 @@
+# edy-rdp pod — the ONLY topology that fully closes local access to guacd.
+#
+# guacd and the relay share this pod's network namespace. guacd listens on the
+# pod-internal 127.0.0.1:4822, which is reachable ONLY by processes in this pod
+# (guacd + relay) — NOT by any host user and NOT by the network (KNOWN_ISSUES
+# I1/I2/I3). The relay is the sole ingress: it self-binds the AF_UNIX socket at
+# /run/edy-rdp/guacd.sock, bind-mounted from the host (created 0750 root:edy-rdp
+# by tmpfiles). NO host port is published anywhere in this file — that is the
+# invariant; adding a `hostPort` for 4822 is a regression that must fail review.
+#
+# GID note: for the host's Cockpit bridge (running as the user) to connect to
+# the bind-mounted socket, the container's `edy-rdp` GID must equal the host's.
+# Run this pod ROOTFUL (podman kube play as root) so GIDs are not remapped, OR
+# pass a matching --gidmap. The installer sets this up.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: edy-rdp
+  labels:
+    app: edy-rdp
+spec:
+  # no hostNetwork; no hostPort anywhere — that is the whole point.
+  containers:
+    - name: guacd
+      image: docker.io/guacamole/guacd:1.6.0
+      command: ["/opt/guacamole/sbin/guacd", "-b", "127.0.0.1", "-L", "info", "-f"]
+      # guacd binds pod-localhost only; no ports: block => nothing published.
+      securityContext:
+        capabilities:
+          drop: ["ALL"]
+    - name: relay
+      image: docker.io/library/python:3.12-slim
+      command: ["/usr/local/bin/python3", "/opt/edy-rdp/edy_rdp_relay.py",
+                "--listen", "/run/edy-rdp/guacd.sock",
+                "--group", "edy-rdp", "--mode", "0660",
+                "--guacd", "127.0.0.1:4822",
+                "--admin-group", "sudo",
+                "--state-file", "/run/edy-rdp/sessions.json",
+                "--log-level", "info"]
+      volumeMounts:
+        - name: relay-src
+          mountPath: /opt/edy-rdp
+          readOnly: true
+        - name: run-edy-rdp
+          mountPath: /run/edy-rdp
+        # host identity DBs (read-only) so SO_PEERCRED->name, the admin-group
+        # gate, and the socket group resolve against HOST identities. Requires
+        # the pod be rootful so uid/gid are not remapped.
+        - name: etc-passwd
+          mountPath: /etc/passwd
+          readOnly: true
+        - name: etc-group
+          mountPath: /etc/group
+          readOnly: true
+  volumes:
+    - name: relay-src
+      hostPath:
+        path: /usr/libexec/edy-rdp
+        type: Directory
+    - name: run-edy-rdp
+      hostPath:
+        path: /run/edy-rdp
+        type: Directory
+    - name: etc-passwd
+      hostPath: { path: /etc/passwd, type: File }
+    - name: etc-group
+      hostPath: { path: /etc/group, type: File }

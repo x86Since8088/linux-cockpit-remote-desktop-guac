@@ -1,0 +1,13 @@
+#!/usr/sbin/nft -f
+# Per-user headless RDP servers (grd binds all interfaces) must be reachable
+# ONLY via loopback -- guacd on the host dials 127.0.0.1:<port>; nothing on the
+# LAN may reach them. Mirrors the guacd 4822 loopback posture.
+table inet edy_rdp_headless
+delete table inet edy_rdp_headless
+table inet edy_rdp_headless {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iif "lo" tcp dport 33000-33999 accept
+        tcp dport 33000-33999 drop
+    }
+}

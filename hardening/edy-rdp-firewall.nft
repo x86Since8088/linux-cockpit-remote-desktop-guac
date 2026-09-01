@@ -1,0 +1,18 @@
+#!/usr/sbin/nft -f
+# Confine the RDP daemons to loopback + the podman bridge (KNOWN_ISSUES I7).
+# NOTE: guacd reaches the host as src=dst=<bridge IP> here; the accept rule MUST
+# match the actual bridge address or it severs guacd's own path. Set BRIDGE_IF /
+# BRIDGE_NET to this host's podman bridge before loading. Verify with:
+#   ss -tlnp | grep -E ':3389|:3390|:3391'
+# and a guacd connect after loading.
+table inet edy_rdp {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        # loopback always
+        iif "lo" tcp dport { 3389, 3390, 3391 } accept
+        # podman bridge (EDIT: replace 'podman0'/'10.88.0.0/16' for this host)
+        iif "podman0" tcp dport { 3389, 3390, 3391 } accept
+        # everything else: drop RDP from off-box
+        tcp dport { 3389, 3390, 3391 } drop
+    }
+}

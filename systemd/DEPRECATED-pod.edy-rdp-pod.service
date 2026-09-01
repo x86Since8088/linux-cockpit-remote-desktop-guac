@@ -1,0 +1,19 @@
+[Unit]
+Description=edy-rdp pod (guacd + relay; guacd never exposed on the host)
+Documentation=file:///usr/share/cockpit/guac-rdp/README.md
+Wants=network-online.target
+After=network-online.target
+Requires=systemd-tmpfiles-setup.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+# tmpfiles creates /run/edy-rdp (0750 root:edy-rdp) before we start.
+ExecStartPre=/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/edy-rdp.conf
+ExecStartPre=-/usr/bin/podman kube down /usr/share/cockpit/guac-rdp/pod/edy-rdp-pod.yaml
+ExecStart=/usr/bin/podman kube play --replace --service-container=true /usr/share/cockpit/guac-rdp/pod/edy-rdp-pod.yaml
+ExecStop=/usr/bin/podman kube down /usr/share/cockpit/guac-rdp/pod/edy-rdp-pod.yaml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

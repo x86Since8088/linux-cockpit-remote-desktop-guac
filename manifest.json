@@ -1,0 +1,14 @@
+{
+    "version": "1.0.0.20260901",
+    "requires": { "cockpit": "266" },
+    "menu": {
+        "index": {
+            "label": "Remote Desktop",
+            "order": 58,
+            "keywords": [
+                { "matches": ["remote","desktop","rdp","guacamole","guacd","console",
+                              "screen","session","isolated","mirror","virtual monitor"] }
+            ]
+        }
+    }
+}

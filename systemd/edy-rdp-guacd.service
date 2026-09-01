@@ -1,0 +1,25 @@
+[Unit]
+Description=edy-rdp guacd (host loopback 127.0.0.1:4822, nftables uid-gated)
+Documentation=file:///usr/share/cockpit/guac-rdp/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# guacd runs in the HOST network namespace so it can complete outbound RDP
+# (incl. the grd redirect) exactly like a host process. It binds LOOPBACK only;
+# access is restricted to the relay's uid by the nftables owner-match rule
+# (edy-rdp-guacd.nft) -- NOT by network isolation. No -p mapping is used.
+# guacd built against FreeRDP 3 (localhost/edy-rdp-guacd-fr3): FreeRDP 2 lacks RDSTLS,
+# which grd port 3390 (Remote Login) requires for its post-greeter handover (KNOWN_ISSUES I26).
+# Pinned guacd image; overridable via /etc/default/edy-rdp (GUACD_IMAGE=).
+Environment=GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
+EnvironmentFile=-/etc/default/edy-rdp
+ExecStartPre=-/usr/bin/podman rm -f edy-rdp-guacd
+ExecStart=/usr/bin/podman run --replace --name edy-rdp-guacd --network host --health-cmd none \
+    --entrypoint /opt/guacamole/sbin/guacd \
+    ${GUACD_IMAGE} -b 127.0.0.1 -l 4822 -L info -f
+ExecStop=/usr/bin/podman stop -t 5 edy-rdp-guacd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

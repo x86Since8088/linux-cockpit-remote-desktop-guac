@@ -1,0 +1,30 @@
+# /etc/default/edy-rdp — cockpit-guac-rdp relay configuration (EnvironmentFile).
+# Installed by install.sh from source/etcdefaults/edy-rdp. An existing file is
+# PRESERVED on upgrade (edit it freely). Apply changes with:
+#     systemctl restart edy-rdp-relay.service
+#
+# The relay service ships built-in defaults identical to the values below, so this
+# file is optional — it exists so an operator can tune the relay without editing the
+# systemd unit.
+
+# guacd endpoint the relay dials (host:port). guacd binds host loopback and is
+# gated to the relay uid by nftables — do NOT expose it on a routable address.
+EDY_RDP_GUACD=127.0.0.1:4822
+
+# Unix group whose members are treated as Cockpit administrators for the
+# server-side console gate (the elevation-proven token is still required).
+EDY_RDP_ADMIN_GROUP=sudo
+
+# Where the relay persists its session registry (tmpfs; does not survive reboot,
+# which is correct since live guacd/grd sessions do not either).
+EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
+
+# Log verbosity for the relay + the edy-rdp-trace logger (DEBUG|INFO|WARNING|ERROR).
+EDY_RDP_LOG_LEVEL=INFO
+
+# RDP targets guacd is permitted to dial (SSRF-class allow-list). Space-separated
+# --allow-target flags; word-split into args by systemd. grd backend ports only.
+EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391
+
+# Pinned guacd container image (edy-rdp-guacd.service reads this too).
+GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0

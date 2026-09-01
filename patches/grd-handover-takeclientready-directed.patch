@@ -1,0 +1,32 @@
+--- a/src/grd-daemon-system.c	2026-07-01 04:32:43.000000000 -0500
++++ b/src/grd-daemon-system.c
+@@ -726,9 +726,26 @@
+   g_debug ("[DaemonSystem] At: %s, emitting TakeClientReady signal",
+            remote_client->handover_dst->object_path);
+ 
+-  grd_dbus_remote_desktop_rdp_handover_emit_take_client_ready (
+-    remote_client->handover_dst->interface,
+-    remote_client->use_system_credentials);
++  /* edt1 fix (cockpit-guac-rdp KNOWN_ISSUES I29): the generated emit BROADCASTS
++   * this signal, but this host's bus does not deliver Handover-interface broadcasts
++   * to the greeter's handover daemon (ObjectManager signals from the same sender
++   * ARE delivered; a maximally-permissive D-Bus policy does not help). Emit it
++   * DIRECTED to the handover daemon -- exactly as RedirectClient is emitted above --
++   * because directed signals are delivered reliably. */
++  {
++    GDBusConnection *handover_connection =
++      g_dbus_interface_skeleton_get_connection (
++        G_DBUS_INTERFACE_SKELETON (remote_client->handover_dst->interface));
++
++    g_dbus_connection_emit_signal (handover_connection,
++                                   remote_client->handover_dst->sender_name,
++                                   remote_client->handover_dst->object_path,
++                                   "org.gnome.RemoteDesktop.Rdp.Handover",
++                                   "TakeClientReady",
++                                   g_variant_new ("(b)",
++                                     remote_client->use_system_credentials),
++                                   NULL);
++  }
+ }
+ 
+ static GVariant *

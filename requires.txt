@@ -1,0 +1,29 @@
+# cockpit-guac-rdp — prerequisite manifest (pinned)
+# Version: 1.0.0.20260901
+#
+# These are OS-level prerequisites, not pip packages: the relay/reaper are stdlib
+# Python 3 (no PyPI dependencies) and the plugin is plain HTML/CSS/JS (no build).
+# install.sh auto-installs these via the host package manager; see docs/COMPATIBILITY.md
+# for the per-distro package-name mapping. Format below:  prereq  min-version  (reference
+# version verified on the Ubuntu 26.04 build host, edt1).
+#
+# prereq                 minimum      reference (Ubuntu 26.04 / edt1)
+cockpit                  >=266        360-1            # metapackage: cockpit-bridge + cockpit-ws + cockpit-system (shell UI)
+podman                   >=4.0        5.7.0            # runs the guacd container
+python3                  >=3.9        3.14.4           # relay + reaper (stdlib only)
+freerdp                  >=3.0        3.31.0           # xfreerdp3 client — v2 CANNOT connect to grd
+xvfb                     >=1.20       21.1.22          # headless X for the bridge
+x11vnc                   >=0.9.16     0.9.17           # loopback VNC for guacd's VNC client
+nftables                 >=1.0        1.1.6            # owner-match gate on 127.0.0.1:4822
+gnome-remote-desktop     >=46         50.2             # the RDP backend (console/virtual/headless)
+dbus                     >=1.14       1.16.2           # handover policy reload + session bus
+
+# Container image (pinned by tag; digest recorded for supply-chain verification).
+# The installer and edy-rdp-guacd.service both reference the tag below.
+guacd-image  docker.io/guacamole/guacd:1.6.0  sha256:2d266a525a72ad55d8ea7cd4ca8342a1b44075759b03660d8684821b3636a922
+
+# Vendored (already in the tree, no install needed):
+#   guacamole-common-js  1.5.x  (Apache-2.0)   source/guacamole-common-js/all.min.js
+
+# Python: no pip requirements. Verified: `python3 -c "import socket,selectors,json,secrets,uuid"`
+# resolves entirely from the standard library.

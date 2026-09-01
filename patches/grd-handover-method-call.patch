@@ -1,0 +1,201 @@
+# grd 50.2 handover fix for edt1 (cockpit-guac-rdp KNOWN_ISSUES I29)
+# Replaces the undeliverable/broadcast TakeClientReady SIGNAL with a proactive
+# TakeClient METHOD call held open by the system daemon until the client reconnects.
+# Includes audit hardening: S1 (reset take_client_requested per handover cycle) and
+# a guard against orphaning an already-pending TakeClient invocation.
+# PRECONDITION: correct for the rdstls path (use_system_credentials == FALSE), i.e.
+# guacd/FreeRDP and rdstls-capable mstsc. A legacy mstsc NOT requesting rdstls sets
+# use_system_credentials=TRUE and would need the GetSystemCredentials step this
+# proactive path skips -- out of scope for this deployment.
+# Regenerated 2026-09-01T01:27:46-05:00
+---
+--- a/src/grd-daemon-system.c	2026-09-01 01:27:46.897490706 -0500
++++ b/src/grd-daemon-system.c	2026-09-01 01:26:47.773524604 -0500
+@@ -56,6 +56,7 @@
+ 
+   GrdSession *session;
+   GSocketConnection *socket_connection;
++  GDBusMethodInvocation *pending_take_client_invocation;
+ 
+   HandoverInterface *handover_src;
+   HandoverInterface *handover_dst;
+@@ -160,22 +161,20 @@
+   return TRUE;
+ }
+ 
+-static gboolean
+-on_handle_take_client (GrdDBusRemoteDesktopRdpHandover *interface,
+-                       GDBusMethodInvocation           *invocation,
+-                       GUnixFDList                     *list,
+-                       GrdRemoteClient                 *remote_client)
++/* edt1 fix (cockpit-guac-rdp KNOWN_ISSUES I29): pass the reconnected client's FD
++ * to the handover daemon by completing its pending TakeClient call. */
++static void
++complete_take_client (GrdRemoteClient *remote_client)
+ {
+-  GSocket *socket = NULL;
+-  GVariant *fd_variant = NULL;
++  GrdDBusRemoteDesktopRdpHandover *interface = remote_client->handover_dst->interface;
++  GDBusMethodInvocation *invocation = remote_client->pending_take_client_invocation;
+   g_autoptr (GUnixFDList) fd_list = NULL;
++  GVariant *fd_variant = NULL;
++  GSocket *socket;
+   int fd;
+   int fd_idx;
+ 
+-  g_assert (interface == remote_client->handover_dst->interface);
+-
+-  g_debug ("[DaemonSystem] At: %s, received TakeClient call",
+-           remote_client->handover_dst->object_path);
++  remote_client->pending_take_client_invocation = NULL;
+ 
+   socket = g_socket_connection_get_socket (remote_client->socket_connection);
+   fd = g_socket_get_fd (socket);
+@@ -194,6 +193,39 @@
+ 
+   grd_dbus_remote_desktop_rdp_handover_set_handover_is_waiting (interface,
+                                                                 FALSE);
++}
++
++static gboolean
++on_handle_take_client (GrdDBusRemoteDesktopRdpHandover *interface,
++                       GDBusMethodInvocation           *invocation,
++                       GUnixFDList                     *list,
++                       GrdRemoteClient                 *remote_client)
++{
++  g_assert (interface == remote_client->handover_dst->interface);
++
++  g_debug ("[DaemonSystem] At: %s, received TakeClient call",
++           remote_client->handover_dst->object_path);
++
++  /* edt1 fix (KNOWN_ISSUES I29): the TakeClientReady signal is not deliverable on
++   * this host's D-Bus, so the handover daemon calls TakeClient proactively -- often
++   * BEFORE the client has reconnected. Hold the invocation until the reconnect
++   * (on_incoming_redirected_connection) supplies socket_connection; if the client
++   * already reconnected, complete it immediately. */
++  if (remote_client->pending_take_client_invocation)
++    {
++      /* audit S(low): never orphan an already-stored invocation on a duplicate/early
++       * TakeClient -- error the new one instead of overwriting the slot (which would
++       * leak the first invocation into a 25s D-Bus timeout). */
++      g_dbus_method_invocation_return_error_literal (invocation,
++                                                     G_DBUS_ERROR,
++                                                     G_DBUS_ERROR_FAILED,
++                                                     "TakeClient already pending");
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
++  remote_client->pending_take_client_invocation = invocation;
++  if (remote_client->socket_connection)
++    complete_take_client (remote_client);
+ 
+   return G_DBUS_METHOD_INVOCATION_HANDLED;
+ }
+@@ -207,6 +239,14 @@
+   g_warning ("[DaemonSystem] Aborting handover, removing remote client with "
+              "remote id %s", remote_client->id);
+ 
++  if (remote_client->pending_take_client_invocation)
++    {
++      g_dbus_method_invocation_return_error_literal (
++        remote_client->pending_take_client_invocation,
++        G_DBUS_ERROR, G_DBUS_ERROR_FAILED, "handover aborted");
++      remote_client->pending_take_client_invocation = NULL;
++    }
++
+   if (remote_client->session)
+     {
+       grd_session_rdp_notify_error (GRD_SESSION_RDP (remote_client->session),
+@@ -581,6 +621,14 @@
+   g_clear_pointer (&remote_client->handover_dst, handover_iface_free);
+   g_clear_handle_id (&remote_client->abort_handover_source_id, g_source_remove);
+ 
++  if (remote_client->pending_take_client_invocation)
++    {
++      g_dbus_method_invocation_return_error_literal (
++        remote_client->pending_take_client_invocation,
++        G_DBUS_ERROR, G_DBUS_ERROR_FAILED, "handover client removed");
++      remote_client->pending_take_client_invocation = NULL;
++    }
++
+   g_free (remote_client);
+ }
+ 
+@@ -723,12 +771,13 @@
+   remote_client->use_system_credentials = remote_client->is_client_mstsc &&
+                                           !requested_rdstls;
+ 
+-  g_debug ("[DaemonSystem] At: %s, emitting TakeClientReady signal",
+-           remote_client->handover_dst->object_path);
+-
+-  grd_dbus_remote_desktop_rdp_handover_emit_take_client_ready (
+-    remote_client->handover_dst->interface,
+-    remote_client->use_system_credentials);
++  /* edt1 fix (KNOWN_ISSUES I29): the TakeClientReady signal is undeliverable on
++   * this host's bus. The handover daemon calls TakeClient proactively instead;
++   * complete that pending call now with the reconnected client's FD. If TakeClient
++   * has not arrived yet, on_handle_take_client completes as soon as it does
++   * (socket_connection is now set). */
++  if (remote_client->pending_take_client_invocation)
++    complete_take_client (remote_client);
+ }
+ 
+ static GVariant *
+--- a/src/grd-daemon-handover.c	2026-09-01 01:27:46.918490693 -0500
++++ b/src/grd-daemon-handover.c	2026-09-01 01:26:31.381530809 -0500
+@@ -51,6 +51,7 @@
+   GrdSession *session;
+ 
+   gboolean use_system_credentials;
++  gboolean take_client_requested;
+   GrdPrompt *prompt;
+   GCancellable *prompt_cancellable;
+ 
+@@ -212,6 +213,10 @@
+ 
+   daemon_handover->use_system_credentials = use_system_credentials;
+ 
++  if (daemon_handover->take_client_requested)
++    return;  /* edt1 I29: TakeClient already requested proactively */
++  daemon_handover->take_client_requested = TRUE;
++
+   if (use_system_credentials)
+     {
+       g_debug ("[DaemonHandover] At: %s, calling GetSystemCredentials",
+@@ -269,6 +274,22 @@
+                 "rdp-server-cert", certificate,
+                 "rdp-server-key", key,
+                 NULL);
++
++  /* edt1 fix (cockpit-guac-rdp KNOWN_ISSUES I29): the TakeClientReady signal is
++   * undeliverable on this host's bus, so call TakeClient proactively now. The
++   * system daemon holds this call until the client reconnects, then completes it
++   * with the FD. (rdstls path -> use_system_credentials == FALSE, the case for
++   * FreeRDP/guacd clients.) */
++  if (!daemon_handover->take_client_requested)
++    {
++      GCancellable *cancellable =
++        grd_daemon_get_cancellable (GRD_DAEMON (daemon_handover));
++
++      daemon_handover->take_client_requested = TRUE;
++      g_debug ("[DaemonHandover] Proactively calling TakeClient (edt1 I29 fix)");
++      grd_dbus_remote_desktop_rdp_handover_call_take_client (
++        proxy, NULL, cancellable, on_take_client_finished, daemon_handover);
++    }
+ }
+ 
+ static void
+@@ -282,6 +303,13 @@
+   g_autofree char *password = NULL;
+   const char *object_path;
+ 
++  /* edt1 fix (KNOWN_ISSUES I29, audit S1): re-arm the proactive TakeClient for THIS
++   * handover cycle. take_client_requested is set once StartHandover returns; without
++   * clearing it here, a handover daemon reused for a second cycle (a later redirect
++   * served by the same greeter) would skip the proactive TakeClient and hang until the
++   * 30s abort. Reset-then-set is a no-op for the normal single-cycle flow. */
++  daemon_handover->take_client_requested = FALSE;
++
+   if (!grd_settings_get_rdp_credentials (settings,
+                                          &username, &password,
+                                          NULL))

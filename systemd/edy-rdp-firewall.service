@@ -1,0 +1,21 @@
+[Unit]
+Description=edy-rdp nftables rules (guacd owner-match + headless loopback)
+Documentation=file:///usr/share/cockpit/guac-rdp/README.md
+# Load BEFORE guacd/relay so 4822 is never briefly world-reachable on boot.
+Before=edy-rdp-guacd.service edy-rdp-relay.service
+After=nftables.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# delete-then-load so re-runs are idempotent (ufw does not manage these tables)
+ExecStartPre=-/usr/sbin/nft delete table inet edy_rdp_guacd
+ExecStartPre=-/usr/sbin/nft delete table inet edy_rdp_headless
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-guacd.nft
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-headless.nft
+ExecStop=-/usr/sbin/nft delete table inet edy_rdp_guacd
+ExecStop=-/usr/sbin/nft delete table inet edy_rdp_headless
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+[Unit]
+Description=edy-rdp guacd relay (SO_PEERCRED auth, per-user UUID binding, console gate, keepalive)
+Documentation=file:///usr/share/cockpit/guac-rdp/README.md
+Requires=edy-rdp-relay.socket edy-rdp-control.socket edy-rdp-guacd.service
+After=edy-rdp-relay.socket edy-rdp-control.socket edy-rdp-guacd.service
+
+[Service]
+Type=simple
+User=edy-relay
+Group=edy-rdp
+# Runs as the dedicated edy-relay uid so the nftables owner-match on 127.0.0.1:4822
+# admits THIS process and drops every other local uid.
+# Config comes from /etc/default/edy-rdp (optional); these Environment= lines are the
+# built-in fallback so the relay runs correctly even if that file is absent.
+Environment=EDY_RDP_GUACD=127.0.0.1:4822
+Environment=EDY_RDP_ADMIN_GROUP=sudo
+Environment=EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
+Environment=EDY_RDP_LOG_LEVEL=INFO
+Environment="EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391"
+EnvironmentFile=-/etc/default/edy-rdp
+# ${VAR} expands to one argument; $EDY_RDP_ALLOW_ARGS (no braces) is word-split into
+# the repeated --allow-target flags.
+ExecStart=/usr/libexec/edy-rdp/edy_rdp_relay.py \
+    --guacd ${EDY_RDP_GUACD} --admin-group ${EDY_RDP_ADMIN_GROUP} \
+    --state-file ${EDY_RDP_STATE_FILE} \
+    $EDY_RDP_ALLOW_ARGS \
+    --log-level ${EDY_RDP_LOG_LEVEL}
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/edy-rdp
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

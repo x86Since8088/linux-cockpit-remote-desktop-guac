@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<html id="guac-rdp-page" lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title translatable="yes">Remote Desktop</title>
+  <link rel="stylesheet" href="guac-rdp.css">
+  <script type="text/javascript" src="../base1/cockpit.js"></script>
+  <script type="text/javascript" src="guacamole-common-js/all.min.js"></script>
+  <script type="text/javascript" src="guac-proto.js"></script>
+  <script type="text/javascript" src="guac-rdp.js"></script>
+</head>
+<body>
+  <div class="tabs">
+    <button class="tab active" id="tab-connect" data-panel="panel-connect">Connect</button>
+    <button class="tab" id="tab-sessions" data-panel="panel-sessions">Active Sessions</button>
+  </div>
+
+  <section id="panel-connect" class="panel">
+    <div class="bar">
+      <div class="f">
+        <label for="target">Session</label>
+        <select id="target">
+          <option value="isolated">Isolated session (Remote Login)</option>
+          <option value="virtual">My desktop &mdash; virtual monitor</option>
+          <option value="console">Console &mdash; mirrored screen</option>
+        </select>
+      </div>
+      <div class="f" id="authwrap">
+        <label for="authmode">Sign in</label>
+        <select id="authmode">
+          <option value="auto">Automatically (server holds the key)</option>
+          <option value="manual">As a specific user</option>
+        </select>
+      </div>
+      <div class="f cred" id="credwrap" hidden>
+        <label for="user">RDP username</label>
+        <input id="user" type="text" name="rdp-door-key-user"
+               autocomplete="off" autocapitalize="off" spellcheck="false" size="14">
+      </div>
+      <div class="f cred" id="passwrap" hidden>
+        <label for="pass">RDP password</label>
+        <input id="pass" type="password" name="rdp-door-key-secret"
+               autocomplete="new-password" size="14">
+      </div>
+      <button id="go">Connect</button>
+      <button id="stop" class="sec" disabled>Disconnect</button>
+    </div>
+    <div class="hint" id="hint"></div>
+    <div class="status" id="status">Idle.</div>
+    <div id="display"></div>
+  </section>
+
+  <section id="panel-sessions" class="panel" hidden>
+    <div class="bar">
+      <button id="refresh">Refresh</button>
+      <span class="hint" id="sessions-note"></span>
+    </div>
+    <table class="sessions" id="sessions-table">
+      <thead><tr>
+        <th>Session</th><th>Scenario</th><th>State</th><th>Live</th><th>User</th><th>Age</th><th></th>
+      </tr></thead>
+      <tbody id="sessions-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.0.0.20260901</span></footer>
+</body>
+</html>

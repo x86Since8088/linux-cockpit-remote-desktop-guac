@@ -1,0 +1,30 @@
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# staging / package build roots
+/stage/
+/DESTDIR/
+*.deb
+*.rpm
+
+# node / playwright (the browser harness lives outside this repo, but guard anyway)
+node_modules/
+/test-results/
+/playwright-report/
+
+# deployment scratch (container/VM provisioning artifacts, cloud-init, keys)
+/deploy/tmp/
+*.qcow2
+*.img
+cloud-init*.iso
+*.pem
+*.key.local
+
+# editor / OS cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
