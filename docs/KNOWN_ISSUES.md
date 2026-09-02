@@ -461,3 +461,68 @@ attach to a live bridge and watch the session. Now the bridge mints a per-connec
 (`x11vnc -passwdfile`, 0600, never argv), publishes it in the 0640 `.env`, and the relay injects it into
 guacd's VNC `password` param (trace-redacted). Verified: correct password → renders; empty/wrong → 0
 frames. Defense-in-depth atop the loopback-only bind.
+
+## Remote-host RDP scenario (2026-09-02)
+
+The "Remote host" scenario lets the browser RDP into another host — the one path where the
+target is not loopback. It is designed fail-closed and adversarially reviewed:
+
+### I33 · SSRF via browser-chosen target · Sev C · CLOSED (fail-closed allow-list)
+The relay/bridge dials whatever host it is told, so an unconstrained remote scenario would
+be a classic SSRF pivot (internal admin UIs, metadata endpoints, port scans) and would send
+the user's RDP credential to an attacker-chosen host. **Mitigation (shipped):** remote is
+gated by `EDY_RDP_REMOTE_ALLOW` (`/etc/default/edy-rdp`), an admin-configured allow-list of
+IPv4/CIDR[:port]. Empty = deny-all (default; the unit ships an empty `Environment=` fallback
+so an upgraded host without the line still fails closed). The check runs in `_grd_target`
+**before** `DESKTOP_SLOTS.claim`/`bridge.start_bridge`, so a denied target never dials out
+(unit-tested). Enforcement is on a validated **IPv4 literal** — hostnames are rejected, so a
+name cannot pass the CIDR check and re-resolve to an internal IP (no DNS rebinding).
+
+### I34 · Bridge `.req` injection / credential handling · Sev H · CLOSED
+`remotehost` is written into the 0600 bridge request file as a `KEY=VALUE` line, so a newline
+could forge `PASSWORD`/`SECURITY` keys. **Mitigation:** `_parse_remote_target` rejects any
+character outside `[0-9.:]` and anything that is not a strict `IPv4:port`, and the marker is
+carried through Guacamole `enc()` (length-prefixed) — never string-concatenated. Remote uses
+**client-supplied credentials only** (`relay_cred=None`); no relay-managed/headless credential
+is ever handed to a foreign host. Markers (`remotehost=`/`rdpcred=`) are stripped server-side
+before the connect reaches guacd, and the password is trace-redacted, same as the gate key.
+
+### I35 · MITM / weak security of the remote session · Sev M · MITIGATED
+Two protections. **(a) Security negotiation:** the local grd uses an explicit protocol
+(`nla`/`rdstls`); a remote host **negotiates with plain RDP-standard security disabled**
+(`/sec:rdp:off`), so the client offers only NLA+TLS — Windows selects NLA, other servers
+(e.g. xrdp) select TLS, and the credential is never sent under weak RDP encryption. **(b)
+Certificate trust:** the remote leg uses **`/cert:tofu`** with a persistent per-boot store
+(`/run/edy-rdp/freerdp`): the first connect pins the cert and a later changed cert (MITM) is
+refused. First-use trust is the TOFU tradeoff — for higher assurance, pin a CA / known cert.
+Only reachable for allow-listed hosts. (Verified end-to-end: a container relay RDP'd into an
+xrdp host over the negotiated TLS path and rendered an interactive desktop.)
+
+### Residual notes
+- `EDY_RDP_REMOTE_ALLOW=any` (esp. `any:*`) restores broad reach by operator choice — document
+  it as an explicit decision, prefer specific CIDRs.
+- Remote sessions are **not** reconnectable (not in `RECONNECTABLE_SCENARIOS`); a disconnected
+  remote row is reaped normally rather than resurrected against a possibly-changed target.
+- IPv4 only in this version (the `:` port separator makes IPv6 parsing ambiguous); IPv6 targets
+  are rejected.
+
+### I36 · Newline injection in a client RDP credential forged bridge `.req` keys · Sev H · CLOSED
+Found by the adversarial security review of the remote scenario. The client-supplied RDP
+username/password (the `rdpcred=` marker) were written **verbatim** into the newline-delimited
+bridge `.req` file. Because Guacamole element values are length-prefixed (a newline is a legal
+value byte a hand-built client can send), a password like `p\nHOST=8.8.8.8\nPORT=22` forged a
+second `HOST=`/`PORT=` line that the launcher's last-value-wins parse used — coercing the bridge
+into dialing an arbitrary host (SSRF). Critically this affected the **loopback-only
+virtual/console** paths too (they also take a client credential, with no allow-list), so it was
+a pre-existing hole the remote work surfaced, not remote-specific. **Fix (three layers):** the
+relay rejects `\n`/`\r`/`\x00` in the client username/password right after the `\x1f` split
+(covers all scenarios); `bridge.start_bridge` re-rejects control chars in every `.req` field
+(defense-in-depth, also covers the relay-managed path); and the launcher refuses a `.req` with
+more than its 6 expected lines and takes the **first** value of each key. Regression-tested
+(`CredentialInjection`, `BridgeInjectionDefense`) and re-verified: the exact exploit is refused
+with no bridge dialed, while clean credentials still connect.
+
+### I37 · No per-uid cap on concurrent bridges → display-slot exhaustion · Sev L · CLOSED
+Each bridge consumes one of ~100 Xvfb/VNC display slots; an authenticated user could open many
+connections and exhaust the pool. **Fix:** a per-uid concurrent-bridge cap (`MAX_BRIDGES_PER_UID`,
+default 6) checked before `bridge.start_bridge` and released on teardown (`BridgeCap` test).

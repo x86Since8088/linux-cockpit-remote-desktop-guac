@@ -161,5 +161,215 @@ class UuidNormalization(unittest.TestCase):
         self.assertFalse(c.table.may_join("abc-123", 1005))
 
 
+class RemoteAllowList(unittest.TestCase):
+    """The remote-scenario allow-list: fail-closed, IPv4-only, host+port gated."""
+    def _set(self, spec):
+        R.REMOTE_ALLOW = R.parse_remote_allow(spec)
+
+    def tearDown(self):
+        R.REMOTE_ALLOW = []
+
+    def test_empty_denies_all(self):                # fail-closed default
+        self._set("")
+        self.assertFalse(R.remote_target_allowed("10.0.0.5", 3389))
+
+    def test_exact_host_and_port(self):
+        self._set("10.20.0.5:3389")
+        self.assertTrue(R.remote_target_allowed("10.20.0.5", 3389))
+        self.assertFalse(R.remote_target_allowed("10.20.0.5", 3390))   # port gates
+        self.assertFalse(R.remote_target_allowed("10.20.0.9", 3389))   # host gates
+
+    def test_subnet_default_port(self):
+        self._set("192.168.2.0/24")
+        self.assertTrue(R.remote_target_allowed("192.168.2.50", 3389))
+        self.assertFalse(R.remote_target_allowed("192.168.2.50", 3390))  # non-3389 refused
+        self.assertFalse(R.remote_target_allowed("10.0.0.1", 3389))      # outside subnet
+
+    def test_any_and_wildcard_port(self):
+        self._set("any")
+        self.assertTrue(R.remote_target_allowed("8.8.8.8", 3389))
+        self.assertFalse(R.remote_target_allowed("8.8.8.8", 3390))       # 'any' still 3389 only
+        self._set("any:*")
+        self.assertTrue(R.remote_target_allowed("8.8.8.8", 3390))        # any host, any port
+
+    def test_never_a_hostname_or_ipv6(self):        # no DNS rebinding; IPv4 only
+        self._set("any:*")
+        for bad in ("evil.example.com", "::1", "fe80::1", "10.0.0.5; rm", ""):
+            self.assertFalse(R.remote_target_allowed(bad, 3389))
+
+
+class RemoteScenario(unittest.TestCase):
+    """The 'remote' connect path: SSRF gate before the bridge, client-cred only,
+    guacd sees only the loopback VNC, no marker leak."""
+    def _conn(self, uid=1000):
+        c = R.Connection(client=None, uid=uid, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        c.arg_names = ["hostname", "port", "password"]
+        return c
+
+    class _FakeProc:
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def poll(self): return None
+        def kill(self): pass
+
+    def setUp(self):
+        self._orig = R.bridge.start_bridge
+        self.calls = []
+        R.bridge.start_bridge = lambda *a, **k: (
+            self.calls.append((a, k)) or
+            ({"VNCHOST": "127.0.0.1", "VNCPORT": "6002", "VNCPASS": "s"}, self._FakeProc()))
+        R.REMOTE_ALLOW = R.parse_remote_allow("10.20.0.0/24")
+        R.REMOTE_ADMIN_ONLY = False
+
+    def tearDown(self):
+        R.bridge.start_bridge = self._orig
+        R.REMOTE_ALLOW = []
+        R.REMOTE_ADMIN_ONLY = False
+
+    def test_allowed_remote_bridges_target_and_injects_loopback(self):
+        c = self._conn()
+        out = c._peek_scenario_from_connect(
+            ["connect", "x", "y", "z", "rdpcred=u\x1fp",
+             "remotehost=10.20.0.5:3389", "scenario=remote"])
+        try:
+            self.assertEqual(c.scenario, "remote")
+            host, port = self.calls[-1][0][1], self.calls[-1][0][2]
+            self.assertEqual((host, port), ("10.20.0.5", "3389"))   # bridge dials the REMOTE host
+            self.assertEqual(self.calls[-1][0][4:6], ("u", "p"))    # client-supplied cred, not relay-managed
+            params = dict(zip(c.arg_names, out[1:]))
+            self.assertEqual(params["hostname"], "127.0.0.1")       # guacd sees loopback VNC only
+            self.assertEqual(params["port"], "6002")
+            self.assertFalse(any(str(x).startswith(
+                ("scenario=", "rdpcred=", "remotehost=", "sessiontoken=")) for x in out))
+            self.assertEqual(c.desktop_id, "remote:10.20.0.5:3389:1000")
+        finally:
+            if c.desktop_id:
+                R.DESKTOP_SLOTS.release(c.desktop_id, c)
+
+    def test_outside_allowlist_refused_before_bridge(self):     # SSRF
+        c = self._conn()
+        with self.assertRaises(R.Refuse):
+            c._peek_scenario_from_connect(
+                ["connect", "x", "y", "z", "rdpcred=u\x1fp",
+                 "remotehost=10.99.0.1:3389", "scenario=remote"])
+        self.assertEqual(self.calls, [])   # a denied target must NOT dial out
+
+    def test_missing_credential_refused(self):
+        c = self._conn()
+        with self.assertRaises(R.Refuse):
+            c._peek_scenario_from_connect(
+                ["connect", "x", "y", "z", "remotehost=10.20.0.5:3389", "scenario=remote"])
+        self.assertEqual(self.calls, [])
+
+    def test_malformed_target_refused(self):       # hostname / newline / no-port
+        for bad in ("evil.com:3389", "10.20.0.5", "10.20.0.5:0", "10.20.0.5:22\n"):
+            c = self._conn()
+            with self.assertRaises(R.Refuse):
+                c._peek_scenario_from_connect(
+                    ["connect", "x", "y", "z", "rdpcred=u\x1fp",
+                     "remotehost=" + bad, "scenario=remote"])
+            self.assertEqual(self.calls, [])
+
+    def test_admin_only_refuses_nonadmin(self):
+        R.REMOTE_ADMIN_ONLY = True
+        c = self._conn(4242)
+        with self.assertRaises(R.Refuse):
+            c._peek_scenario_from_connect(
+                ["connect", "x", "y", "z", "rdpcred=u\x1fp",
+                 "remotehost=10.20.0.5:3389", "scenario=remote"])
+
+
+class CredentialInjection(unittest.TestCase):
+    """A newline/CR/NUL in a client-supplied RDP credential must be refused before it
+    can forge a HOST=/PORT= line in the bridge .req (SSRF). Regression for the
+    adversarial-review finding; covers virtual/console (loopback) AND remote."""
+    class _FakeProc:
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def poll(self): return None
+        def kill(self): pass
+
+    def _conn(self, uid=1000):
+        c = R.Connection(client=None, uid=uid, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        c.arg_names = ["hostname", "port", "password"]
+        return c
+
+    def setUp(self):
+        self._orig = R.bridge.start_bridge
+        self.calls = []
+        R.bridge.start_bridge = lambda *a, **k: (
+            self.calls.append(a) or
+            ({"VNCHOST": "127.0.0.1", "VNCPORT": "6002", "VNCPASS": "s"}, self._FakeProc()))
+
+    def tearDown(self):
+        R.bridge.start_bridge = self._orig
+        R.REMOTE_ALLOW = []
+
+    def _cleanup(self, c):
+        if c.desktop_id:
+            R.DESKTOP_SLOTS.release(c.desktop_id, c)
+        if c._bridge_counted:
+            R.BRIDGE_COUNTER.release(c.uid)
+
+    def test_newline_in_password_virtual_refused(self):     # SSRF via loopback scenario
+        c = self._conn()
+        with self.assertRaises(R.Refuse):
+            c._peek_scenario_from_connect(
+                ["connect", "a", "b", "c", "rdpcred=alice\x1fx\nHOST=8.8.8.8\nPORT=22",
+                 "scenario=virtual"])
+        self.assertEqual(self.calls, [])                    # never dialed
+
+    def test_newline_in_username_refused(self):
+        c = self._conn()
+        with self.assertRaises(R.Refuse):
+            c._peek_scenario_from_connect(
+                ["connect", "a", "b", "c", "rdpcred=a\nHOST=8.8.8.8\x1fpw", "scenario=virtual"])
+        self.assertEqual(self.calls, [])
+
+    def test_newline_in_remote_credential_refused(self):    # allow-list bypass attempt
+        R.REMOTE_ALLOW = R.parse_remote_allow("192.168.2.20:3389")
+        c = self._conn()
+        with self.assertRaises(R.Refuse):
+            c._peek_scenario_from_connect(
+                ["connect", "a", "b", "c", "rdpcred=alice\x1fp\nHOST=10.9.9.9\nPORT=3389",
+                 "remotehost=192.168.2.20:3389", "scenario=remote"])
+        self.assertEqual(self.calls, [])
+
+    def test_clean_credential_still_connects(self):
+        c = self._conn()
+        try:
+            c._peek_scenario_from_connect(
+                ["connect", "a", "b", "c", "rdpcred=alice\x1fgoodpass", "scenario=virtual"])
+            self.assertEqual(self.calls[-1][1], "127.0.0.1")   # still dials loopback
+        finally:
+            self._cleanup(c)
+
+
+class BridgeInjectionDefense(unittest.TestCase):
+    """bridge.start_bridge itself rejects a control char in any .req field."""
+    def test_bridge_rejects_newline_value(self):
+        for i, args in enumerate([
+            ("k", "10.0.0.1\nHOST=x", "3389", "nla", "u", "p", "1x1"),
+            ("k", "10.0.0.1", "3389", "nla", "u", "p\nHOST=evil", "1x1"),
+            ("k", "10.0.0.1", "3389", "nla\nSECURITY=rdp", "u", "p", "1x1"),
+        ]):
+            with self.assertRaises(R.bridge.BridgeError):
+                R.bridge.start_bridge(*args)
+
+
+class BridgeCap(unittest.TestCase):
+    """Per-uid concurrent-bridge cap prevents display-slot exhaustion (DoS)."""
+    def test_counter_caps_per_uid(self):
+        ctr = R._BridgeCounter()
+        got = [ctr.acquire(1000) for _ in range(R.MAX_BRIDGES_PER_UID + 2)]
+        self.assertEqual(got.count(True), R.MAX_BRIDGES_PER_UID)   # exactly the cap
+        self.assertFalse(got[-1])                                  # excess refused
+        ctr.release(1000)
+        self.assertTrue(ctr.acquire(1000))                         # a release frees one
+        self.assertTrue(ctr.acquire(1001))                         # a different uid is independent
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

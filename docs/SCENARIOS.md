@@ -44,6 +44,22 @@ real desktop.
 A second monitor attached to your *own* logged-in session (not the console, not a separate
 login). Same rendering path as the console; requires you to be that logged-in user.
 
+## Remote host (RDP into another machine)
+
+Turns the plugin into a browser RDP client for **other hosts on the network** — a Windows
+box, another Linux RDP server, a lab VM. Pick "Remote host", enter the target's IPv4
+address, port (default 3389), and the RDP username/password **for that host**, then
+connect. The FreeRDP 3 bridge dials the target and renders it in the browser exactly like
+the local scenarios; the credentials you type are used only for that connection and are
+never stored.
+
+Because the target is browser-chosen, this is the one path that can reach off-box, so it is
+**fail-closed and admin-gated by policy**: the relay only dials hosts an administrator has
+put on the allow-list `EDY_RDP_REMOTE_ALLOW` in `/etc/default/edy-rdp` (empty = the feature
+is off). See [ARCHITECTURE.md](ARCHITECTURE.md) and the security notes in
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md) for how SSRF, credential-exfiltration, and MITM are
+constrained (IPv4-literal targets only, per-connection credentials, `/cert:tofu` pinning).
+
 ## Session tracking
 
 The **Active Sessions** tab reads the relay's registry: each row is a live session with

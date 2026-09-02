@@ -22,7 +22,9 @@
         virtual:  { port: "3389", mode: "extend",
             note: "A new virtual monitor inside your session — an empty desktop, not a copy of the screen." },
         console:  { port: "3389", mode: "mirror-primary", admin: true,
-            note: "A live mirror of the physical screen. Requires administrative access." }
+            note: "A live mirror of the physical screen. Requires administrative access." },
+        remote:   { port: "3389", mode: null, remote: true,
+            note: "RDP into another host on the network. Enter its address and your RDP credentials for that host." }
     };
     var CONTROL = "/run/edy-rdp/control.sock";
     var KEEPALIVE_MS = 4000;
@@ -76,6 +78,7 @@
                     // (relay strips it and hands it to the FreeRDP3 bridge, never guacd).
                     var extra = ["scenario=" + params.scenario];
                     if (params.rdpcred) extra.push("rdpcred=" + params.rdpcred);
+                    if (params.remotehost) extra.push("remotehost=" + params.remotehost);
                     if (params.sessiontoken) extra.push("sessiontoken=" + params.sessiontoken);
                     raw(enc.apply(null, ["connect"].concat(vals).concat(extra)));
                     return;
@@ -203,8 +206,12 @@
     function connect() {
         var key = $("target").value, t = TARGETS[key];
         $("go").disabled = true;
-        setStatus(t.admin ? "Proving administrator mode…" : "Registering session…");
-        registerSession(!!t.admin).then(function (reg) {
+        // Remote is admin-gated only if the server sets EDY_RDP_REMOTE_ADMIN_ONLY;
+        // prove admin when the Cockpit session is already elevated (no polkit prompt
+        // for non-admins), otherwise register a plain token and let the relay decide.
+        var needAdmin = !!t.admin || (key === "remote" && isAdmin);
+        setStatus(needAdmin ? "Proving administrator mode…" : "Registering session…");
+        registerSession(needAdmin).then(function (reg) {
             if (t.admin && !reg.admin) {
                 setStatus("Console needs administrative access — turn on Administrative access "
                     + "in Cockpit's header, then retry.", "err");
@@ -218,6 +225,17 @@
                 // browser supplies nothing and never sees a credential.
                 setStatus("Starting your isolated session… (the first connect can take ~20s)");
                 creds = cockpit.resolve({ username: "", password: "" });
+            } else if (key === "remote") {
+                // Remote host RDP: user supplies target + their own credential for that
+                // host. Client-side validation is a hint; the relay authoritatively
+                // validates the IPv4:port and enforces the remote allow-list.
+                var rh = $("host").value.trim();
+                var rp = ($("port").value || "").toString().trim();
+                var ru = $("user").value.trim(), rpw = $("pass").value;
+                if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(rh)) { setStatus("Enter the remote host as an IPv4 address (e.g. 192.168.2.20).", "err"); $("go").disabled = false; return; }
+                if (rp && !/^\d{1,5}$/.test(rp)) { setStatus("Port must be a number between 1 and 65535.", "err"); $("go").disabled = false; return; }
+                if (!ru || !rpw) { setStatus("Enter the RDP username and password for the remote host.", "err"); $("go").disabled = false; return; }
+                creds = cockpit.resolve({ username: ru, password: rpw });
             } else if ($("authmode").value === "manual") {
                 var u = $("user").value.trim(), pw = $("pass").value;
                 if (!u || !pw) { setStatus("Enter the RDP username and password, or switch to automatic sign-in.", "err"); $("go").disabled = false; return; }
@@ -260,9 +278,13 @@
         // relay strips for the bridge — guacd only ever sees a loopback VNC target.
         var rdpcred = t.managed ? null
             : ((cred.username || "") + "" + (cred.password || ""));
+        var remotehost = (key === "remote")
+            ? ($("host").value.trim() + ":" + (($("port").value || "").toString().trim() || "3389"))
+            : null;
         tunnel = new CockpitRelayTunnel({
             width: w, height: h, dpi: 96, scenario: key,
             rdpcred: rdpcred,
+            remotehost: remotehost,               // "ip:port" for the remote scenario (relay-validated)
             sessiontoken: sessiontoken || null,   // end-to-end correlation + gate token
             values: {}
         });
@@ -287,9 +309,11 @@
         };
         client.onstatechange = function (s) {
             if (s === 3) { currentUuid = (tunnel && tunnel.uuid ? String(tunnel.uuid) : "").replace(/^\$/, ""); }
-            if (s === 3) setStatus(key === "isolated"
-                ? "Connected to your isolated desktop."
-                : (key === "console" ? "Connected to the physical console." : "Connected to your virtual monitor."), "ok");
+            if (s === 3) setStatus(
+                key === "isolated" ? "Connected to your isolated desktop."
+                : key === "console" ? "Connected to the physical console."
+                : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
+                : "Connected to your virtual monitor.", "ok");
             else if (s === 5) { if (!errored) setStatus("Disconnected."); teardown(true); }
         };
 
@@ -309,12 +333,17 @@
 
     function refreshUi() {
         var key = $("target").value, manual = $("authmode").value === "manual", t = TARGETS[key];
-        var managed = !!t.managed;
+        var managed = !!t.managed, remote = !!t.remote;
         // Isolated is relay-managed: no sign-in choice and no credential fields.
-        $("authwrap").hidden = managed;
-        $("credwrap").hidden = managed || !manual;
-        $("passwrap").hidden = managed || !manual;
+        // Remote: no gate-key chooser (always your own creds for that host) plus the
+        // host/port fields; the relay enforces the admin-configured remote allow-list.
+        $("authwrap").hidden = managed || remote;
+        $("hostwrap").hidden = !remote;
+        $("portwrap").hidden = !remote;
+        $("credwrap").hidden = remote ? false : (managed || !manual);
+        $("passwrap").hidden = remote ? false : (managed || !manual);
         var extra = managed ? "  You reach your own session; no credentials needed."
+                  : remote ? "  The relay only permits hosts an administrator has allow-listed."
                   : (t.admin && !isAdmin) ? "  ⚠ Needs administrative access."
                   : (manual ? "" : "  The gate key is read from the server; you never see or type it.");
         $("hint").textContent = t.note + extra;

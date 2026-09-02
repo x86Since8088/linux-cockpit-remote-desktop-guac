@@ -1,17 +1,18 @@
 # cockpit-guac-rdp
 
-**Version 1.0.0.20260901** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
+**Version 1.1.0.20260902** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
 
 Browser-based RDP into this host's GNOME desktop, from inside Cockpit, with guacd
 **never exposed on a port** and **no session hijacking**.
 
 ## What it does
 A Cockpit page ("Remote Desktop") that connects to gnome-remote-desktop (grd) and renders
-it in the browser via guacamole-common-js. Three scenarios:
+it in the browser via guacamole-common-js. Four scenarios:
 
 - **Isolated** — your own private, persistent headless GNOME desktop, started on demand.
 - **Virtual monitor** — a second monitor attached to your own logged-in session.
 - **Console** — a mirror of the physical screen (Cockpit-admin only).
+- **Remote host** — RDP into another host on the network (fail-closed, admin allow-listed).
 
 Traffic rides Cockpit's own HTTPS; guacd is reached only through a local relay over an
 AF_UNIX socket. See [docs/SCENARIOS.md](docs/SCENARIOS.md) for screenshots and
@@ -78,6 +79,19 @@ group, the RDP target allow-list, the log level, and the pinned `GUACD_IMAGE`. T
 carry identical built-in defaults, so the file is optional. Apply changes with
 `systemctl restart edy-rdp-relay.service` (and `edy-rdp-guacd.service` for the image).
 
+**Enabling the Remote-host scenario.** It is off by default (fail-closed). Set the hosts
+the relay may RDP into and restart:
+
+```bash
+# in /etc/default/edy-rdp
+EDY_RDP_REMOTE_ALLOW=192.168.2.0/24        # IPv4/CIDR, optional :port (default 3389), :* any port
+# EDY_RDP_REMOTE_ADMIN_ONLY=1              # optional: require Cockpit admin for remote
+```
+```bash
+sudo systemctl restart edy-rdp-relay.service
+```
+Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are accepted.
+
 ## Layout
 | path | purpose |
 |---|---|
@@ -104,7 +118,7 @@ carry identical built-in defaults, so the file is optional. Apply changes with
 
 ## Docs
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — prerequisites + per-distro matrix
-- [docs/SCENARIOS.md](docs/SCENARIOS.md) — the three scenarios, with screenshots
+- [docs/SCENARIOS.md](docs/SCENARIOS.md) — the four scenarios, with screenshots
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the data path and components
 - [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — platform quirks and the fixes/mitigations
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — health checks and symptom→fix

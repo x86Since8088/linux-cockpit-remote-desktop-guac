@@ -25,7 +25,17 @@
           <option value="isolated">Isolated session (Remote Login)</option>
           <option value="virtual">My desktop &mdash; virtual monitor</option>
           <option value="console">Console &mdash; mirrored screen</option>
+          <option value="remote">Remote host (RDP)</option>
         </select>
+      </div>
+      <div class="f" id="hostwrap" hidden>
+        <label for="host">Remote host</label>
+        <input id="host" type="text" name="rdp-remote-host" placeholder="192.168.2.20"
+               autocomplete="off" autocapitalize="off" spellcheck="false" size="15">
+      </div>
+      <div class="f" id="portwrap" hidden>
+        <label for="port">Port</label>
+        <input id="port" type="number" name="rdp-remote-port" min="1" max="65535" value="3389" size="6">
       </div>
       <div class="f" id="authwrap">
         <label for="authmode">Sign in</label>
@@ -65,6 +75,6 @@
     </table>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.0.0.20260901</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.1.0.20260902</span></footer>
 </body>
 </html>

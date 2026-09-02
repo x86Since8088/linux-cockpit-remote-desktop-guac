@@ -28,3 +28,17 @@ EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 -
 
 # Pinned guacd container image (edy-rdp-guacd.service reads this too).
 GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
+
+# --- Remote-host RDP ("Remote host" scenario: jump into another RDP host) --------
+# Which remote hosts the relay may RDP into. This is a SEPARATE, FAIL-CLOSED
+# allow-list (empty = the feature is OFF / deny-all). It is the SSRF control: the
+# user picks the target in the browser, but the relay only dials hosts listed here.
+# Comma/space separated IPv4 or CIDR, each optionally :port (default 3389, :* = any
+# port). The literal 'any' allows any host (use with care). IPv4 only. Examples:
+#   EDY_RDP_REMOTE_ALLOW=192.168.2.0/24            # that subnet, port 3389
+#   EDY_RDP_REMOTE_ALLOW=192.168.2.20:3389,10.0.0.5:3390
+#   EDY_RDP_REMOTE_ALLOW=any:*                     # anywhere, any port (SSRF-open)
+EDY_RDP_REMOTE_ALLOW=
+
+# Set to 1 to require Cockpit administrative access for the remote scenario.
+EDY_RDP_REMOTE_ADMIN_ONLY=0

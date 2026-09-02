@@ -45,6 +45,14 @@ def start_bridge(key, host, port, security, username, password, geom="1600x1000"
     trace_log.info("bridge START key=%s target=%s:%s security=%s user=%s geom=%s "
                    "password=<redacted:%d>", key, host, port, security, username,
                    geom, len(password or ""))
+    # Defense-in-depth: the .req is a newline-delimited KEY=VALUE file, so a newline/CR
+    # in ANY field could forge another key (e.g. HOST=/PORT=) and redirect the dial.
+    # The relay validates client credentials, but re-check every value here so no caller
+    # can inject regardless of path. (NUL would also truncate the shell read.)
+    for _name, _val in (("host", host), ("port", port), ("security", security),
+                        ("username", username), ("password", password), ("geom", geom)):
+        if any(c in str(_val) for c in ("\n", "\r", "\x00")):
+            raise BridgeError("illegal control character in bridge %s" % _name)
     try:
         os.makedirs(BRIDGE_STATE, exist_ok=True)
     except OSError as exc:

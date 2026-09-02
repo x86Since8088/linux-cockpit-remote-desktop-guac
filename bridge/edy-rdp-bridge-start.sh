@@ -32,11 +32,22 @@ KEY="${1:?usage: edy-rdp-bridge-start <KEY>}"
 req="$STATE/$KEY.req"
 [ -r "$req" ] || { echo "no request file $req" >&2; exit 2; }
 
-HOST=""; PORT=""; SECURITY="nla"; USERNAME=""; PASSWORD=""; GEOM="1600x1000"
+# The .req has EXACTLY 6 KEY=VALUE lines. More than that means a value contained a
+# newline and forged an extra key (the relay + bridge.py reject that upstream; this is
+# a cheap last line of defense against .req KEY injection / SSRF). Also take the FIRST
+# value of each key so a later injected duplicate cannot override the intended one.
+[ "$(wc -l < "$req")" -le 6 ] || { echo "malformed request (extra lines) $req" >&2; exit 2; }
+HOST=""; PORT=""; SECURITY=""; USERNAME=""; PASSWORD=""; GEOM=""
 while IFS='=' read -r k v; do case "$k" in
-  HOST) HOST=$v;; PORT) PORT=$v;; SECURITY) SECURITY=$v;;
-  USERNAME) USERNAME=$v;; PASSWORD) PASSWORD=$v;; GEOM) GEOM=$v;; esac
-done < "$req"
+  HOST) [ -z "${HOST_SET:-}" ] && { HOST=$v; HOST_SET=1; } ;;
+  PORT) [ -z "${PORT_SET:-}" ] && { PORT=$v; PORT_SET=1; } ;;
+  SECURITY) [ -z "${SEC_SET:-}" ] && { SECURITY=$v; SEC_SET=1; } ;;
+  USERNAME) [ -z "${USER_SET:-}" ] && { USERNAME=$v; USER_SET=1; } ;;
+  PASSWORD) [ -z "${PASS_SET:-}" ] && { PASSWORD=$v; PASS_SET=1; } ;;
+  GEOM) [ -z "${GEOM_SET:-}" ] && { GEOM=$v; GEOM_SET=1; } ;;
+esac done < "$req"
+[ -n "$SECURITY" ] || SECURITY="nla"
+[ -n "$GEOM" ] || GEOM="1600x1000"
 [ -n "$HOST" ] && [ -n "$PORT" ] || { echo "req missing HOST/PORT" >&2; exit 2; }
 
 # deterministic, collision-checked display + loopback VNC port from KEY
@@ -78,9 +89,25 @@ for i in $(seq 1 25); do [ -e "/tmp/.X11-unix/X$disp" ] && break; sleep 0.2; don
 # CRITICAL: /args-from wants ONE ARGUMENT PER LINE. A space-joined string is taken
 # as a single argument, silently dropping /u,/p,/cert:ignore -> xfreerdp3 hits the
 # interactive certificate prompt with no stdin and dies, leaving a black Xvfb.
+# Certificate policy depends on the target. The LOCAL grd (loopback) is trusted, so
+# /cert:ignore. A REMOTE host is off-box and could be MITM'd on the LAN, so pin its
+# cert trust-on-first-use (/cert:tofu) in a persistent per-boot store: the first
+# connect stores the cert; a LATER changed cert (MITM) is refused. (First-use trust
+# is the TOFU tradeoff — see docs/KNOWN_ISSUES.md; use a pinned CA for higher assurance.)
+case "$HOST" in
+  127.0.0.1|::1|localhost) CERTARG="/cert:ignore" ;;
+  *) CERTARG="/cert:tofu"
+     export XDG_CONFIG_HOME="${EDY_RDP_FREERDP_HOME:-/run/edy-rdp/freerdp}"
+     mkdir -p "$XDG_CONFIG_HOME" 2>/dev/null || true ;;
+esac
+# Security protocol. Local grd uses an explicit protocol (nla / rdstls). A REMOTE
+# host "negotiates": offer NLA+TLS but DISABLE plain RDP-standard security
+# (/sec:rdp:off), so the credential is never sent under weak RDP encryption -- the
+# server picks NLA (Windows) or TLS (e.g. xrdp).
+if [ "$SECURITY" = "negotiate" ]; then SECLINE="/sec:rdp:off"; else SECLINE="/sec:$SECURITY"; fi
 EDY_RDP_ARGS="$(printf '%s\n' \
-  "/v:$HOST:$PORT" "/u:$USERNAME" "/p:$PASSWORD" "/cert:ignore" "/gfx" \
-  "/sec:$SECURITY" "/f" "/size:$GEOM" "/log-level:WARN")"
+  "/v:$HOST:$PORT" "/u:$USERNAME" "/p:$PASSWORD" "$CERTARG" "/gfx" \
+  "$SECLINE" "/f" "/size:$GEOM" "/log-level:WARN")"
 export EDY_RDP_ARGS
 rdplog="$STATE/$KEY.rdplog"
 ( umask 027; : > "$rdplog" ); chgrp edy-rdp "$rdplog" 2>/dev/null || true

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.1.0.20260902 — 2026-09-02
+
+### Added — Remote-host RDP scenario
+- New **"Remote host"** scenario: RDP from the browser into another host on the network
+  (Windows or Linux RDP server), rendered through the same FreeRDP 3 bridge. Enter an IPv4
+  target + port + your RDP credentials for that host.
+- **Fail-closed, admin-configurable allow-list** `EDY_RDP_REMOTE_ALLOW` in
+  `/etc/default/edy-rdp` (empty = feature off / deny-all; `any` = allow-all; IPv4/CIDR[:port]).
+  The relay validates the target to a strict IPv4 literal and checks the allow-list **before**
+  any bridge/slot side-effect — the SSRF gate. Optional `EDY_RDP_REMOTE_ADMIN_ONLY`.
+- Remote credentials are per-connection and never stored; markers are stripped server-side so
+  guacd never sees the target or the credential. The remote leg **negotiates NLA+TLS with plain
+  RDP-standard security disabled** (`/sec:rdp:off`) — Windows uses NLA, other RDP servers use
+  TLS, never weak encryption — and pins the cert with `/cert:tofu` (MITM-on-change detected)
+  vs `/cert:ignore` for the trusted local grd.
+- Verified end-to-end: a container relay RDP'd into a live xrdp host and rendered an
+  interactive remote desktop.
+- 10 new relay unit tests (allow-list matching, deny-before-dial, malformed-target rejection,
+  admin gate); adversarially security-reviewed (KNOWN_ISSUES I33–I35).
+
+### Security hardening (found by the adversarial review)
+- **Fixed a pre-existing SSRF (I36):** a newline in a client-supplied RDP credential could forge
+  `HOST=`/`PORT=` lines in the bridge request file and redirect the dial — affecting the
+  loopback-only `virtual`/`console` paths too, not just remote. Now rejected at three layers
+  (relay credential check, `bridge.py` per-field check, launcher `.req` line-count + first-wins).
+- **Added a per-uid concurrent-bridge cap (I37)** to prevent display-slot exhaustion (DoS).
+
 ## 1.0.0.20260901 — 2026-09-01
 
 First tagged release. Browser-based RDP into a host's GNOME desktop from inside Cockpit,

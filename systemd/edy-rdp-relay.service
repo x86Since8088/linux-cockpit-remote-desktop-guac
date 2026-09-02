@@ -17,13 +17,21 @@ Environment=EDY_RDP_ADMIN_GROUP=sudo
 Environment=EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
 Environment=EDY_RDP_LOG_LEVEL=INFO
 Environment="EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391"
+# Remote-host RDP: empty allow-list = feature OFF / deny-all (fail closed). The
+# fallback below guarantees the flag is bound even on an upgraded host whose
+# conffile-preserved /etc/default/edy-rdp predates these vars.
+Environment=EDY_RDP_REMOTE_ALLOW=
+Environment=EDY_RDP_REMOTE_ADMIN_ONLY=0
 EnvironmentFile=-/etc/default/edy-rdp
 # ${VAR} expands to one argument; $EDY_RDP_ALLOW_ARGS (no braces) is word-split into
-# the repeated --allow-target flags.
+# the repeated --allow-target flags. ${EDY_RDP_REMOTE_ALLOW} MUST be braced (one arg):
+# it is a comma-list, not word-split flags.
 ExecStart=/usr/libexec/edy-rdp/edy_rdp_relay.py \
     --guacd ${EDY_RDP_GUACD} --admin-group ${EDY_RDP_ADMIN_GROUP} \
     --state-file ${EDY_RDP_STATE_FILE} \
     $EDY_RDP_ALLOW_ARGS \
+    --remote-allow ${EDY_RDP_REMOTE_ALLOW} \
+    --remote-admin-only ${EDY_RDP_REMOTE_ADMIN_ONLY} \
     --log-level ${EDY_RDP_LOG_LEVEL}
 NoNewPrivileges=yes
 ProtectSystem=strict

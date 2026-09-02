@@ -20,6 +20,7 @@
 
 import argparse
 import grp
+import ipaddress
 import json
 import logging
 import itertools
@@ -193,6 +194,109 @@ def _username(uid):
 ADMIN_ONLY_SCENARIOS = {"console"}  # mirror of the physical screen (I4)
 ALLOW_TARGETS = None  # set of 'host:port' guacd may dial; None = unrestricted
 KEEPALIVE_SECONDS = 4.0
+
+# Each live bridge consumes one of ~100 Xvfb/VNC display slots. Cap concurrent
+# bridges per uid so one authenticated user cannot exhaust the pool (DoS).
+MAX_BRIDGES_PER_UID = 6
+
+
+class _BridgeCounter:
+    """Per-uid count of live bridges, to bound resource use."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._by_uid = {}
+
+    def acquire(self, uid):
+        with self._lock:
+            n = self._by_uid.get(uid, 0)
+            if n >= MAX_BRIDGES_PER_UID:
+                return False
+            self._by_uid[uid] = n + 1
+            return True
+
+    def release(self, uid):
+        with self._lock:
+            n = self._by_uid.get(uid, 0)
+            if n <= 1:
+                self._by_uid.pop(uid, None)
+            else:
+                self._by_uid[uid] = n - 1
+
+
+BRIDGE_COUNTER = _BridgeCounter()
+
+# --- remote-host RDP scenario (jump into another RDP host on the LAN) ----------
+# The "remote" scenario lets the browser supply an arbitrary target host:port to
+# RDP into. That is an SSRF-class capability (the relay/bridge dials it, and the
+# user's RDP credential is sent there), so it is FAIL-CLOSED: denied unless the
+# target matches an admin-configured allow-list. REMOTE_ALLOW is a list of
+# (ipaddress network | None=any, port:int | None=any-port); [] = deny all.
+REMOTE_ALLOW = []
+REMOTE_ADMIN_ONLY = False       # require proven Cockpit admin for the remote scenario
+REMOTE_DEFAULT_PORT = 3389
+
+
+def parse_remote_allow(spec):
+    """Parse EDY_RDP_REMOTE_ALLOW into [(network|None, port|None)] (deny-list is []).
+    Entry forms (comma/space separated): IP, CIDR, IP:port, CIDR:port, IP:*, CIDR:*,
+    'any', 'any:port', 'any:*'. A missing port defaults to 3389; '*' means any port;
+    'any' means any host. Only IPv4 is supported (colon is the port separator).
+    Empty/unset spec => [] (deny all — fail closed)."""
+    out = []
+    for raw in (spec or "").replace(",", " ").split():
+        item = raw.strip()
+        if not item:
+            continue
+        host_part, port_part = item, None
+        if ":" in item:  # split a trailing :<port|*> only if it looks like one
+            h, _, p = item.rpartition(":")
+            if p == "*" or p.isdigit():
+                host_part, port_part = h, p
+        net = None
+        hp = host_part.strip()
+        if hp.lower() != "any":
+            try:
+                net = ipaddress.ip_network(hp, strict=False)
+            except ValueError:
+                continue                       # skip a malformed entry (fail closed on it)
+            if net.version != 4:
+                continue                       # IPv4 only for remote (see parser note)
+        if port_part is None:
+            port = REMOTE_DEFAULT_PORT
+        elif port_part == "*":
+            port = None
+        else:
+            try:
+                port = int(port_part)
+            except ValueError:
+                continue
+        out.append((net, port))
+    return out
+
+
+def remote_target_allowed(host, port):
+    """True iff (host, port) is permitted by REMOTE_ALLOW. host MUST be an IPv4
+    literal (callers validate); a non-literal host is never allowed (no DNS
+    rebinding). Empty allow-list denies everything (fail closed)."""
+    if not REMOTE_ALLOW:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.version != 4:               # IPv4 only for remote (matches the parser)
+        return False
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    for net, aport in REMOTE_ALLOW:
+        if net is not None and (ip.version != net.version or ip not in net):
+            continue
+        if aport is not None and aport != p:
+            continue
+        return True
+    return False
 
 # Per-user isolated headless sessions (docs/KNOWN_ISSUES I29). The "isolated"
 # scenario routes to the caller's OWN headless GNOME session on a loopback port,
@@ -386,10 +490,12 @@ class Connection:
         # its loopback VNC. Torn down on disconnect; the backing desktop persists.
         self.bridge_key = None
         self.bridge_proc = None
+        self._bridge_counted = False  # holds a per-uid bridge slot (released on close)
         self.desktop_id = None       # PRIMARY KEY of the virtual desktop (also the slot)
         self.desktop_created = None  # that desktop's creation time
         self.session_token = None    # end-to-end correlation/gate token (registered)
         self.session_token_admin = False
+        self.remote_target = None    # browser-supplied "ip:port" for the remote scenario
         self.req_w = None
         self.req_h = None
         # tracing identity + data-plane op counters (summarized, not per-line)
@@ -466,17 +572,21 @@ class Connection:
         scenario = None
         rdpcred = None
         sessiontoken = None
-        _markers = ("scenario=", "rdpcred=", "sessiontoken=")
+        remotehost = None
+        _markers = ("scenario=", "rdpcred=", "sessiontoken=", "remotehost=")
         while elements and any(elements[-1].startswith(p) for p in _markers):
             m = elements[-1]
             if m.startswith("scenario="):
                 scenario = m.split("=", 1)[1]
             elif m.startswith("sessiontoken="):
                 sessiontoken = m.split("=", 1)[1]
+            elif m.startswith("remotehost="):
+                remotehost = m.split("=", 1)[1]   # "<ip>:<port>", validated in _grd_target
             else:
                 rdpcred = m.split("=", 1)[1]   # "<user>\x1f<pass>", stripped, never forwarded
             elements = elements[:-1]
         self.scenario = scenario
+        self.remote_target = remotehost
 
         # Validate the registered desktop-session token (if present). It is BOUND to
         # the caller's uid, so a leaked token is useless to another user (anti-hijack,
@@ -496,7 +606,11 @@ class Connection:
                        scenario, _cu, len(_cp))
         else:
             self.trace("up connect scenario=%s (no client credential)", scenario)
-        if scenario in ADMIN_ONLY_SCENARIOS:
+        # remote RDP is optionally admin-gated (EDY_RDP_REMOTE_ADMIN_ONLY); console
+        # is always admin-gated (I4). The gate keys on the SERVER-stripped scenario.
+        admin_required = (scenario in ADMIN_ONLY_SCENARIOS
+                          or (scenario == "remote" and REMOTE_ADMIN_ONLY))
+        if admin_required:
             # PROVEN Cockpit administrator mode (the token was elevated via the
             # superuser challenge), not the cosmetic client check nor mere sudo-group
             # membership. is_admin(sudo) is accepted as a fallback ONLY for a
@@ -507,7 +621,7 @@ class Connection:
             if not (proven or fallback):
                 self.trace("REFUSE admin gate: scenario=%s token_admin=%s no fallback",
                            scenario, self.session_token_admin)
-                raise Refuse("Console needs administrative access — turn on "
+                raise Refuse("This scenario needs administrative access — turn on "
                              "Administrative access in Cockpit's header, then reconnect.")
             self.trace("admin gate PASSED for scenario=%s (proven=%s fallback=%s)",
                        scenario, proven, fallback)
@@ -526,6 +640,18 @@ class Connection:
             self.trace("target %s:%s security=%s cred=client-supplied user=%s "
                        "desktop=%s", host, port, security, username, desktop_id)
 
+        # The username/password are written VERBATIM into the newline-delimited bridge
+        # .req file (bridge.py) and consumed by a KEY=VALUE shell loop. An embedded
+        # newline/CR in a CLIENT-supplied credential could forge a HOST=/PORT=/SECURITY=
+        # line and coerce the bridge into dialing an ARBITRARY host — SSRF that bypasses
+        # the remote allow-list, and (via scenario=virtual/console, which also take a
+        # client credential) escapes the loopback-only guarantee entirely. Reject any
+        # newline/CR/NUL in either field before it can reach the .req.
+        for _fld, _val in (("username", username), ("password", password)):
+            if any(c in _val for c in ("\n", "\r", "\x00")):
+                self.trace("REFUSE control character in RDP %s", _fld)
+                raise Refuse("the RDP %s contains an illegal control character" % _fld)
+
         self.desktop_id = desktop_id
         self.desktop_created = desktop_created
         # Single-slot takeover: terminate any existing connection to THIS virtual
@@ -533,6 +659,13 @@ class Connection:
         # access and the backing grd session (one client at a time for headless) is
         # free for us. The desktop itself persists across the handover.
         DESKTOP_SLOTS.claim(desktop_id, self)
+
+        # Bound per-uid resource use: refuse before spawning a bridge if this uid
+        # already holds the maximum. Released in the teardown finally.
+        if not BRIDGE_COUNTER.acquire(self.uid):
+            self.trace("REFUSE bridge cap reached for uid=%d", self.uid)
+            raise Refuse("too many concurrent sessions; disconnect one and retry")
+        self._bridge_counted = True
 
         geom = "%dx%d" % (self.req_w or 1600, self.req_h or 1000)
         # bridge instance key is per-connection-unique (filesystem-safe) so a takeover
@@ -582,7 +715,54 @@ class Connection:
                 created = None
             return ("127.0.0.1", str(info["PORT"]), "nla",
                     (info["USER"], info["CRED"]), did, created)
+        if scenario == "remote":
+            # RDP into another host on the network. The target is BROWSER-supplied,
+            # so this is the one path that can dial off-box -> it is fail-closed
+            # against the admin-configured allow-list, and validated to an IPv4
+            # literal (no hostnames -> no DNS rebinding of the CIDR check; no
+            # metacharacters -> no bridge .req injection). relay_cred is None so the
+            # user's OWN credential is used and NO relay-managed credential is ever
+            # handed to a foreign host. This gate runs here, before DESKTOP_SLOTS
+            # and start_bridge, so a denied target never dials out.
+            host, port = self._parse_remote_target(self.remote_target)
+            if not remote_target_allowed(host, port):
+                self.trace("REFUSE remote target %s:%d not in allow-list", host, port)
+                raise Refuse("remote host %s:%d is not permitted; an administrator must "
+                             "add it to EDY_RDP_REMOTE_ALLOW in /etc/default/edy-rdp"
+                             % (host, port))
+            self.trace("remote target %s:%d permitted", host, port)
+            # "negotiate": the bridge offers NLA+TLS (plain RDP-standard security
+            # disabled) so the credential is never sent under weak RDP encryption --
+            # Windows selects NLA, other RDP servers (e.g. xrdp) select TLS.
+            return (host, str(port), "negotiate", None,
+                    "remote:%s:%d:%d" % (host, port, self.uid), None)
         raise Refuse("unknown scenario %r" % scenario)
+
+    def _parse_remote_target(self, spec):
+        """Validate a browser-supplied remote target to a strict IPv4:port. Rejects
+        hostnames (DNS-rebinding), IPv6/ambiguous colons, and any metacharacter or
+        newline (the value is written as a KEY=VALUE line into the bridge .req file,
+        so a newline could forge PASSWORD/SECURITY keys). Raises Refuse on anything off."""
+        if not spec:
+            raise Refuse("remote scenario needs a host (ip:port)")
+        if any(c not in "0123456789.:" for c in spec):
+            raise Refuse("invalid remote host: only an IPv4 address and port are allowed")
+        host, sep, port = spec.rpartition(":")
+        if not sep or not host or not port:
+            raise Refuse("remote host must be in the form ip:port")
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            raise Refuse("remote host must be an IPv4 address")
+        if ip.version != 4:
+            raise Refuse("remote host must be IPv4")
+        try:
+            p = int(port)
+        except ValueError:
+            raise Refuse("remote port must be numeric")
+        if not (1 <= p <= 65535):
+            raise Refuse("remote port out of range")
+        return str(ip), p
 
     def _inject_vnc_target(self, connect_elements, info):
         """Rewrite guacd's VNC `connect` to dial the bridge's loopback VNC endpoint.
@@ -768,6 +948,9 @@ def handle(client, table, live, guacd_addr, admin_group):
             log.info("uid=%d bridge %s torn down", uid, conn.bridge_key)
         if conn.desktop_id:
             DESKTOP_SLOTS.release(conn.desktop_id, conn)
+        if conn._bridge_counted:
+            BRIDGE_COUNTER.release(conn.uid)
+            conn._bridge_counted = False
         conn.trace("CLOSE after %.1fs session=%s desktop=%s up={%s} down={%s}",
                    time.monotonic() - conn.t_open,
                    (conn.uuid or "-")[:12], conn.desktop_id,
@@ -926,6 +1109,12 @@ def main(argv=None):
                     help="host:port guacd may dial (repeatable). Empty = unrestricted. "
                          "Recommended: --allow-target host.containers.internal:3389 "
                          "--allow-target host.containers.internal:3390 ...:3391")
+    ap.add_argument("--remote-allow", default="",
+                    help="comma/space list of IPv4/CIDR[:port] hosts permitted for the "
+                         "'remote' scenario (RDP into another host). Empty = deny all "
+                         "(fail closed); 'any' = allow all; default port 3389, ':*' = any port.")
+    ap.add_argument("--remote-admin-only", default="0",
+                    help="1/true/yes/on => require proven Cockpit admin for the 'remote' scenario")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
@@ -933,8 +1122,16 @@ def main(argv=None):
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     guacd_addr = parse_guacd(args.guacd)
-    global ALLOW_TARGETS
+    global ALLOW_TARGETS, REMOTE_ALLOW, REMOTE_ADMIN_ONLY
     ALLOW_TARGETS = set(args.allow_target) or None
+    REMOTE_ALLOW = parse_remote_allow(args.remote_allow)
+    REMOTE_ADMIN_ONLY = str(args.remote_admin_only).strip().lower() in ("1", "true", "yes", "on")
+    if REMOTE_ALLOW:
+        log.info("remote scenario ENABLED: %d allow-list entr%s, admin_only=%s",
+                 len(REMOTE_ALLOW), "y" if len(REMOTE_ALLOW) == 1 else "ies",
+                 REMOTE_ADMIN_ONLY)
+    else:
+        log.info("remote scenario disabled (EDY_RDP_REMOTE_ALLOW empty = deny all)")
     table = SessionRegistry(args.state_file)
     live = LiveConnections()
 

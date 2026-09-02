@@ -93,3 +93,17 @@ relay routes it to the caller's OWN headless GNOME session:
 Isolation is by construction: the relay injects the target from the kernel-supplied uid, so a caller
 can only reach their own session. The headless RDP ports are loopback-only (nft). The reaper stops an
 idle desktop once its registry entry is pruned (reconnectable until then).
+
+## Remote-host scenario (RDP into another machine)
+The three local scenarios all resolve to a loopback grd target. The **remote** scenario is
+the one case where the target is off-box and browser-chosen: the plugin sends a
+`remotehost=<ipv4>:<port>` marker (through Guacamole `enc()`, stripped server-side like the
+other markers) plus the user's `rdpcred`. The relay resolves it in `_grd_target` and — before
+any `DESKTOP_SLOTS.claim` or `bridge.start_bridge` side effect — validates it to a strict
+IPv4 literal and checks it against the admin-configured `EDY_RDP_REMOTE_ALLOW` (fail-closed:
+empty = deny all). Only then does the FreeRDP 3 bridge dial the remote host (with `/cert:tofu`
+instead of `/cert:ignore`), still re-serving over the loopback VNC leg so guacd never dials
+the remote host itself. The user's credential is used only for that connection and is never a
+relay-managed credential. This keeps the guacd-only-dials-loopback and single-target-decision
+invariants intact while adding an off-box capability that is gated, not open. See
+KNOWN_ISSUES I33–I35 for the SSRF/injection/MITM analysis.
