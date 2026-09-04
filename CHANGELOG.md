@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1.20260903 — 2026-09-03
+
+### Fixed
+- **Clear error when the physical screen is locked (I38).** grd refuses to mirror a locked
+  desktop (`Session creation inhibited`), which reached the client as an opaque
+  `Broken pipe` / `ERRCONNECT_CONNECT_TRANSPORT_FAILED`. The relay now detects a locked
+  active graphical seat session on a console/virtual bridge failure and returns
+  *"the physical screen is locked — unlock it … then reconnect."* The check fails open
+  (never blocks a working connection) and does not affect the isolated scenario.
+
 ## 1.1.0.20260902 — 2026-09-02
 
 ### Added — Remote-host RDP scenario

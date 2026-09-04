@@ -192,6 +192,9 @@ def _username(uid):
 # ---------------------------------------------------------------------------
 
 ADMIN_ONLY_SCENARIOS = {"console"}  # mirror of the physical screen (I4)
+# These screencast the LOCAL seat session; grd refuses ("Session creation inhibited")
+# when that screen is LOCKED, which reaches the client as an opaque transport error.
+LOCAL_SEAT_SCENARIOS = {"console", "virtual"}
 ALLOW_TARGETS = None  # set of 'host:port' guacd may dial; None = unrestricted
 KEEPALIVE_SECONDS = 4.0
 
@@ -296,6 +299,40 @@ def remote_target_allowed(host, port):
         if aport is not None and aport != p:
             continue
         return True
+    return False
+
+
+def _session_locked_props(props_text):
+    """True iff `loginctl show-session` output describes an ACTIVE graphical seat
+    session that is LOCKED (grd refuses to mirror a locked screen)."""
+    d = {}
+    for line in props_text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            d[k] = v
+    return (bool(d.get("Seat")) and d.get("Active") == "yes"
+            and d.get("Type") in ("wayland", "x11") and d.get("LockedHint") == "yes")
+
+
+def physical_session_locked():
+    """Best-effort: is the active graphical seat session locked? Used ONLY to turn an
+    opaque bridge transport failure into a clear message, so it FAILS OPEN (returns
+    False) whenever the lock state cannot be determined — it never blocks a connection."""
+    try:
+        listed = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                                capture_output=True, text=True, timeout=3)
+        for ln in listed.stdout.splitlines():
+            parts = ln.split()
+            if not parts:
+                continue
+            props = subprocess.run(
+                ["loginctl", "show-session", parts[0],
+                 "-p", "Type", "-p", "Active", "-p", "Seat", "-p", "LockedHint"],
+                capture_output=True, text=True, timeout=3)
+            if _session_locked_props(props.stdout):
+                return True
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
     return False
 
 # Per-user isolated headless sessions (docs/KNOWN_ISSUES I29). The "isolated"
@@ -676,6 +713,13 @@ class Connection:
                                              username, password, geom=geom)
         except bridge.BridgeError as exc:
             self.trace("bridge FAILED key=%s: %s", key, exc)
+            # A locked physical screen makes grd refuse the mirror/virtual session
+            # ("Session creation inhibited"), which the client only sees as an opaque
+            # transport/broken-pipe error. If that is the case, say so plainly.
+            if scenario in LOCAL_SEAT_SCENARIOS and physical_session_locked():
+                self.trace("bridge FAILED with locked physical screen (scenario=%s)", scenario)
+                raise Refuse("the physical screen is locked — unlock it on the machine "
+                             "(or disable auto-lock), then reconnect.")
             raise Refuse("could not start desktop bridge: %s" % exc)
         self.bridge_key = key
         self.bridge_proc = proc

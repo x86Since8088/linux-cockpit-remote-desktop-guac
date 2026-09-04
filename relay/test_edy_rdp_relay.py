@@ -371,5 +371,25 @@ class BridgeCap(unittest.TestCase):
         self.assertTrue(ctr.acquire(1001))                         # a different uid is independent
 
 
+class LockedScreenHint(unittest.TestCase):
+    """The console/virtual bridge failure is re-labelled 'screen is locked' only for an
+    ACTIVE GRAPHICAL SEAT session that is LOCKED — never a TTY, seatless, or inactive one."""
+    def test_locked_graphical_seat(self):
+        self.assertTrue(R._session_locked_props(
+            "Type=wayland\nActive=yes\nSeat=seat0\nLockedHint=yes\n"))
+        self.assertTrue(R._session_locked_props(
+            "Type=x11\nActive=yes\nSeat=seat0\nLockedHint=yes\n"))
+
+    def test_not_flagged(self):
+        for props in (
+            "Type=wayland\nActive=yes\nSeat=seat0\nLockedHint=no\n",   # unlocked
+            "Type=tty\nActive=yes\nSeat=seat0\nLockedHint=yes\n",      # a TTY, not the screen
+            "Type=wayland\nActive=yes\nSeat=\nLockedHint=yes\n",       # no seat
+            "Type=wayland\nActive=no\nSeat=seat0\nLockedHint=yes\n",   # not active
+            "",                                                        # empty
+        ):
+            self.assertFalse(R._session_locked_props(props))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

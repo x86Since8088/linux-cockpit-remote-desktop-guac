@@ -1,6 +1,6 @@
 # cockpit-guac-rdp
 
-**Version 1.1.0.20260902** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
+**Version 1.1.1.20260903** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
 
 Browser-based RDP into this host's GNOME desktop, from inside Cockpit, with guacd
 **never exposed on a port** and **no session hijacking**.

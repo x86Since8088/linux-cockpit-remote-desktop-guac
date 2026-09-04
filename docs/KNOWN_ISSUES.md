@@ -526,3 +526,14 @@ with no bridge dialed, while clean credentials still connect.
 Each bridge consumes one of ~100 Xvfb/VNC display slots; an authenticated user could open many
 connections and exhaust the pool. **Fix:** a per-uid concurrent-bridge cap (`MAX_BRIDGES_PER_UID`,
 default 6) checked before `bridge.start_bridge` and released on teardown (`BridgeCap` test).
+
+### I38 · Console/virtual mirror fails on a LOCKED screen with an opaque error · Sev L · MITIGATED
+grd 50.2 refuses to create a screencast session of a locked desktop (`Session creation
+inhibited`); it accepts the TCP connection then drops it, so xfreerdp3 reports only a
+`Broken pipe` / `ERRCONNECT_CONNECT_TRANSPORT_FAILED` transport error — which the relay used
+to surface verbatim (very confusing). **Mitigation:** on a bridge failure for a local-seat
+scenario (console/virtual), the relay checks `loginctl` for an active graphical seat session
+with `LockedHint=yes` and, if found, returns "the physical screen is locked — unlock it …"
+instead of the raw error. The check FAILS OPEN (never blocks a connection; only relabels a
+failure). Fix the underlying condition by unlocking the session (`loginctl unlock-session`)
+or disabling auto-lock. BY-DESIGN in grd — the mirror cannot display a locked screen.

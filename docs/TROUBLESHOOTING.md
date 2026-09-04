@@ -45,6 +45,14 @@ restart. **Reload the Cockpit tab**; a fresh page registers a fresh token.
 **Administrative access** in Cockpit's header (top-right) and reconnect. The gate is
 enforced server-side by an elevation-proven token, not a client check (I4).
 
+**Console/virtual fails: "the physical screen is locked" (or a raw `Broken pipe` /
+`ERRCONNECT_CONNECT_TRANSPORT_FAILED`).** grd refuses to create a screencast session of a
+LOCKED screen (`Session creation inhibited`), so the mirror/virtual scenario cannot start.
+**Unlock the physical session** (`loginctl unlock-session <id>`, or at the machine) and
+reconnect; consider disabling auto-lock (`gsettings set org.gnome.desktop.screensaver
+lock-enabled false`) if it recurs. The relay detects the lock on failure and returns the
+clear message; the isolated scenario is unaffected (it is a separate headless session).
+
 **Isolated fails: "could not start isolated session".** The caller already has a
 non-headless GNOME desktop on a seat (the guard refuses to hijack a seat session). The
 reason is written to `/run/edy-rdp/headless/<uid>.err`. A true isolated-while-locally-
