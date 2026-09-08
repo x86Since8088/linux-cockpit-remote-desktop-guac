@@ -377,6 +377,27 @@ WLVNC_STATE_DIR = "/run/edy-rdp/waylandvnc"
 WLVNC_START_TIMEOUT = 90
 
 
+def unlock_seat_session(uid):
+    """Unlock the caller's own locked graphical seat session, via the privileged
+    oneshot unit. Returns (ok, detail).
+
+    The relay runs unprivileged (edy-relay); the unit is what holds the
+    privilege, and the polkit grant lets this account start only that unit
+    family. The helper behind it refuses any session not owned by uid."""
+    unit = "edy-rdp-unlock@%d.service" % uid
+    try:
+        subprocess.run(["systemctl", "start", unit], check=True, timeout=30,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").strip()[:200]
+        # exit 3 from the helper means "nothing matched" -- not an error the
+        # operator can act on by retrying, so say what it actually means.
+        return (False, detail or "no active, locked, graphical session for this user")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return (False, "unlock helper failed: %s" % exc)
+    return (True, "physical session unlocked")
+
+
 def ensure_waylandvnc_session(uid):
     """Start (idempotently) the caller's per-user headless WAYLAND session and
     return {'HOST','PORT'}.
@@ -1209,7 +1230,8 @@ def control_server(srv, table, live, admin_group, path_label=""):
             except ValueError:
                 resp = {"ok": False, "error": "invalid JSON"}
             else:
-                resp = handle_control(req, uid, table, live, admin, SESSION_TOKENS)
+                resp = handle_control(req, uid, table, live, admin, SESSION_TOKENS,
+                                      unlock=unlock_seat_session)
             conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
         except OSError:
             pass

@@ -1,0 +1,8 @@
+[Unit]
+Description=edy-rdp unlock the caller's own locked graphical seat session (uid %i)
+# %i is the numeric uid of the requesting user.
+
+[Service]
+Type=oneshot
+ExecStart=@LIBEXEC@/edy-rdp-unlock %i
+TimeoutStartSec=30

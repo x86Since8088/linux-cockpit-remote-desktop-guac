@@ -87,5 +87,49 @@ class Misc(unittest.TestCase):
         self.assertFalse(C.handle_control("nope", 0, SR.SessionRegistry(), C.LiveConnections(), True)["ok"])
 
 
+class UnlockOp(unittest.TestCase):
+    """Unlocking the seat is the only way to resume a locked LOCAL session --
+    the greeter opens a new one and grd refuses console/virtual while locked --
+    so the op exists, but it is admin-only and the side effect is injected so
+    handle_control stays pure."""
+
+    def setUp(self):
+        self.calls = []
+
+    def _unlock(self, uid):
+        self.calls.append(uid)
+        return (True, "physical session unlocked")
+
+    def _ctl(self, admin, unlock=None):
+        # registry and live are untouched by this op; passing None proves it.
+        return C.handle_control({"op": "unlock"}, 1000, None, None,
+                                admin, None, unlock)
+
+    def test_refused_without_admin(self):
+        r = self._ctl(False, self._unlock)
+        self.assertFalse(r["ok"])
+        self.assertIn("administrative access", r["error"])
+        self.assertEqual(self.calls, [], "must not act when the gate refuses")
+
+    def test_admin_calls_the_injected_unlock_with_the_peer_uid(self):
+        r = self._ctl(True, self._unlock)
+        self.assertTrue(r["ok"], r)
+        # the uid comes from SO_PEERCRED, never from the request body
+        self.assertEqual(self.calls, [1000])
+
+    def test_absent_implementation_is_reported_not_crashed(self):
+        r = self._ctl(True, None)
+        self.assertFalse(r["ok"])
+        self.assertIn("not available", r["error"])
+
+    def test_failure_detail_is_passed_through(self):
+        def failing(uid):
+            return (False, "no active, locked, graphical session for this user")
+        r = self._ctl(True, failing)
+        self.assertFalse(r["ok"])
+        self.assertIn("no active, locked", r["detail"])
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

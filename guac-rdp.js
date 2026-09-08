@@ -64,6 +64,37 @@
 
     function $(id) { return document.getElementById(id); }
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
+
+    // Unlocking the seat is the ONLY way to resume the session the user left.
+    // The greeter starts a new one; Wayland VNC and Isolated are separate
+    // desktops; grd refuses console/virtual outright while locked. So when that
+    // refusal appears, put the action next to the message instead of describing
+    // a command and leaving the operator to go find a terminal.
+    function offerUnlock(retryKey) {
+        if (!isAdmin) return;                     // the relay refuses it anyway
+        var bar = $("status");
+        if (bar.querySelector(".unlock-retry")) return;   // one button, not one per failure
+        var b = document.createElement("button");
+        b.className = "unlock-retry";
+        b.style.marginLeft = "0.6rem";
+        b.textContent = "Unlock the physical session and retry";
+        b.addEventListener("click", function () {
+            b.disabled = true;
+            setStatus("Unlocking the physical session\u2026");
+            controlRequest({ op: "unlock" }).then(function (r) {
+                if (r && r.ok) {
+                    setStatus("Unlocked. Reconnecting\u2026");
+                    window.setTimeout(function () { connect(retryKey); }, 500);
+                } else {
+                    var why = (r && (r.detail || r.error)) || "the server refused";
+                    setStatus("Could not unlock: " + why, "err");
+                }
+            }, function (e) {
+                setStatus("Could not unlock: " + e, "err");
+            });
+        });
+        bar.appendChild(b);
+    }
     var enc = GuacProto.enc, drain = GuacProto.drain;
 
     // ---- a Guacamole.Tunnel over a Cockpit unix stream channel --------------
@@ -319,6 +350,7 @@
         var errored = false;
         function explain(prefix, e) {
             errored = true;
+            var lockedSeat = false;
             var msg = (e && e.message) || "unknown error";
             if (/auth|credential|logon/i.test(msg))
                 msg += "  — this is the RDP gate key for port " + t.port + ", not your own login.";
@@ -331,18 +363,23 @@
             // wearing this message too; the greeter attempt then reports the real
             // problem itself rather than silently retrying forever.
             if (LOCKED_SEAT_RE.test(msg) && (key === "console" || key === "virtual")) {
+                lockedSeat = true;   // the button is added AFTER setStatus below,
+                                     // which replaces the status text and would
+                                     // otherwise remove it again immediately.
                 // Deliberately NOT an automatic fallback to the greeter. The
                 // greeter starts a NEW session; it cannot attach to the locked
                 // one, so it does not get you back to the desktop you left --
                 // you would be resetting your login rather than resuming it.
                 // Say what actually works and let the operator choose.
                 msg += "  The Login screen option opens a NEW session rather than "
-                     + "unlocking this one. To resume the locked session it must be "
-                     + "unlocked at the machine (or with `loginctl unlock-session`). "
-                     + "For a separate desktop of your own that is unaffected by the "
-                     + "lock, use Wayland VNC or Isolated session.";
+                     + "unlocking this one. Unlock below to resume the session you "
+                     + "left, or use Wayland VNC or Isolated session for a separate "
+                     + "desktop the lock does not affect.";
             }
-            setStatus(prefix + ": " + msg, "err"); teardown(true);
+            setStatus(prefix + ": " + msg, "err");
+            // Offer the one action that actually resumes THIS session.
+            if (lockedSeat) offerUnlock(key);
+            teardown(true);
         }
         tunnel.onerror = function (e) { explain("Relay error", e); };
         client.onerror = function (e) { explain("RDP error", e); };

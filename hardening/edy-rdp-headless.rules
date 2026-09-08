@@ -6,7 +6,8 @@ polkit.addRule(function(action, subject) {
         subject.user == "edy-relay") {
         var unit = action.lookup("unit");
         if (unit && (unit.indexOf("edy-rdp-headless@") === 0 ||
-                     unit.indexOf("edy-rdp-waylandvnc@") === 0)) {
+                     unit.indexOf("edy-rdp-waylandvnc@") === 0 ||
+                       unit.indexOf("edy-rdp-unlock@") === 0)) {
             return polkit.Result.YES;
         }
     }
