@@ -145,6 +145,7 @@ def prune_via_control(control_path, now, greeter_ttl):
 
 # ---- per-user isolated headless sessions (I29) --------------------------------
 HEADLESS_PORT_BASE = 33000
+WLVNC_PORT_BASE = 34000
 HEADLESS_UID_BASE = 1000
 
 
@@ -157,6 +158,48 @@ def _running_headless_uids():
 
 def _port_has_connection(port):
     return (":%d " % port) in _run(["ss", "-tnH", "state", "established"])
+
+
+def _running_waylandvnc_uids():
+    out = _run(["systemctl", "list-units", "edy-rdp-waylandvnc@*",
+                "--no-legend", "--plain", "--state=active"])
+    return [int(m.group(1)) for m in
+            re.finditer(r"edy-rdp-waylandvnc@(\d+)\.service", out)]
+
+
+def reap_idle_waylandvnc(control_path, dry_run=False):
+    """Stop a user's headless Wayland (sway + wayvnc) session once it is idle.
+
+    Exactly the policy already applied to isolated GNOME sessions, and it was
+    missing when the scenario was added: without it a sway and a wayvnc survive
+    every disconnect forever, so repeated connects leave a pile of desktops that
+    nothing ever collects. Each is smaller than a gnome-shell, but unbounded.
+
+    Same fail-safe as the headless reaper: with no registry view we cannot tell
+    an idle desktop from a reconnectable one, so do nothing rather than tear down
+    a session someone means to resume."""
+    resp = _control_call(control_path, {"op": "list"})
+    if not resp or not resp.get("ok"):
+        print("  wayland-vnc reap skipped: control list unavailable")
+        return 0
+    keep = set()
+    for s in resp.get("sessions", []):
+        if s.get("scenario") == "wayland-vnc":   # active OR recently disconnected
+            keep.add(s.get("uid"))
+    stopped = 0
+    for uid in _running_waylandvnc_uids():
+        if uid in keep:
+            continue
+        port = WLVNC_PORT_BASE + uid - HEADLESS_UID_BASE
+        if _port_has_connection(port):
+            continue                              # a client is connected right now
+        if dry_run:
+            print("  DRY-RUN would stop idle wayland-vnc session uid=%d" % uid)
+        else:
+            _run(["systemctl", "stop", "edy-rdp-waylandvnc@%d.service" % uid])
+            print("  stopped idle wayland-vnc session uid=%d" % uid)
+        stopped += 1
+    return stopped
 
 
 def reap_idle_headless(control_path, dry_run=False):
@@ -212,8 +255,10 @@ def main(argv=None):
 
     g = reap_greeters(ttl=args.greeter_ttl, dry_run=args.dry_run)
     h = reap_idle_headless(args.control, dry_run=args.dry_run)
+    w = reap_idle_waylandvnc(args.control, dry_run=args.dry_run)
     print("reaper: pruned %d registry entries, terminated %d greeters, "
-          "stopped %d idle headless sessions" % (len(reaped), g, h))
+          "stopped %d idle headless and %d idle wayland-vnc sessions"
+          % (len(reaped), g, h, w))
     return 0
 
 
