@@ -266,6 +266,7 @@ BRIDGE_COUNTER = _BridgeCounter()
 REMOTE_ALLOW = []
 REMOTE_ADMIN_ONLY = False       # require proven Cockpit admin for the remote scenario
 REMOTE_DEFAULT_PORT = 3389
+VNC_DEFAULT_PORT = 5900     # direct VNC scenario (no bridge)
 
 
 def parse_remote_allow(spec):
@@ -674,8 +675,11 @@ class Connection:
             self.trace("up connect scenario=%s (no client credential)", scenario)
         # remote RDP is optionally admin-gated (EDY_RDP_REMOTE_ADMIN_ONLY); console
         # is always admin-gated (I4). The gate keys on the SERVER-stripped scenario.
+        # "vnc" dials an arbitrary host by the same mechanism as "remote", so it
+        # inherits the same gate. Giving it a weaker door would make the remote
+        # scenario's admin requirement bypassable by picking the other option.
         admin_required = (scenario in ADMIN_ONLY_SCENARIOS
-                          or (scenario == "remote" and REMOTE_ADMIN_ONLY))
+                          or (scenario in ("remote", "vnc") and REMOTE_ADMIN_ONLY))
         if admin_required:
             # PROVEN Cockpit administrator mode (the token was elevated via the
             # superuser challenge), not the cosmetic client check nor mere sudo-group
@@ -691,6 +695,32 @@ class Connection:
                              "Administrative access in Cockpit's header, then reconnect.")
             self.trace("admin gate PASSED for scenario=%s (proven=%s fallback=%s)",
                        scenario, proven, fallback)
+
+        # A VNC target needs no bridge. The FreeRDP3 bridge exists solely to turn
+        # RDP into VNC for guacd; guacd already speaks VNC, so the operator's target
+        # is handed to it directly. This is also the only scenario where guacd talks
+        # to something that is not loopback, which is why it reuses the remote
+        # allow-list rather than introducing a second, laxer one.
+        if scenario == "vnc":
+            vhost, vport = self._parse_remote_target(self.remote_target)
+            if not remote_target_allowed(vhost, vport):
+                self.trace("REFUSE vnc target %s:%d not in allow-list", vhost, vport)
+                raise Refuse("this VNC target is not permitted by the server's "
+                             "allow-list%s" % _env_file_hint())
+            self.trace("vnc target %s:%d permitted (direct, no bridge)", vhost, vport)
+            # VNC authenticates with a password only -- there is no username in the
+            # protocol. The browser still sends the 0x1f-separated pair, so take the
+            # password half and ignore whatever sits in the username half.
+            vpass = ""
+            if rdpcred and "\x1f" in rdpcred:
+                vpass = rdpcred.split("\x1f", 1)[1]
+            out = self._inject_vnc_target(elements, {"VNCHOST": vhost,
+                                                     "VNCPORT": str(vport),
+                                                     "VNCPASS": vpass})
+            log.info("uid=%d scenario=vnc direct -> guacd VNC %s:%d", self.uid, vhost, vport)
+            self.trace("up connect -> guacd(vnc direct): %s",
+                       redacted_params(self.arg_names, out[1:]))
+            return out
 
         host, port, security, relay_cred, desktop_id, desktop_created = self._grd_target(scenario)
         if relay_cred is not None:
@@ -745,10 +775,24 @@ class Connection:
             # A locked physical screen makes grd refuse the mirror/virtual session
             # ("Session creation inhibited"), which the client only sees as an opaque
             # transport/broken-pipe error. If that is the case, say so plainly.
+            # A definitive credential verdict outranks the lock hint. Without this
+            # check the lock label was applied to ANY failure while the seat happened
+            # to be locked, so a mistyped password was reported as a locked screen and
+            # sent the operator to fix the wrong thing.
+            if getattr(exc, "auth_failed", False):
+                self.trace("bridge FAILED with an AUTH verdict (scenario=%s)", scenario)
+                raise Refuse("the RDP credential was rejected. Port %s expects its own "
+                             "gate credential, not your login account — use automatic "
+                             "sign-in, or check the username." % port)
             if scenario in LOCAL_SEAT_SCENARIOS and physical_session_locked():
                 self.trace("bridge FAILED with locked physical screen (scenario=%s)", scenario)
-                raise Refuse("the physical screen is locked — unlock it on the machine "
-                             "(or disable auto-lock), then reconnect.")
+                # Worded as a likely cause, not a fact: the auth discriminator only
+                # exists when the server returns an NTSTATUS in the TSRequest. A server
+                # that instead drops the connection on bad credentials yields no verdict
+                # and would still land here.
+                raise Refuse("this most likely failed because the physical screen is "
+                             "locked — unlock it on the machine (or disable auto-lock), "
+                             "then reconnect. If it stays locked, check the credential.")
             raise Refuse("could not start desktop bridge: %s" % exc)
         self.bridge_key = key
         self.bridge_proc = proc
