@@ -105,8 +105,18 @@ esac
 # (/sec:rdp:off), so the credential is never sent under weak RDP encryption -- the
 # server picks NLA (Windows) or TLS (e.g. xrdp).
 if [ "$SECURITY" = "negotiate" ]; then SECLINE="/sec:rdp:off"; else SECLINE="/sec:$SECURITY"; fi
+# /clipboard puts the REMOTE clipboard into this bridge's Xvfb. That is only half
+# the path: x11vnc then exposes it as a VNC cut-text, and guacd carries it to the
+# browser (where disable-copy/disable-paste decide what the user may actually do).
+# Without it the guacd-side clipboard params have nothing to move.
+#
+# Audio is deliberately NOT enabled here. xfreerdp3's /sound would play on THIS
+# host, not in the browser -- VNC carries no audio. Sound reaches the browser via
+# guacd's own enable-audio + audio-servername, which is a separate path.
+# Smartcard is likewise absent: /smartcard would redirect the reader attached to
+# this machine, never the browser user's, and VNC has no smartcard channel at all.
 EDY_RDP_ARGS="$(printf '%s\n' \
-  "/v:$HOST:$PORT" "/u:$USERNAME" "/p:$PASSWORD" "$CERTARG" "/gfx" \
+  "/v:$HOST:$PORT" "/u:$USERNAME" "/p:$PASSWORD" "$CERTARG" "/gfx" "/clipboard" \
   "$SECLINE" "/f" "/size:$GEOM" "/log-level:WARN")"
 export EDY_RDP_ARGS
 rdplog="$STATE/$KEY.rdplog"

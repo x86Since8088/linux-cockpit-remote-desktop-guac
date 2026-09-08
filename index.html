@@ -58,6 +58,22 @@
         <input id="pass" type="password" name="rdp-door-key-secret"
                autocomplete="new-password" size="14">
       </div>
+      <div class="f">
+        <label for="scale">Scale</label>
+        <select id="scale">
+          <option value="fit">Fit to window</option>
+          <option value="1">100%</option>
+          <option value="1.25">125%</option>
+          <option value="1.5">150%</option>
+          <option value="2">200%</option>
+        </select>
+      </div>
+      <div class="f adv">
+        <label for="opt-clipboard"><input type="checkbox" id="opt-clipboard" checked> Clipboard</label>
+      </div>
+      <div class="f adv">
+        <label for="opt-audio"><input type="checkbox" id="opt-audio"> Sound</label>
+      </div>
       <button id="go">Connect</button>
       <button id="stop" class="sec" disabled>Disconnect</button>
     </div>

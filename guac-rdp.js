@@ -63,6 +63,37 @@
     }
 
     function $(id) { return document.getElementById(id); }
+    // Clipboard is on by default because a remote desktop you cannot paste into is
+    // a demo, not a tool. Audio is off by default: it needs an audio server the
+    // deployment may not have wired, and silently negotiating a channel that then
+    // produces nothing is worse than not offering it.
+    function guacdValues() {
+        var v = {};
+        var clip = $("opt-clipboard");
+        if (clip && !clip.checked) { v["disable-copy"] = "true"; v["disable-paste"] = "true"; }
+        var aud = $("opt-audio");
+        if (aud && aud.checked) v["enable-audio"] = "true";
+        return v;
+    }
+
+    // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
+    // the point -- an operator pinning 100% wants pixel-exact, not helpfully resized.
+    var scaleMode = "fit";
+
+    function applyScale() {
+        if (!client) return;
+        var d = client.getDisplay();
+        if (!d || !d.getWidth()) return;
+        if (scaleMode === "fit") {
+            var box = $("display");
+            var w = box.clientWidth || d.getWidth();
+            var h = box.clientHeight || d.getHeight();
+            d.scale(Math.min(w / d.getWidth(), h / d.getHeight()) || 1);
+        } else {
+            d.scale(parseFloat(scaleMode) || 1);
+        }
+    }
+
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
 
     // Unlocking the seat is the ONLY way to resume the session the user left.
@@ -341,7 +372,10 @@
             rdpcred: rdpcred,
             remotehost: remotehost,               // "ip:port" for the remote scenario (relay-validated)
             sessiontoken: sessiontoken || null,   // end-to-end correlation + gate token
-            values: {}
+            // guacd's own VNC parameters. The tunnel fills the connect args from
+            // this map by name, so a toggle here reaches guacd directly and the
+            // relay needs no say in it -- it only rewrites hostname/port/password.
+            values: guacdValues()
         });
         client = new Guacamole.Client(tunnel);
         var display = client.getDisplay();
@@ -388,6 +422,7 @@
         };
         client.onstatechange = function (s) {
             if (s === 3) { currentUuid = (tunnel && tunnel.uuid ? String(tunnel.uuid) : "").replace(/^\$/, ""); }
+            if (s === 3) applyScale();
             if (s === 3) setStatus(
                 key === "isolated" ? "Connected to your isolated desktop."
                 : key === "console" ? "Connected to the physical console."
@@ -739,6 +774,12 @@
         $("target").addEventListener("change", refreshUi);
         $("authmode").addEventListener("change", refreshUi);
         $("go").addEventListener("click", function () { connect(); });
+        $("scale").addEventListener("change", function () {
+            scaleMode = $("scale").value; applyScale();
+        });
+        window.addEventListener("resize", function () {
+            if (scaleMode === "fit") applyScale();
+        });
         $("stop").addEventListener("click", function () {
             // Disconnect ONLY. Do NOT send control "terminate": that deletes the
             // session's registry entry, so the reaper sees no isolated sessions and
