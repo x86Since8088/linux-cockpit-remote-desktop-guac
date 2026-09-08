@@ -35,6 +35,54 @@ else
   echo "  ok: :4822 is loopback-only (or not up in this context)"
 fi
 
+echo "== DEPLOY-CONTRACT standing greps (section 4.4) =="
+# Each must print nothing. These are cheap and they are the checks that catch a
+# payload quietly growing a path back into a checkout.
+g=0
+# 1. no shipped file names a source .env
+if grep -RIn --exclude-dir=.git -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
+     -- relay/ bridge/ headless/ rotate/ ./*.js ./*.sh 2>/dev/null; then
+  echo "  FAIL a shipped file names a source .env"; g=1; fi
+# 2. nothing resolves .env relative to itself
+if grep -RIn --exclude-dir=.git \
+     -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
+     -- relay/ bridge/ headless/ rotate/ 2>/dev/null; then
+  echo "  FAIL something resolves .env relative to itself"; g=1; fi
+# The one true DEV location, and the RETIRED checkout-under-/opt this contract
+# exists because of - assembled from named parts so that NEITHER appears as a
+# literal anywhere in this file, including in this comment.
+#
+# These scripts ship into the payload. An audit whose own text matches its
+# pattern is an audit with a permanent known exception, and an audit with a
+# permanent known exception is one nobody runs a second time. So a recursive
+# grep of a deployed tree for either root must come back completely empty,
+# and the two lines below are what pay for that.
+_ao=ai-orchestrator; _retired=git
+DEV_ROOT="/srv/smb/share/sc/${_ao}-group/${_ao}-storage/projects"
+RETIRED_ROOT="/opt/sc/${_retired}"
+if grep -RIn --exclude-dir=.git -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
+     -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
+        headless/ rotate/ 2>/dev/null; then
+  echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
+# every unit template renders with no placeholder left over
+for u in systemd/*.in; do
+  [ -e "$u" ] || continue
+  if sed -e 's|@PAYLOAD@|/x|g' -e 's|@INSTALL_PATH@|/x|g' -e 's|@ENV_FILE@|/x/.env|g' \
+         -e 's|@LIBEXEC@|/usr/libexec/edy-rdp|g' -e 's|@SBIN@|/usr/local/sbin|g' "$u" \
+     | grep -q '@[A-Z_]\+@'; then
+    echo "  FAIL $u has a placeholder no renderer substitutes"; g=1; fi
+done
+# install.sh's own pre-flight, which IS the completeness gate. Only the
+# pre-flight half gates the tests: the "installed state" half describes the host
+# this happens to run on, and a source tree is not wrong because a machine has
+# not been deployed to yet. A FATAL means the gate refused the SOURCE.
+gate_out="$(./install.sh --verify 2>&1 || true)"
+if printf '%s\n' "$gate_out" | grep -q '^FATAL'; then
+  printf '%s\n' "$gate_out" | grep -A2 '^FATAL' | sed 's/^/    /'
+  echo "  FAIL install.sh's pre-flight refuses this source tree"; g=1
+fi
+if ((g)); then echo "  FAIL"; fail=1; else echo "  ok"; fi
+
 echo "== Playwright end-to-end (external harness, if present) =="
 # The browser suite lives in the working-tree harness cockpit-e2e/ (outside this
 # repo, since it needs a live Cockpit + a throwaway test user). Point E2E_DIR at it

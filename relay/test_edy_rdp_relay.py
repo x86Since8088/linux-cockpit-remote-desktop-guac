@@ -391,5 +391,48 @@ class LockedScreenHint(unittest.TestCase):
             self.assertFalse(R._session_locked_props(props))
 
 
+class AuthVerdictDiscriminator(unittest.TestCase):
+    """The ONLY dependable credential verdict FreeRDP gives us, and the two
+    look-alikes that must NOT be treated as one. Every string below was captured
+    from a real xfreerdp3 3.31.0 run against this host's grd."""
+
+    def _m(self, line):
+        import bridge
+        return bool(bridge.AUTH_ERR_RE.search(line))
+
+    def test_real_auth_failures_match(self):
+        for line in (
+            "[ERROR][com.freerdp.core] - [nla_recv_pdu]: ERRCONNECT_LOGON_FAILURE [0x00020014]",
+            "[ERROR][com.freerdp.core] - [nla_recv_pdu]: ERRCONNECT_ACCOUNT_DISABLED [0x00020011]",
+            "[ERROR][com.freerdp.core] - [nla_recv_pdu]: ERRCONNECT_PASSWORD_EXPIRED [0x0002000E]",
+        ):
+            self.assertTrue(self._m(line), line)
+
+    def test_non_auth_failures_do_not_match(self):
+        # Reproduced with NO credential involvement (fake server, malformed
+        # TSRequest and truncated DER). Matching these would relabel a transport
+        # fault as a rejected password.
+        for line in (
+            "[ERROR][com.freerdp.core.rdp] - [rdp_recv_callback_int][0x55]: "
+            "CONNECTION_STATE_NLA - nla_recv_pdu() fail",
+            "[ERROR][com.freerdp.core.rdp] - [rdp_recv_callback_int][0x55]: "
+            "CONNECTION_STATE_NLA status STATE_RUN_FAILED [-1]",
+            "[ERROR][com.freerdp.core.transport] - [transport_check_fds]: "
+            "transport_check_fds: transport->ReceiveCallback() - STATE_RUN_FAILED [-1]",
+            "[ERROR][com.freerdp.core] - [nego_connect]: "
+            "ERRCONNECT_CONNECT_TRANSPORT_FAILED [0x0002000D]",
+            # krb5 noise: emitted before NTLM fallback in BOTH auth and non-auth runs
+            "[ERROR][com.winpr.sspi.Kerberos] - [kerberos_AcquireCredentialsHandleA]: "
+            "krb5glue_get_init_creds (Client 'rdplogin@AD.EDT1.LAB' not found in "
+            "Kerberos database [-1765328378])",
+        ):
+            self.assertFalse(self._m(line), line)
+
+    def test_anchored_on_the_emitting_function(self):
+        # The code named anywhere else in the log is not the verdict.
+        self.assertFalse(self._m("some prose mentioning ERRCONNECT_LOGON_FAILURE"))
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

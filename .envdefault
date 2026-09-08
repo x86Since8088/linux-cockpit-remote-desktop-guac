@@ -1,0 +1,76 @@
+# cockpit-guac-rdp .envdefault - seeded to [install path]/.env by deploy.sh, MISSING-ONLY.
+#
+# THIS FILE REPLACES etcdefaults/edy-rdp. It is the same settings, in the same
+# grammar, at a different destination - because it was `.envdefault` wearing the
+# wrong hat. The rule (DEPLOY-CONTRACT section 5): does the software READ this to
+# know how to behave, or does it ACT ON it as content? Behaviour is .envdefault.
+# Second cut: can there be zero of them, or more than one? There is exactly one
+# of these, always, and the relay does not start without it - so, .envdefault.
+#
+# Grammar (section 4.1) - a strict subset of what sh, Python and systemd's
+# EnvironmentFile all accept:
+#   KEY=value      KEY="value with spaces"      EMPTY=
+#   full-line '#' comments only; a trailing '#' is PART OF THE VALUE
+#   no $, no backticks, no interpolation
+#
+# Locations and settings only, NEVER a secret: deploy.sh refuses to write a .env
+# whose value looks like a credential. The 3390 door credential is not here - it
+# lives in grd's own credential store and is rotated by a timer.
+#
+# Apply changes with:  systemctl restart edy-rdp-relay.service
+# The units read this file directly (EnvironmentFile), so there is one copy of
+# each setting on the host and not two.
+
+# --- the relay --------------------------------------------------------------
+
+# guacd endpoint the relay dials (host:port). guacd binds HOST LOOPBACK and is
+# gated to the relay's uid by an nftables owner-match. Do NOT move it to a
+# routable address: the owner-match, not network isolation, is what protects it.
+EDY_RDP_GUACD=127.0.0.1:4822
+
+# Unix group whose members are treated as Cockpit administrators for the
+# server-side console gate. The elevation-proven token is still required; this
+# only decides who may ask.
+EDY_RDP_ADMIN_GROUP=sudo
+
+# Where the relay persists its session registry. On tmpfs, so it does not survive
+# a reboot - which is correct, because live guacd and grd sessions do not either.
+EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
+
+# Relay and trace-logger verbosity: DEBUG | INFO | WARNING | ERROR.
+EDY_RDP_LOG_LEVEL=INFO
+
+# --- what guacd is allowed to dial (the SSRF controls) ----------------------
+
+# LOCAL targets. Space-separated --allow-target flags, word-split into arguments
+# by systemd. These are the grd backend ports on this host and nothing else.
+EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391
+
+# REMOTE hosts, for the "Remote host" scenario (jump into another RDP host).
+# A SEPARATE, FAIL-CLOSED allow-list: EMPTY MEANS THE FEATURE IS OFF. The user
+# picks the target in the browser; the relay dials only what is listed here.
+# Comma/space separated IPv4 or CIDR, each optionally :port (default 3389,
+# :* = any port). The literal 'any' allows any host - understand what that means
+# before you type it. IPv4 only. Examples:
+#   EDY_RDP_REMOTE_ALLOW=192.168.2.0/24            that subnet, port 3389
+#   EDY_RDP_REMOTE_ALLOW=192.168.2.20:3389,10.0.0.5:3390
+#   EDY_RDP_REMOTE_ALLOW=any:*                     anywhere, any port: SSRF-open
+EDY_RDP_REMOTE_ALLOW=
+
+# 1 = the remote scenario additionally requires Cockpit administrative access.
+EDY_RDP_REMOTE_ADMIN_ONLY=0
+
+# --- guacd ------------------------------------------------------------------
+
+# Pinned guacd container image. edy-rdp-guacd.service runs this; deploy.sh
+# pre-pulls it so the first connect is not slow and an air-gapped host finds out
+# now rather than at the first click. requires.txt carries the digest.
+# FreeRDP 3 matters: FreeRDP 2 lacks RDSTLS, which grd's port 3390 handover needs.
+GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
+
+# --- the 3390 "Remote Login" door -------------------------------------------
+
+# Username of the greeter door credential that edy-rdp-rotate-rdplogin rotates.
+# This names the ACCOUNT, never the key: the key lives in grd's system
+# credential store, and nothing writes it here.
+EDY_RDP_DOOR_USER=rdplogin

@@ -16,6 +16,7 @@
 
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -27,7 +28,57 @@ BRIDGE_READY_TIMEOUT = 30.0
 
 
 class BridgeError(Exception):
-    pass
+    """auth_failed is set when the xfreerdp3 log carried a definitive credential
+    verdict. It is an attribute rather than message text because the message is
+    truncated twice (see _rdplog_tail) and the verdict does not survive that."""
+
+    def __init__(self, message, auth_failed=False):
+        super(BridgeError, self).__init__(message)
+        self.auth_failed = auth_failed
+
+
+# The ONLY dependable credential discriminator FreeRDP gives us. Verified on this
+# host: a wrong username, a wrong password for rdplocal, and a wrong password for
+# rdplogin all emit exactly this line; two different non-auth failures (a fake
+# server sending a malformed TSRequest, and one sending truncated DER) emit none.
+#
+# Anchored on the [nla_recv_pdu] tag because that is the emitter
+# (libfreerdp/core/nla.c -> freerdp_set_last_error_ex), so a stray mention of the
+# code elsewhere in the log cannot be mistaken for the verdict.
+#
+# Do NOT be tempted by two signatures that look diagnostic and are not:
+#   * CONNECTION_STATE_NLA / nla_recv_pdu() fail  -- reproduced with NO credential
+#     involvement at all; it means "NLA stage ended badly", not "bad password".
+#   * the krb5 / kerberos_AcquireCredentialsHandleA lines -- ordinary SSPI
+#     credential-acquisition noise emitted before NTLM fallback; they appear
+#     identically in non-auth failures.
+_AUTH_CODES = (
+    "AUTHENTICATION_FAILED", "INSUFFICIENT_PRIVILEGES", "PASSWORD_EXPIRED",
+    "PASSWORD_CERTAINLY_EXPIRED", "CLIENT_REVOKED", "KDC_UNREACHABLE",
+    "ACCOUNT_DISABLED", "PASSWORD_MUST_CHANGE", "LOGON_FAILURE", "WRONG_PASSWORD",
+    "ACCESS_DENIED", "ACCOUNT_RESTRICTION", "ACCOUNT_LOCKED_OUT", "ACCOUNT_EXPIRED",
+    "LOGON_TYPE_NOT_GRANTED", "NO_OR_MISSING_CREDENTIALS",
+)
+AUTH_ERR_RE = re.compile(
+    r"\[nla_recv_pdu\]:\s*ERRCONNECT_(?:%s)\b" % "|".join(_AUTH_CODES))
+
+
+def _rdplog_auth_failed(key):
+    """Scan the WHOLE xfreerdp3 log for the credential verdict.
+
+    This must run before the log is unlinked, and it deliberately does not reuse
+    _rdplog_tail: the verdict line is typically 7th of 10 ERROR lines, so the
+    tail's last-3 window drops it. Raising that window is not a fix either --
+    the 280-char cap then truncates the joined string before reaching it.
+    """
+    try:
+        with open(_rdplog_path(key), "r", errors="replace") as fh:
+            for line in fh:
+                if AUTH_ERR_RE.search(line):
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def _req_path(key):
@@ -90,9 +141,13 @@ def start_bridge(key, host, port, security, username, password, geom="1600x1000"
         if proc.poll() is not None:
             _safe_unlink(req)
             detail = _rdplog_tail(key)
+            # Both reads must happen before the unlink below; the relay cannot
+            # re-open this file later (bridge.py is the only thing that opens it).
+            auth = _rdplog_auth_failed(key)
             _safe_unlink(_rdplog_path(key))
             raise BridgeError("desktop connection failed%s" %
-                              ((": " + detail) if detail else " (rc=%s)" % proc.returncode))
+                              ((": " + detail) if detail else " (rc=%s)" % proc.returncode),
+                              auth_failed=auth)
         info = _read_env(env)
         if info and info.get("VNCPORT"):
             break

@@ -5,5 +5,8 @@ Wants=gnome-remote-desktop.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/edy-rdp/edy-rdp-rotate-rdplogin
+ExecStart=@LIBEXEC@/edy-rdp-rotate-rdplogin
+# EDY_RDP_DOOR_USER comes from here; the door KEY never does - it lives in
+# grd's own credential store and this unit rotates it there.
+EnvironmentFile=@ENV_FILE@
 # writes the system grd credential + restarts the system daemon; needs root

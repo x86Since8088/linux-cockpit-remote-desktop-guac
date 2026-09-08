@@ -471,7 +471,8 @@ target is not loopback. It is designed fail-closed and adversarially reviewed:
 The relay/bridge dials whatever host it is told, so an unconstrained remote scenario would
 be a classic SSRF pivot (internal admin UIs, metadata endpoints, port scans) and would send
 the user's RDP credential to an attacker-chosen host. **Mitigation (shipped):** remote is
-gated by `EDY_RDP_REMOTE_ALLOW` (`/etc/default/edy-rdp`), an admin-configured allow-list of
+gated by `EDY_RDP_REMOTE_ALLOW` (`[install path]/.env`, normally
+`/opt/cockpit-guac-rdp/.env`; formerly `/etc/default/edy-rdp`), an admin-configured allow-list of
 IPv4/CIDR[:port]. Empty = deny-all (default; the unit ships an empty `Environment=` fallback
 so an upgraded host without the line still fails closed). The check runs in `_grd_target`
 **before** `DESKTOP_SLOTS.claim`/`bridge.start_bridge`, so a denied target never dials out

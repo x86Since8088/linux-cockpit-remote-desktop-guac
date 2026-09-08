@@ -1,6 +1,5 @@
 [Unit]
 Description=edy-rdp nftables rules (guacd owner-match + headless loopback)
-Documentation=file:///usr/share/cockpit/guac-rdp/README.md
 # Load BEFORE guacd/relay so 4822 is never briefly world-reachable on boot.
 Before=edy-rdp-guacd.service edy-rdp-relay.service
 After=nftables.service network-pre.target

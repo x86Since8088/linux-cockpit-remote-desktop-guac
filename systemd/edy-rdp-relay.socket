@@ -1,6 +1,5 @@
 [Unit]
 Description=edy-rdp guacd relay socket (sole ingress)
-Documentation=file:///usr/share/cockpit/guac-rdp/README.md
 
 [Socket]
 ListenStream=/run/edy-rdp/guacd.sock

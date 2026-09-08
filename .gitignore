@@ -28,3 +28,11 @@ cloud-init*.iso
 *~
 .idea/
 .vscode/
+
+# A .env is a DEPLOYED file: it belongs at [install path]/.env, seeded from the
+# committed .envdefault by deploy.sh, missing-only. One in the source tree exists
+# ONLY for running tests during development and must never be what a deployed
+# plugin reads -- so it is never committed, at any depth. (.envdefault IS
+# committed: it is the seed, not the configuration.)
+.env
+**/.env

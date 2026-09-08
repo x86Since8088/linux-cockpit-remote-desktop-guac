@@ -1,6 +1,9 @@
 [Unit]
+# Documentation= is deliberately absent: it used to name
+# file:///usr/share/cockpit/guac-rdp/README.md, which no installer has ever
+# put there. A dangling Documentation= is a stale comment with a URL scheme.
+# The docs live in the repository under docs/.
 Description=edy-rdp guacd (host loopback 127.0.0.1:4822, nftables uid-gated)
-Documentation=file:///usr/share/cockpit/guac-rdp/README.md
 Wants=network-online.target
 After=network-online.target
 
@@ -11,9 +14,10 @@ After=network-online.target
 # (edy-rdp-guacd.nft) -- NOT by network isolation. No -p mapping is used.
 # guacd built against FreeRDP 3 (localhost/edy-rdp-guacd-fr3): FreeRDP 2 lacks RDSTLS,
 # which grd port 3390 (Remote Login) requires for its post-greeter handover (KNOWN_ISSUES I26).
-# Pinned guacd image; overridable via /etc/default/edy-rdp (GUACD_IMAGE=).
+# Pinned guacd image. The Environment= line is the fallback; the real value is
+# GUACD_IMAGE in the .env below, which is where an operator changes it.
 Environment=GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
-EnvironmentFile=-/etc/default/edy-rdp
+EnvironmentFile=@ENV_FILE@
 ExecStartPre=-/usr/bin/podman rm -f edy-rdp-guacd
 ExecStart=/usr/bin/podman run --replace --name edy-rdp-guacd --network host --health-cmd none \
     --entrypoint /opt/guacamole/sbin/guacd \
