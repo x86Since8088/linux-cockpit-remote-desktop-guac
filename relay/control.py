@@ -54,7 +54,8 @@ class LiveConnections:
             return list(self._by_uuid.keys())
 
 
-def handle_control(request, peer_uid, registry, live, is_admin, tokens=None):
+def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
+                   unlock=None):
     """Dispatch one control request. Returns a JSON-serialisable dict.
 
     request: parsed dict with "op" in {"list","terminate","ping","register","elevate"}.
@@ -63,6 +64,9 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None):
     live: LiveConnections.
     is_admin: bool — may the caller see/act on other users' sessions (sudo-group).
     tokens: SessionTokens — the desktop-session token table (register/elevate).
+    unlock: optional callable(uid) -> (ok, detail). Injected rather than called
+        directly so this function stays pure and testable; the relay supplies the
+        implementation that starts the privileged unit.
     """
     if not isinstance(request, dict):
         return {"ok": False, "error": "malformed request"}
@@ -90,6 +94,22 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None):
         ok = tokens.elevate(token, peer_uid, challenge)
         return {"ok": bool(ok), "admin": bool(ok),
                 "error": None if ok else "elevation proof rejected"}
+
+    # -- unlock the caller's own locked graphical seat session ----------------
+    #
+    # Admin-only, and narrow by construction: the helper this delegates to
+    # refuses any session that is not owned by peer_uid, on a seat, graphical,
+    # active and locked. It exists because nothing else can reach a locked local
+    # session -- the greeter opens a NEW one, and grd refuses console/virtual
+    # while the seat is locked.
+    if op == "unlock":
+        if not is_admin:
+            return {"ok": False, "error": "unlocking the physical session needs "
+                                          "administrative access"}
+        if unlock is None:
+            return {"ok": False, "error": "unlock is not available on this server"}
+        ok, detail = unlock(peer_uid)
+        return {"ok": bool(ok), "detail": detail}
 
     if op == "list":
         sessions = []
