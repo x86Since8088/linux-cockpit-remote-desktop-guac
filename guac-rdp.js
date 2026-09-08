@@ -402,6 +402,25 @@
         if (s < 60) return s + "s"; if (s < 3600) return Math.floor(s/60) + "m"; return Math.floor(s/3600) + "h";
     }
 
+    // The table used to print the raw scenario key. Those keys are internal and
+    // do not match anything the operator picked from the dropdown -- "wayland-vnc"
+    // and "vnc" in particular read as near-duplicates while being very different
+    // connections.
+    var SCENARIO_LABELS = {
+        isolated: "Isolated session",
+        virtual: "Virtual monitor",
+        console: "Console (mirror)",
+        greeter: "Login screen (greeter)",
+        remote: "Remote host (RDP)",
+        vnc: "Remote host (VNC)",
+        "wayland-vnc": "Wayland desktop (VNC)"
+    };
+
+    function scenarioLabel(key) {
+        if (!key) return "";
+        return SCENARIO_LABELS[key] || key;
+    }
+
     function renderSessions() {
         var body = $("sessions-body");
         body.innerHTML = '<tr><td colspan="7" class="muted">Loading…</td></tr>';
@@ -415,7 +434,7 @@
                 var tr = document.createElement("tr");
                 function td(txt, cls) { var e = document.createElement("td"); e.textContent = txt; if (cls) e.className = cls; return e; }
                 tr.appendChild(td((sn.uuid || "").slice(0, 8)));
-                tr.appendChild(td(sn.scenario || ""));
+                tr.appendChild(td(scenarioLabel(sn.scenario)));
                 tr.appendChild(td(sn.state || ""));
                 tr.appendChild(td(sn.live ? "yes" : "no", sn.live ? "live-yes" : "live-no"));
                 tr.appendChild(td(String(sn.uid) + (sn.mine ? " (you)" : "")));
@@ -456,11 +475,18 @@
 
     var ST_UNITS = ["edy-rdp-control.socket", "edy-rdp-relay.socket",
                     "edy-rdp-guacd.service", "edy-rdp-firewall.service"];
+    // The RDP scenarios go through the FreeRDP3 bridge; the Wayland one does not
+    // share a single binary with them, so they are checked separately -- a host
+    // missing sway says nothing about whether Console works, and vice versa.
     var ST_BINS = ["xfreerdp3", "Xvfb", "x11vnc"];
+    var ST_WL_BINS = ["sway", "wayvnc"];
     var ST_ASSETS = ["guac-rdp.css", "guac-proto.js", "guac-rdp.js",
                      "guacamole-common-js/all.min.js"];
 
     function stSpawn(argv) { return cockpit.spawn(argv, { err: "message" }); }
+    // Some checks read container state, which is root-owned. superuser:"try"
+    // degrades to a skip rather than failing the whole run for a non-admin.
+    function stSpawn2(argv) { return cockpit.spawn(argv, { err: "message", superuser: "try" }); }
 
     // Resolve a name on PATH without a shell interpolation: the name is passed
     // as an argument, never spliced into the script text.
@@ -553,7 +579,36 @@
             }
         },
         {
-            name: "Session tooling present",
+            name: "guacd build (FreeRDP 3 needed for grd)",
+            run: function () {
+                // grd's 3389 NLA and 3390 RDSTLS both need FreeRDP 3; the stock
+                // guacd ships FreeRDP 2, which is why the bridge exists.
+                return stSpawn2(["podman", "ps", "--filter", "name=edy-rdp-guacd",
+                                 "--format", "{{.Image}}"]).then(function (out) {
+                    var img = (out || "").trim();
+                    if (!img) return { status: "fail", detail: "guacd container is not running" };
+                    var fr3 = /janua|fr3|freerdp3/i.test(img);
+                    return { status: fr3 ? "pass" : "skip",
+                             detail: img.slice(0, 90) + (fr3 ? "" : " \u2014 not recognisably a FreeRDP 3 build") };
+                }, function (e) {
+                    return { status: "skip", detail: "needs administrative access: " + e };
+                });
+            }
+        },
+        {
+            name: "Wayland session tooling present",
+            run: function () {
+                return Promise.all(ST_WL_BINS.map(stWhich)).then(function (rs) {
+                    var missing = rs.filter(function (r) { return !r.path; });
+                    if (!missing.length)
+                        return { status: "pass", detail: rs.map(function (r) { return r.name; }).join(", ") };
+                    return { status: "fail", detail: "Wayland desktop (VNC) needs: " +
+                             missing.map(function (m) { return m.name; }).join(", ") };
+                });
+            }
+        },
+        {
+            name: "RDP bridge tooling present",
             run: function () {
                 return Promise.all(ST_BINS.map(stWhich)).then(function (rs) {
                     var missing = rs.filter(function (r) { return !r.path; });
