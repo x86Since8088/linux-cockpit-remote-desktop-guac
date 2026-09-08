@@ -18,6 +18,35 @@
 #
 # stdlib only. No pip. Python 3.9+.
 
+
+# The payload is IMMUTABLE once deployed: nothing at runtime writes inside it,
+# not a log, not a cache, not a __pycache__ (DEPLOY-CONTRACT section 1.3). This
+# script is reached through a symlink in /usr/libexec/edy-rdp, and Python
+# resolves that symlink for sys.path[0] - so without this line, importing the
+# sibling modules writes bytecode into the deployed payload and into the libexec
+# directory. Set BEFORE any project import, or the first one is already cached.
+import sys
+sys.dont_write_bytecode = True
+
+
+def _env_file_hint():
+    """The .env this host is configured by, for use in operator-facing messages.
+
+    Read from /etc/cockpit-guac-rdp/install.conf, which install.sh writes -- never
+    resolved relative to this file. This script is reached through a symlink; in a
+    deployed install that resolves into the payload, and in a DEV install it
+    resolves into somebody's checkout, so 'the .env beside me' is the wrong answer
+    exactly when it matters (DEPLOY-CONTRACT section 4.3)."""
+    try:
+        with open("/etc/cockpit-guac-rdp/install.conf", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("ENV_FILE="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "this host's cockpit-guac-rdp .env (see /etc/cockpit-guac-rdp/install.conf)"
+
 import argparse
 import grp
 import ipaddress
@@ -771,9 +800,12 @@ class Connection:
             host, port = self._parse_remote_target(self.remote_target)
             if not remote_target_allowed(host, port):
                 self.trace("REFUSE remote target %s:%d not in allow-list", host, port)
-                raise Refuse("remote host %s:%d is not permitted; an administrator must "
-                             "add it to EDY_RDP_REMOTE_ALLOW in /etc/default/edy-rdp"
-                             % (host, port))
+                # Name the file this host actually reads, not the one a past
+                # version read: an error that sends an administrator to edit a
+                # file nothing loads is worse than one that names no file at all.
+                raise Refuse("remote host %s:%d is not permitted; an administrator "
+                             "must add it to EDY_RDP_REMOTE_ALLOW in %s"
+                             % (host, port, _env_file_hint()))
             self.trace("remote target %s:%d permitted", host, port)
             # "negotiate": the bridge offers NLA+TLS (plain RDP-standard security
             # disabled) so the credential is never sent under weak RDP encryption --

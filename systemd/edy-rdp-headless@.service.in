@@ -1,0 +1,15 @@
+[Unit]
+# Documentation= is deliberately absent: it used to name
+# file:///usr/share/cockpit/guac-rdp/README.md, which no installer has ever
+# put there. A dangling Documentation= is a stale comment with a URL scheme.
+# The docs live in the repository under docs/.
+Description=edy-rdp per-user isolated headless GNOME session (uid %i)
+After=edy-rdp-guacd.service
+# %i is the numeric uid of the target user.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@LIBEXEC@/edy-rdp-headless-start %i
+ExecStop=@LIBEXEC@/edy-rdp-headless-stop %i
+TimeoutStartSec=90

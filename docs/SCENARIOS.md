@@ -55,7 +55,8 @@ never stored.
 
 Because the target is browser-chosen, this is the one path that can reach off-box, so it is
 **fail-closed and admin-gated by policy**: the relay only dials hosts an administrator has
-put on the allow-list `EDY_RDP_REMOTE_ALLOW` in `/etc/default/edy-rdp` (empty = the feature
+put on the allow-list `EDY_RDP_REMOTE_ALLOW` in `[install path]/.env` (normally
+`/opt/cockpit-guac-rdp/.env`; formerly `/etc/default/edy-rdp`) (empty = the feature
 is off). See [ARCHITECTURE.md](ARCHITECTURE.md) and the security notes in
 [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for how SSRF, credential-exfiltration, and MITM are
 constrained (IPv4-literal targets only, per-connection credentials, `/cert:tofu` pinning).

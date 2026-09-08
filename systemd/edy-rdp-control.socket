@@ -1,6 +1,5 @@
 [Unit]
 Description=edy-rdp management API socket (list/terminate sessions)
-Documentation=file:///usr/share/cockpit/guac-rdp/README.md
 
 [Socket]
 ListenStream=/run/edy-rdp/control.sock

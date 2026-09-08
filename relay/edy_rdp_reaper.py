@@ -12,6 +12,16 @@
 # Run periodically by edy-rdp-reaper.timer. Root is required to terminate
 # other users' logind sessions. stdlib only.
 
+
+# The payload is IMMUTABLE once deployed: nothing at runtime writes inside it,
+# not a log, not a cache, not a __pycache__ (DEPLOY-CONTRACT section 1.3). This
+# script is reached through a symlink in /usr/libexec/edy-rdp, and Python
+# resolves that symlink for sys.path[0] - so without this line, importing the
+# sibling modules writes bytecode into the deployed payload and into the libexec
+# directory. Set BEFORE any project import, or the first one is already cached.
+import sys
+sys.dont_write_bytecode = True
+
 import json
 import os
 import re

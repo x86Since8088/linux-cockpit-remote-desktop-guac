@@ -49,41 +49,91 @@ own bundled FreeRDP2 cannot negotiate to grd, which is why the FreeRDP3 bridge e
   (greeters 60 s, isolated desktops 15 min).
 
 ## Install
-The installer auto-installs the OS prerequisites on a vanilla system (see
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the per-distro matrix).
+
+Two processes, and they are not the same thing.
 
 ```bash
-sudo ./install.sh                 # prerequisites + plugin + relay + systemd units + edy-rdp group
-sudo ./install.sh --deps-only     # only the OS prerequisites, then stop
-sudo ./install.sh --skip-deps     # assume prerequisites present
-sudo ./install.sh --uninstall     # remove everything this installed
-./install.sh --user               # plugin only, into ~/.local/share/cockpit
-./install.sh --plugin-only        # plugin only, system-wide
-DESTDIR=/tmp/stage ./install.sh   # stage into a package build root (implies --skip-deps)
+sudo ./deploy.sh --all            # THE DEPLOYMENT: OS prerequisites, users, guacd
+                                  # image, copy -> /opt/cockpit-guac-rdp, seed .env,
+                                  # run the installed install.sh, enable the units
+sudo ./deploy.sh                  # the safe default: copy + configure + place units,
+                                  # enable NOTHING
+sudo ./deploy.sh --with-units     # ...and bring the units up
+sudo ./deploy.sh --verify         # check a deployed host, write nothing
+sudo ./deploy.sh --uninstall      # unlink; keep the payload, .env, users
+sudo ./deploy.sh --remove         # also delete the deployed payloads
+
+./install.sh                      # an in-place install BY SYMLINK, from wherever
+                                  # this file is. Enables nothing, ever.
+./install.sh --verify             # the completeness gate + this host's state
+./install.sh --uninstall
+DESTDIR=/tmp/stage ./deploy.sh    # rehearse the whole thing into a stage
 ```
 
-After install: add users to the `edy-rdp` group (`usermod -aG edy-rdp <user>`); optionally
-load `hardening/edy-rdp-firewall.nft` to take 3389/3390 off the LAN. Cockpit picks up the
-plugin on next page load (Ctrl-Shift-R clears the cached manifest).
+`install.sh` does not copy the payload — it **links** it. Run it from this checkout
+and Cockpit serves the checkout, so you edit `guac-rdp.js` and reload the browser.
+Run the *same* script from `/opt/cockpit-guac-rdp/payload` and you get a production
+install with no relationship to any share. It branches on which one it is only to
+*record* the answer, never to decide what to link.
+
+**`install.sh` no longer installs packages, creates users, pulls images or starts
+anything.** All of that changes the running state of a host, and it belongs to
+`deploy.sh` — the script that only ever runs on a host being deployed to. A dev
+install that enabled `edy-rdp-relay.service` would put two relays on one machine
+fighting over one socket and one nftables table. `install.sh` *verifies* those
+prerequisites and refuses with the command that fixes them. Neither script ever
+touches `cockpit.socket`.
+
+After deploying: add users to the `edy-rdp` group (`usermod -aG edy-rdp <user>`).
+Cockpit picks up the plugin on the next page load (Ctrl-Shift-R clears the cached
+manifest).
+
+### Which install is this host running?
+
+```bash
+readlink -f /usr/share/cockpit/guac-rdp/index.html   # /opt/... = deployed, /srv/... = dev
+cat /etc/cockpit-guac-rdp/install.conf               # INSTALL_KIND, ENV_FILE, VERSION
+```
 
 Verify the core invariant:
 ```bash
 ss -tlnp | grep 4822        # 127.0.0.1 only, reachable solely by the relay uid
+nft list table inet edy_rdp_guacd
 ls -l /run/edy-rdp/guacd.sock
 ```
 
 ## Configuration
-Relay tunables live in **`/etc/default/edy-rdp`** (installed from `etcdefaults/edy-rdp`;
-an operator-edited copy is preserved on upgrade). It sets the guacd endpoint, the admin
-group, the RDP target allow-list, the log level, and the pinned `GUACD_IMAGE`. The units
-carry identical built-in defaults, so the file is optional. Apply changes with
-`systemctl restart edy-rdp-relay.service` (and `edy-rdp-guacd.service` for the image).
 
-**Enabling the Remote-host scenario.** It is off by default (fail-closed). Set the hosts
-the relay may RDP into and restart:
+Settings live in **`[install path]/.env`** — normally `/opt/cockpit-guac-rdp/.env`,
+seeded from the committed `.envdefault` by `deploy.sh`, **missing-only**, never
+clobbering an edit. The units read it directly (`EnvironmentFile`), so there is one
+copy of each setting on the host and not two. It sets the guacd endpoint, the admin
+group, the local and remote RDP allow-lists, the log level, the pinned `GUACD_IMAGE`
+and the 3390 door username.
+
+> **Moved in this version.** These settings used to be `/etc/default/edy-rdp`, seeded
+> from `etcdefaults/edy-rdp`. That file was `.envdefault` wearing the wrong hat: it is
+> settings the software *reads to know how to behave*, of which there is exactly one,
+> which is the definition of `.envdefault` — `etcdefaults/` is for data files the
+> software *manages*, of which there can be zero or many. `deploy.sh` **migrates an
+> existing `/etc/default/edy-rdp` into `.env`**, carrying your edits across, and
+> leaves the old file in place with a warning. It is your file; delete it once you
+> agree, because two config files where one is silently ignored is how a setting gets
+> changed and never takes effect.
+
+A `.env` carries **locations and settings, never a secret** — `deploy.sh` refuses to
+write one whose value looks like a credential. The 3390 door key in particular lives
+in gnome-remote-desktop's own credential store, written by
+`edy-rdp-rotate-rdplogin`; only the *username* appears here.
+
+Apply changes with `systemctl restart edy-rdp-relay.service` (and
+`edy-rdp-guacd.service` for the image).
+
+**Enabling the Remote-host scenario.** It is off by default (fail-closed). Set the
+hosts the relay may RDP into and restart:
 
 ```bash
-# in /etc/default/edy-rdp
+# in /opt/cockpit-guac-rdp/.env
 EDY_RDP_REMOTE_ALLOW=192.168.2.0/24        # IPv4/CIDR, optional :port (default 3389), :* any port
 # EDY_RDP_REMOTE_ADMIN_ONLY=1              # optional: require Cockpit admin for remote
 ```
@@ -107,14 +157,16 @@ Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are 
 | `bridge/edy-rdp-bridge-start.sh` | the bridge launcher (xfreerdp3 → Xvfb → x11vnc) |
 | `headless/edy-rdp-headless-{start,stop}.sh` | per-user isolated headless-session lifecycle |
 | `rotate/edy-rdp-rotate-rdplogin.sh` | rotates the 3390 door credential |
-| `systemd/*` | guacd, relay/control sockets, reaper timer, headless template, firewall loader, tmpfiles |
+| `systemd/*.in` `systemd/*` | unit templates (`@LIBEXEC@`, `@ENV_FILE@`) and the units that need no rendering |
 | `hardening/*` | nftables owner-match, D-Bus handover policy, polkit rule |
-| `etcdefaults/edy-rdp` | relay config, installed to `/etc/default/edy-rdp` (preserved on upgrade) |
+| `.envdefault` | the settings seed; `deploy.sh` copies it to `[install path]/.env`, missing-only |
 | `requires.txt` `VERSION` | pinned prerequisite manifest; release version |
 | `pod/` `systemd/DEPRECATED-pod.*` | the superseded pod deployment (kept for reference; the host-loopback path above is current) |
 | `docs/*` | architecture, compatibility, scenarios, known issues, CVE, troubleshooting |
 | `img/*` | working-scenario screenshots referenced by the docs |
-| `install.sh` `run_tests.sh` | installer; test runner |
+| `install.sh` | the symlink installer + the completeness gate; declares the ONE manifest both scripts read |
+| `deploy.sh` `deploy.ps1` `deploy.bat` | the deployment; the Windows pair explains why there is no Windows deployment |
+| `run_tests.sh` | test runner: relay unit tests, the loopback invariant, the DEPLOY-CONTRACT standing greps |
 
 ## Docs
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — prerequisites + per-distro matrix

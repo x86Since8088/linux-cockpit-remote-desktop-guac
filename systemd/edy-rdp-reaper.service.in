@@ -1,0 +1,16 @@
+[Unit]
+# Documentation= is deliberately absent: it used to name
+# file:///usr/share/cockpit/guac-rdp/README.md, which no installer has ever
+# put there. A dangling Documentation= is a stale comment with a URL scheme.
+# The docs live in the repository under docs/.
+Description=edy-rdp session reaper (prune registry; close idle greeters after 60s)
+After=edy-rdp-control.socket edy-rdp-relay.service
+Wants=edy-rdp-control.socket
+
+[Service]
+Type=oneshot
+ExecStart=@LIBEXEC@/edy_rdp_reaper.py --control /run/edy-rdp/control.sock --greeter-ttl 60
+# The payload is immutable: no bytecode cache is written into it.
+Environment=PYTHONDONTWRITEBYTECODE=1
+User=root
+NoNewPrivileges=yes
