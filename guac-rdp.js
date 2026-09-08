@@ -388,8 +388,199 @@
         });
     }
 
+    /* ---------------------------------------------------------------- *
+     * Self tests
+     *
+     * Read-only checks an operator can run from the panel itself. Nothing
+     * here starts, stops or reconfigures anything: every check either reads
+     * a listening socket, asks systemd for a unit's state, resolves a binary
+     * on PATH, or fetches a file this page already depends on.
+     *
+     * The first two exist because of a real outage: a redeploy left
+     * guacamole-common-js unreachable, the library never loaded, and the
+     * only symptom in the panel was a bare "Guacamole is not defined" in the
+     * browser console. A page that can test itself reports that in a word.
+     *
+     * guacd is deliberately NOT probed with `command -v`: it is started by
+     * edy-rdp-guacd.service and need not be on PATH, so a binary probe would
+     * report a healthy host as broken. Its unit and its listening socket are
+     * the honest signals.
+     * ---------------------------------------------------------------- */
+
+    var ST_UNITS = ["edy-rdp-control.socket", "edy-rdp-relay.socket",
+                    "edy-rdp-guacd.service", "edy-rdp-firewall.service"];
+    var ST_BINS = ["xfreerdp3", "Xvfb", "x11vnc"];
+    var ST_ASSETS = ["guac-rdp.css", "guac-proto.js", "guac-rdp.js",
+                     "guacamole-common-js/all.min.js"];
+
+    function stSpawn(argv) { return cockpit.spawn(argv, { err: "message" }); }
+
+    // Resolve a name on PATH without a shell interpolation: the name is passed
+    // as an argument, never spliced into the script text.
+    function stWhich(name) {
+        return stSpawn(["/bin/sh", "-c", 'command -v "$1"', "sh", name])
+            .then(function (out) { return { name: name, path: out.trim() }; },
+                  function () { return { name: name, path: "" }; });
+    }
+
+    function stUnit(unit) {
+        return stSpawn(["systemctl", "is-active", unit])
+            .then(function (out) { return { unit: unit, state: out.trim() }; },
+                  // is-active exits non-zero for anything not active; the state
+                  // is still what it printed, and a dead unit is a result, not
+                  // an error to surface as a stack trace.
+                  function (e) {
+                      var s = (e && e.message ? String(e.message) : "").trim();
+                      return { unit: unit, state: s || "inactive" };
+                  });
+    }
+
+    var SELF_TESTS = [
+        {
+            name: "Guacamole client library loaded",
+            run: function () {
+                var ok = (typeof Guacamole !== "undefined") && !!Guacamole.Client;
+                return cockpit.resolve(ok
+                    ? { status: "pass", detail: "Guacamole.Client is available" }
+                    : { status: "fail", detail: "guacamole-common-js/all.min.js did not load - this panel cannot connect" });
+            }
+        },
+        {
+            name: "Panel assets served by Cockpit",
+            run: function () {
+                return Promise.all(ST_ASSETS.map(function (f) {
+                    return fetch(f, { cache: "no-store" }).then(
+                        function (r) { return { f: f, ok: r.ok, code: r.status }; },
+                        function () { return { f: f, ok: false, code: 0 }; });
+                })).then(function (rs) {
+                    var bad = rs.filter(function (r) { return !r.ok; });
+                    if (!bad.length)
+                        return { status: "pass", detail: rs.length + " files served" };
+                    return { status: "fail", detail: bad.map(function (b) {
+                        return b.f + " (" + (b.code || "no response") + ")";
+                    }).join(", ") };
+                });
+            }
+        },
+        {
+            name: "Control API reachable",
+            run: function () {
+                return controlRequest({ op: "list" }).then(function (r) {
+                    if (!r || !r.ok) return { status: "fail", detail: "control API replied without ok" };
+                    var n = (r.sessions || []).length;
+                    return { status: "pass", detail: n + " session" + (n === 1 ? "" : "s") + " known" };
+                }, function (e) {
+                    return { status: "fail", detail: String(e) };
+                });
+            }
+        },
+        {
+            name: "guacd listening on loopback only",
+            run: function () {
+                return stSpawn(["ss", "-tln"]).then(function (out) {
+                    var lines = out.split("\n").filter(function (l) { return /:4822(\s|$)/.test(l); });
+                    if (!lines.length)
+                        return { status: "fail", detail: "nothing is listening on 4822" };
+                    var bad = lines.filter(function (l) {
+                        return !/(127\.0\.0\.1|\[::1\]):4822/.test(l);
+                    });
+                    if (bad.length)
+                        return { status: "fail", detail: "non-loopback bind: " + bad[0].trim() };
+                    return { status: "pass", detail: "127.0.0.1:4822 only" };
+                }, function (e) {
+                    return { status: "skip", detail: "ss unavailable: " + e };
+                });
+            }
+        },
+        {
+            name: "Shipped units active",
+            run: function () {
+                return Promise.all(ST_UNITS.map(stUnit)).then(function (rs) {
+                    var bad = rs.filter(function (r) { return r.state !== "active"; });
+                    if (!bad.length)
+                        return { status: "pass", detail: rs.length + " units active" };
+                    return { status: "fail", detail: bad.map(function (b) {
+                        return b.unit + " is " + b.state;
+                    }).join(", ") };
+                });
+            }
+        },
+        {
+            name: "Session tooling present",
+            run: function () {
+                return Promise.all(ST_BINS.map(stWhich)).then(function (rs) {
+                    var missing = rs.filter(function (r) { return !r.path; });
+                    if (!missing.length)
+                        return { status: "pass", detail: rs.map(function (r) { return r.name; }).join(", ") };
+                    return { status: "fail", detail: "not on PATH: " + missing.map(function (m) {
+                        return m.name;
+                    }).join(", ") };
+                });
+            }
+        }
+    ];
+
+    var stRunning = false;
+
+    function runSelfTests() {
+        if (stRunning) return;
+        stRunning = true;
+        var btn = $("run-tests"), body = $("selftests-body"), sum = $("selftests-summary");
+        btn.disabled = true;
+        sum.className = "status";
+        sum.textContent = "Running " + SELF_TESTS.length + " checks...";
+        body.innerHTML = "";
+
+        var cells = SELF_TESTS.map(function (t) {
+            var tr = document.createElement("tr");
+            var name = document.createElement("td");
+            name.textContent = t.name;
+            var res = document.createElement("td");
+            var pill = document.createElement("span");
+            pill.className = "st-pill st-run";
+            pill.textContent = "running";
+            res.appendChild(pill);
+            var detail = document.createElement("td");
+            detail.className = "muted";
+            detail.textContent = "";
+            tr.appendChild(name); tr.appendChild(res); tr.appendChild(detail);
+            body.appendChild(tr);
+            return { pill: pill, detail: detail };
+        });
+
+        var tally = { pass: 0, fail: 0, skip: 0 };
+
+        // Sequential, not parallel: these read shared host state, and a
+        // predictable order makes a screenshot of this table diffable against
+        // the last time someone ran it.
+        var chain = cockpit.resolve();
+        SELF_TESTS.forEach(function (t, i) {
+            chain = chain.then(function () {
+                return t.run().catch(function (e) {
+                    return { status: "fail", detail: "check raised: " + e };
+                }).then(function (r) {
+                    var st = (r && r.status) || "fail";
+                    tally[st] = (tally[st] || 0) + 1;
+                    cells[i].pill.className = "st-pill st-" + st;
+                    cells[i].pill.textContent = st;
+                    cells[i].detail.textContent = (r && r.detail) || "";
+                });
+            });
+        });
+
+        chain.then(function () {
+            var parts = [tally.pass + " passed"];
+            if (tally.fail) parts.push(tally.fail + " failed");
+            if (tally.skip) parts.push(tally.skip + " skipped");
+            sum.textContent = parts.join(", ") + ".";
+            sum.className = "status " + (tally.fail ? "err" : "ok");
+            btn.disabled = false;
+            stRunning = false;
+        });
+    }
+
     function selectTab(id) {
-        ["connect", "sessions"].forEach(function (n) {
+        ["connect", "sessions", "selftests"].forEach(function (n) {
             var t = $("tab-" + n), pan = $("panel-" + n);
             var on = ("tab-" + n) === id;
             t.classList.toggle("active", on); pan.hidden = !on;
@@ -400,6 +591,8 @@
     document.addEventListener("DOMContentLoaded", function () {
         $("tab-connect").addEventListener("click", function () { selectTab("tab-connect"); });
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
+        $("tab-selftests").addEventListener("click", function () { selectTab("tab-selftests"); });
+        $("run-tests").addEventListener("click", runSelfTests);
         $("refresh").addEventListener("click", renderSessions);
         var perm = cockpit.permission({ admin: true });
         perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); });

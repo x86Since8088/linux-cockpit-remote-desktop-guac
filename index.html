@@ -15,6 +15,7 @@
   <div class="tabs">
     <button class="tab active" id="tab-connect" data-panel="panel-connect">Connect</button>
     <button class="tab" id="tab-sessions" data-panel="panel-sessions">Active Sessions</button>
+    <button class="tab" id="tab-selftests" data-panel="panel-selftests">Self Tests</button>
   </div>
 
   <section id="panel-connect" class="panel">
@@ -72,6 +73,22 @@
         <th>Session</th><th>Scenario</th><th>State</th><th>Live</th><th>User</th><th>Age</th><th></th>
       </tr></thead>
       <tbody id="sessions-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section id="panel-selftests" class="panel" hidden>
+    <div class="bar">
+      <button id="run-tests">Run self tests</button>
+      <span class="hint" id="selftests-note">Read-only checks. Nothing is started, stopped or reconfigured.</span>
+    </div>
+    <div class="status" id="selftests-summary">Not run yet.</div>
+    <table class="sessions" id="selftests-table">
+      <thead><tr>
+        <th>Check</th><th>Result</th><th>Detail</th>
+      </tr></thead>
+      <tbody id="selftests-body">
+        <tr><td colspan="3" class="muted">Press “Run self tests” to check this host.</td></tr>
+      </tbody>
     </table>
   </section>
 
