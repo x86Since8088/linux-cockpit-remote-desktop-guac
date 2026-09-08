@@ -64,6 +64,18 @@ if grep -RIn --exclude-dir=.git -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
      -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
         headless/ rotate/ 2>/dev/null; then
   echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
+# PAGE_DIRS must be installed as REAL directories of per-file links. cockpit-ws
+# serves a symlinked file but returns 404 for anything requested through a
+# symlinked DIRECTORY, with nothing logged -- the page loads, then dies on the
+# first reference to what the directory held. A clean Rocky 9 install reproduced
+# it: every per-file link served 200 while guacamole-common-js/all.min.js served
+# 404 and the page threw "ReferenceError: Guacamole is not defined".
+if ! grep -q 'link_dir  *"\$SRC/\$f"' install.sh; then
+  echo "  FAIL install.sh does not install PAGE_DIRS via link_dir"; g=1; fi
+if grep -qE 'for f in "\$\{PAGE\[@\]\}" "\$\{PAGE_DIRS\[@\]\}"; do link_one' install.sh; then
+  echo "  FAIL install.sh symlinks PAGE_DIRS as if they were files"; g=1; fi
+if ! grep -q 'is a directory symlink' install.sh; then
+  echo "  FAIL install.sh lost its post-install directory-symlink assertion"; g=1; fi
 # every unit template renders with no placeholder left over
 for u in systemd/*.in; do
   [ -e "$u" ] || continue
