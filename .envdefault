@@ -68,6 +68,11 @@ EDY_RDP_REMOTE_ADMIN_ONLY=0
 # FreeRDP 3 matters: FreeRDP 2 lacks RDSTLS, which grd's port 3390 handover needs.
 GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
 
+# Path to the guacd binary INSIDE the image above. Differs per image:
+#   official guacamole/guacd -> /opt/guacamole/sbin/guacd
+#   Janua (FreeRDP 3 fork)   -> /usr/local/sbin/guacd
+GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
+
 # --- the 3390 "Remote Login" door -------------------------------------------
 
 # Username of the greeter door credential that edy-rdp-rotate-rdplogin rotates.
