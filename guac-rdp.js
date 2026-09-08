@@ -23,10 +23,19 @@
             note: "A new virtual monitor inside your session — an empty desktop, not a copy of the screen." },
         console:  { port: "3389", mode: "mirror-primary", admin: true,
             note: "A live mirror of the physical screen. Requires administrative access." },
+        greeter:  { port: "3390", mode: null, admin: true,
+            note: "The GDM login screen, in a session of its own. Not affected by the console being locked \u2014 sign in here to reach your desktop." },
         remote:   { port: "3389", mode: null, remote: true,
             note: "RDP into another host on the network. Enter its address and your RDP credentials for that host." }
     };
     var CONTROL = "/run/edy-rdp/control.sock";
+    // grd refuses console/virtual outright while the seat is locked ("Session
+    // creation inhibited"), and there is nothing to render — not the desktop and
+    // not the lock screen. The greeter door on 3390 is a SEPARATE session that the
+    // seat lock does not gate, so a locked seat falls back to it automatically:
+    // you get the login screen, sign in, and land in your own session.
+    var LOCKED_SEAT_RE = /physical screen is locked/i;
+    var lockFellBack = false;
     var KEEPALIVE_MS = 4000;
     var currentUuid = null;
 
@@ -203,8 +212,11 @@
         }).catch(function () { return { token: null, admin: false }; });
     }
 
-    function connect() {
-        var key = $("target").value, t = TARGETS[key];
+    function connect(forceKey) {
+        var key = forceKey || $("target").value, t = TARGETS[key];
+        // A user-initiated connect re-arms the one-shot locked-seat fallback; the
+        // fallback itself passes forceKey, so it can never re-arm and loop.
+        if (!forceKey) lockFellBack = false;
         $("go").disabled = true;
         // Remote is admin-gated only if the server sets EDY_RDP_REMOTE_ADMIN_ONLY;
         // prove admin when the Cockpit session is already elevated (no polkit prompt
@@ -213,7 +225,8 @@
         setStatus(needAdmin ? "Proving administrator mode…" : "Registering session…");
         registerSession(needAdmin).then(function (reg) {
             if (t.admin && !reg.admin) {
-                setStatus("Console needs administrative access — turn on Administrative access "
+                setStatus((key === "console" ? "Console" : "This session")
+                    + " needs administrative access — turn on Administrative access "
                     + "in Cockpit's header, then retry.", "err");
                 $("go").disabled = false;
                 return;
@@ -300,6 +313,20 @@
                 msg += "  — this is the RDP gate key for port " + t.port + ", not your own login.";
             if (/not permitted|admin/i.test(msg) && key === "console")
                 msg += "  Console (mirror) requires administrative access.";
+            // Locked seat: retry on the greeter door instead of dead-ending. Only
+            // console/virtual can hit this, and only once per user-initiated
+            // connect. NOTE the relay applies its locked-screen label to ANY bridge
+            // failure while the seat is locked, so a mistyped credential arrives
+            // wearing this message too; the greeter attempt then reports the real
+            // problem itself rather than silently retrying forever.
+            if (LOCKED_SEAT_RE.test(msg) && !lockFellBack &&
+                (key === "console" || key === "virtual")) {
+                lockFellBack = true;
+                setStatus("The physical screen is locked \u2014 opening the login screen instead\u2026");
+                teardown(true);
+                window.setTimeout(function () { connect("greeter"); }, 300);
+                return;
+            }
             setStatus(prefix + ": " + msg, "err"); teardown(true);
         }
         tunnel.onerror = function (e) { explain("Relay error", e); };
@@ -599,7 +626,7 @@
         isAdmin = !!perm.allowed;
         $("target").addEventListener("change", refreshUi);
         $("authmode").addEventListener("change", refreshUi);
-        $("go").addEventListener("click", connect);
+        $("go").addEventListener("click", function () { connect(); });
         $("stop").addEventListener("click", function () {
             // Disconnect ONLY. Do NOT send control "terminate": that deletes the
             // session's registry entry, so the reaper sees no isolated sessions and
