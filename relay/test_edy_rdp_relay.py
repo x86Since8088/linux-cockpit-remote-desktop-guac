@@ -434,5 +434,47 @@ class AuthVerdictDiscriminator(unittest.TestCase):
 
 
 
+class SecurityValuesAreAcceptedByFreeRDP(unittest.TestCase):
+    """Every security value the relay can emit must be one xfreerdp3 /sec: accepts.
+
+    The greeter scenario shipped "rdstls" for months. RDSTLS is a real protocol,
+    but it is not a value /sec: accepts -- xfreerdp3 fails at command-line
+    before any network I/O, so the scenario could never connect. It went
+    unnoticed because nothing in the UI could select it.
+    """
+
+    # xfreerdp3 3.31.0: /sec: rdp|tls|nla|ext|aad, each optionally :on|:off
+    ACCEPTED = {"rdp", "tls", "nla", "ext", "aad"}
+
+    def test_every_scenario_security_is_valid(self):
+        import re as _re
+        with open(R.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        body = src[src.index("def _grd_target"):]
+        body = body[:body.index("\n    def ")]
+        # the 3rd element of each returned tuple is the security value
+        vals = _re.findall(r'return \(\s*"[^"]*",\s*"[^"]*",\s*"([^"]+)"', body)
+        self.assertTrue(vals, "no security values found -- did _grd_target change shape?")
+        for v in vals:
+            base = v.split(":")[0]
+            self.assertIn(base, self.ACCEPTED | {"negotiate"},
+                          "%r is not a /sec: value xfreerdp3 accepts" % v)
+
+    def test_greeter_returns_nla(self):
+        """Check the VALUE the greeter branch returns, not whether the word
+        appears in the file -- the comment above that branch names rdstls in
+        order to explain why it is wrong, and a source-text grep flags that."""
+        import re as _re
+        with open(R.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        m = _re.search(r'if scenario == "greeter":.*?return \(\s*"[^"]*",\s*'
+                       r'"([^"]*)",\s*"([^"]+)"', src, _re.S)
+        self.assertIsNotNone(m, "greeter branch not found in _grd_target")
+        port, sec = m.group(1), m.group(2)
+        self.assertEqual(port, "3390")
+        self.assertEqual(sec, "nla")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
