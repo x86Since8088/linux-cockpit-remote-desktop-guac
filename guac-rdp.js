@@ -25,6 +25,8 @@
             note: "A live mirror of the physical screen. Requires administrative access." },
         greeter:  { port: "3390", mode: null, admin: true,
             note: "The GDM login screen, in a session of its own. Not affected by the console being locked \u2014 sign in here to reach your desktop." },
+        vnc:      { port: "5900", mode: null, remote: true, vnc: true,
+            note: "A VNC server on the network. guacd speaks VNC natively, so this connects straight through \u2014 no RDP bridge in the path." },
         remote:   { port: "3389", mode: null, remote: true,
             note: "RDP into another host on the network. Enter its address and your RDP credentials for that host." }
     };
@@ -238,6 +240,14 @@
                 // browser supplies nothing and never sees a credential.
                 setStatus("Starting your isolated session… (the first connect can take ~20s)");
                 creds = cockpit.resolve({ username: "", password: "" });
+            } else if (key === "vnc") {
+                var vh = $("host").value.trim();
+                var vp = ($("port").value || "").toString().trim();
+                var vpw = $("pass").value;
+                if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(vh)) { setStatus("Enter the VNC host as an IPv4 address (e.g. 192.168.2.20).", "err"); $("go").disabled = false; return; }
+                if (vp && !/^\d{1,5}$/.test(vp)) { setStatus("Port must be a number between 1 and 65535.", "err"); $("go").disabled = false; return; }
+                // A password is optional: a VNC server may have auth disabled.
+                creds = cockpit.resolve({ username: "", password: vpw });
             } else if (key === "remote") {
                 // Remote host RDP: user supplies target + their own credential for that
                 // host. Client-side validation is a hint; the relay authoritatively
@@ -291,8 +301,9 @@
         // relay strips for the bridge — guacd only ever sees a loopback VNC target.
         var rdpcred = t.managed ? null
             : ((cred.username || "") + "" + (cred.password || ""));
-        var remotehost = (key === "remote")
-            ? ($("host").value.trim() + ":" + (($("port").value || "").toString().trim() || "3389"))
+        var remotehost = (key === "remote" || key === "vnc")
+            ? ($("host").value.trim() + ":" +
+               (($("port").value || "").toString().trim() || (key === "vnc" ? "5900" : "3389")))
             : null;
         tunnel = new CockpitRelayTunnel({
             width: w, height: h, dpi: 96, scenario: key,
@@ -339,7 +350,8 @@
             if (s === 3) setStatus(
                 key === "isolated" ? "Connected to your isolated desktop."
                 : key === "console" ? "Connected to the physical console."
-                : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
+                : key === "vnc"     ? ("Connected to VNC at " + $("host").value.trim() + ".")
+            : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
                 : "Connected to your virtual monitor.", "ok");
             else if (s === 5) { if (!errored) setStatus("Disconnected."); teardown(true); }
         };
@@ -367,9 +379,13 @@
         $("authwrap").hidden = managed || remote;
         $("hostwrap").hidden = !remote;
         $("portwrap").hidden = !remote;
-        $("credwrap").hidden = remote ? false : (managed || !manual);
+        var vnc = !!t.vnc;
+        // VNC has no username in the protocol -- only a password. Showing a
+        // username box would invite someone to type one that is then discarded.
+        $("credwrap").hidden = vnc ? true : (remote ? false : (managed || !manual));
         $("passwrap").hidden = remote ? false : (managed || !manual);
         var extra = managed ? "  You reach your own session; no credentials needed."
+                  : vnc ? "  Password only \u2014 VNC has no username. The relay only permits hosts an administrator has allow-listed."
                   : remote ? "  The relay only permits hosts an administrator has allow-listed."
                   : (t.admin && !isAdmin) ? "  ⚠ Needs administrative access."
                   : (manual ? "" : "  The gate key is read from the server; you never see or type it.");
