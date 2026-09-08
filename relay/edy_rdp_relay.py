@@ -373,6 +373,48 @@ HEADLESS_STATE_DIR = "/run/edy-rdp/headless"
 HEADLESS_START_TIMEOUT = 90
 
 
+WLVNC_STATE_DIR = "/run/edy-rdp/waylandvnc"
+WLVNC_START_TIMEOUT = 90
+
+
+def ensure_waylandvnc_session(uid):
+    """Start (idempotently) the caller's per-user headless WAYLAND session and
+    return {'HOST','PORT'}.
+
+    sway on the wlroots headless backend, served by wayvnc. guacd speaks VNC
+    natively, so this scenario uses NO bridge at all -- no xfreerdp3, no Xvfb, no
+    x11vnc, no RDP. It is the shortest path in this program.
+
+    Unlike the isolated scenario it does not refuse when the user is logged in at
+    the seat: it runs under its own XDG_RUNTIME_DIR and never touches
+    /run/user/<uid>, so there is no compositor to collide with. That case -- a
+    local login plus a locked screen -- previously left the user with no working
+    scenario at all.
+    """
+    unit = "edy-rdp-waylandvnc@%d.service" % uid
+    try:
+        subprocess.run(["systemctl", "start", unit], check=True,
+                       timeout=WLVNC_START_TIMEOUT,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace")[:200]
+        raise Refuse("could not start the Wayland VNC session: %s" % (detail or exc))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Refuse("Wayland VNC session start failed: %s" % exc)
+    env = {}
+    try:
+        with open(os.path.join(WLVNC_STATE_DIR, "%d.env" % uid)) as fh:
+            for line in fh:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    env[k] = v
+    except OSError as exc:
+        raise Refuse("Wayland VNC session published no endpoint: %s" % exc)
+    if not env.get("PORT"):
+        raise Refuse("Wayland VNC session published no port")
+    return {"HOST": env.get("HOST") or "127.0.0.1", "PORT": env["PORT"]}
+
+
 def ensure_headless_session(uid):
     """Start (idempotently) the caller's per-user headless isolated session and
     return its {'PORT','USER','CRED'}. The unit is Type=oneshot and blocks until
@@ -701,6 +743,18 @@ class Connection:
         # is handed to it directly. This is also the only scenario where guacd talks
         # to something that is not loopback, which is why it reuses the remote
         # allow-list rather than introducing a second, laxer one.
+        if scenario == "wayland-vnc":
+            # Relay-managed: the browser supplies no target and no credential.
+            info = ensure_waylandvnc_session(self.uid)
+            out = self._inject_vnc_target(elements, {"VNCHOST": info["HOST"],
+                                                     "VNCPORT": info["PORT"],
+                                                     "VNCPASS": ""})
+            log.info("uid=%d scenario=wayland-vnc -> guacd VNC %s:%s",
+                     self.uid, info["HOST"], info["PORT"])
+            self.trace("up connect -> guacd(wayland-vnc): %s",
+                       redacted_params(self.arg_names, out[1:]))
+            return out
+
         if scenario == "vnc":
             vhost, vport = self._parse_remote_target(self.remote_target)
             if not remote_target_allowed(vhost, vport):

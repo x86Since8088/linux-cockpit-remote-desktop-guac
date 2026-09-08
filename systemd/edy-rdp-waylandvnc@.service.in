@@ -1,0 +1,11 @@
+[Unit]
+Description=edy-rdp per-user headless Wayland session served over VNC (uid %i)
+After=edy-rdp-guacd.service
+# %i is the numeric uid of the target user.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@LIBEXEC@/edy-rdp-waylandvnc-start %i
+ExecStop=@LIBEXEC@/edy-rdp-waylandvnc-stop %i
+TimeoutStartSec=90
