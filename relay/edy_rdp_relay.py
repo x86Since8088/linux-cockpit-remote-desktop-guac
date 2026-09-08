@@ -819,8 +819,24 @@ class Connection:
             # a per-user virtual monitor inside the user's 3389 session
             return ("127.0.0.1", "3389", "nla", None, "virtual:%d" % self.uid, None)
         if scenario == "greeter":
-            # each GDM greeter is ephemeral -> a fresh id per connection
-            return ("127.0.0.1", "3390", "rdstls", None,
+            # each GDM greeter is ephemeral -> a fresh id per connection.
+            #
+            # NLA, not "rdstls". RDSTLS is a protocol FreeRDP negotiates on its
+            # own when the server asks for it; it is NOT a value /sec: accepts.
+            # xfreerdp3 rejects it during command-line parsing --
+            #   [parse_sec_options]: unknown protocol security: rdstls
+            # -- before any network I/O, so this scenario could never have
+            # connected. It was unreachable from the UI until recently, which is
+            # why nothing surfaced it.
+            #
+            # Verified against this host's grd on 3390 with the rdplogin door
+            # credential: /sec:nla authenticates (exit 0, no auth-failure line),
+            # while a deliberately wrong password gives exit 134 and
+            # ERRCONNECT_LOGON_FAILURE -- so the success is real, not a silent
+            # skip. The kerberos_AcquireCredentialsHandleA lines in the log are
+            # SSPI noise emitted before NTLM fallback and appear in both cases;
+            # /auth-pkg-list:ntlm changes nothing and is deliberately not used.
+            return ("127.0.0.1", "3390", "nla", None,
                     "greeter:%s" % uuidlib.uuid4().hex[:12], None)
         if scenario == "isolated":
             info = ensure_headless_session(self.uid)
