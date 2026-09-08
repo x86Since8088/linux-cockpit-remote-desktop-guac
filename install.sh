@@ -50,6 +50,8 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          bridge/edy-rdp-bridge-start.sh:edy-rdp-bridge-start
          headless/edy-rdp-headless-start.sh:edy-rdp-headless-start
          headless/edy-rdp-headless-stop.sh:edy-rdp-headless-stop
+         waylandvnc/edy-rdp-waylandvnc-start.sh:edy-rdp-waylandvnc-start
+         waylandvnc/edy-rdp-waylandvnc-stop.sh:edy-rdp-waylandvnc-stop
          rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin)
 LIBS=()
 UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket

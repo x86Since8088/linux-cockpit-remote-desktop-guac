@@ -25,6 +25,8 @@
             note: "A live mirror of the physical screen. Requires administrative access." },
         greeter:  { port: "3390", mode: null, admin: true,
             note: "The GDM login screen, in a session of its own. Not affected by the console being locked \u2014 sign in here to reach your desktop." },
+        "wayland-vnc": { port: "", mode: null, managed: true,
+            note: "Your own headless Wayland desktop (sway), served over VNC. Unaffected by the console being locked, and it runs alongside a local login. Started on demand." },
         vnc:      { port: "5900", mode: null, remote: true, vnc: true,
             note: "A VNC server on the network. guacd speaks VNC natively, so this connects straight through \u2014 no RDP bridge in the path." },
         remote:   { port: "3389", mode: null, remote: true,
@@ -32,12 +34,11 @@
     };
     var CONTROL = "/run/edy-rdp/control.sock";
     // grd refuses console/virtual outright while the seat is locked ("Session
-    // creation inhibited"), and there is nothing to render — not the desktop and
-    // not the lock screen. The greeter door on 3390 is a SEPARATE session that the
-    // seat lock does not gate, so a locked seat falls back to it automatically:
-    // you get the login screen, sign in, and land in your own session.
+    // creation inhibited"). Matching that refusal lets the panel explain what to
+    // do about it. It deliberately does NOT redirect to the greeter: the greeter
+    // starts a NEW session and cannot attach to the locked one, so it resets the
+    // login rather than resuming it.
     var LOCKED_SEAT_RE = /physical screen is locked/i;
-    var lockFellBack = false;
     var KEEPALIVE_MS = 4000;
     var currentUuid = null;
 
@@ -218,7 +219,6 @@
         var key = forceKey || $("target").value, t = TARGETS[key];
         // A user-initiated connect re-arms the one-shot locked-seat fallback; the
         // fallback itself passes forceKey, so it can never re-arm and loop.
-        if (!forceKey) lockFellBack = false;
         $("go").disabled = true;
         // Remote is admin-gated only if the server sets EDY_RDP_REMOTE_ADMIN_ONLY;
         // prove admin when the Cockpit session is already elevated (no polkit prompt
@@ -330,13 +330,17 @@
             // failure while the seat is locked, so a mistyped credential arrives
             // wearing this message too; the greeter attempt then reports the real
             // problem itself rather than silently retrying forever.
-            if (LOCKED_SEAT_RE.test(msg) && !lockFellBack &&
-                (key === "console" || key === "virtual")) {
-                lockFellBack = true;
-                setStatus("The physical screen is locked \u2014 opening the login screen instead\u2026");
-                teardown(true);
-                window.setTimeout(function () { connect("greeter"); }, 300);
-                return;
+            if (LOCKED_SEAT_RE.test(msg) && (key === "console" || key === "virtual")) {
+                // Deliberately NOT an automatic fallback to the greeter. The
+                // greeter starts a NEW session; it cannot attach to the locked
+                // one, so it does not get you back to the desktop you left --
+                // you would be resetting your login rather than resuming it.
+                // Say what actually works and let the operator choose.
+                msg += "  The Login screen option opens a NEW session rather than "
+                     + "unlocking this one. To resume the locked session it must be "
+                     + "unlocked at the machine (or with `loginctl unlock-session`). "
+                     + "For a separate desktop of your own that is unaffected by the "
+                     + "lock, use Wayland VNC or Isolated session.";
             }
             setStatus(prefix + ": " + msg, "err"); teardown(true);
         }
