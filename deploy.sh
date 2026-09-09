@@ -9,6 +9,11 @@
 #   ./deploy.sh --with-image          also pre-pull the pinned guacd image
 #   ./deploy.sh --with-units          also ENABLE AND START the units
 #   ./deploy.sh --all                 all four of the above
+#   ./deploy.sh --with-locked-remote-desktop   opt-in: install+enable the "Allow
+#                                     Locked Remote Desktop" extension for the
+#                                     invoking user (remote-unlock the locked
+#                                     screen; NOT in --all -- security tradeoff,
+#                                     see docs/LOCKED-REMOTE-DESKTOP.md)
 #   ./deploy.sh --install-to /srv/x   deploy somewhere else (absolute, recorded)
 #   ./deploy.sh --verify              check a deployed host, write nothing
 #   ./deploy.sh --uninstall           run the installed install.sh --uninstall
@@ -41,7 +46,7 @@ VERSION="$( [[ -f "$SRC/VERSION" ]] && cat "$SRC/VERSION" || echo "1.1.1" )"
 ROOT="/opt/$PROJECT"
 ACTION=deploy
 KEEP=1
-WITH_USERS=0; WITH_DEPS=0; WITH_IMAGE=0; WITH_UNITS=0
+WITH_USERS=0; WITH_DEPS=0; WITH_IMAGE=0; WITH_UNITS=0; WITH_ALRD=0; ALRD_USER=""
 
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -68,6 +73,8 @@ while (($#)); do
     --with-deps)  WITH_DEPS=1; shift ;;
     --with-image) WITH_IMAGE=1; shift ;;
     --with-units) WITH_UNITS=1; shift ;;
+    --with-locked-remote-desktop) WITH_ALRD=1; shift ;;   # opt-in, NOT in --all (security tradeoff)
+    --alrd-user)  ALRD_USER="${2:?--alrd-user needs a name}"; shift 2 ;;   # desktop user for the above
     --all)        WITH_USERS=1; WITH_DEPS=1; WITH_IMAGE=1; WITH_UNITS=1; shift ;;
     --verify)     ACTION=verify; shift ;;
     --uninstall)  ACTION=uninstall; shift ;;
@@ -239,6 +246,14 @@ copy_declared_payload_into() {
     install -m 0755 "${OWN[@]}" -- "$SRC/install.sh"  "$dst/install.sh"
     printf '%s\n' "$VERSION" > "$dst/VERSION"; chmod 0644 "$dst/VERSION"
     [[ -f "$SRC/LICENSE" ]] && install -m 0644 -- "$SRC/LICENSE" "$dst/LICENSE"
+    # Opt-in "Allow Locked Remote Desktop" bundle + its enabler, so a deployed host
+    # can run --with-locked-remote-desktop. Third-party (GPL, see extensions/*/COPYING).
+    if [[ -d "$SRC/extensions/allowlockedremotedesktop@kamens.us" ]]; then
+        install -d -m 0755 -- "$dst/extensions/allowlockedremotedesktop@kamens.us"
+        install -m 0755 "${OWN[@]}" -- "$SRC/extensions/enable-locked-remote-desktop.sh" "$dst/extensions/enable-locked-remote-desktop.sh"
+        find "$SRC/extensions/allowlockedremotedesktop@kamens.us" -maxdepth 1 -type f \
+             -exec install -m 0644 -- {} "$dst/extensions/allowlockedremotedesktop@kamens.us/" \;
+    fi
     # NOT shipped: .git/, docs/, img/, patches/, pod/, relay/test_*.py,
     # run_tests.sh, requires.txt, CHANGELOG.md, README.md, any .env.
     # README.md in particular must not ship: it quotes the development root, and
@@ -357,6 +372,24 @@ do_deploy() {
            systemctl enable --now edy-rdp-rotate-rdplogin.timer"
     else
         printf '\nunits were rendered and placed, and NOT enabled.\n'
+    fi
+
+    if ((WITH_ALRD)); then
+        printf '\nlocked-remote-desktop extension (--with-locked-remote-desktop)\n'
+        # Opt-in and security-sensitive: it lets a remote RDP client unlock the
+        # locked screen (and, mirroring the physical seat, the console itself).
+        # Per-USER: the dconf write needs the target's live session. SUDO_USER is
+        # empty on the /srv/jobs root path, so require an explicit --alrd-user there
+        # rather than guessing (never target root).
+        local au="${ALRD_USER:-${SUDO_USER:-}}"
+        if [[ -z "$au" || "$au" == root ]]; then
+            warn "skipped --with-locked-remote-desktop: no desktop user resolved (pass
+       --alrd-user NAME, or run it yourself as that user, IN their session):
+           $ROOT_D/payload/extensions/enable-locked-remote-desktop.sh"
+        else
+            "$ROOT_D/payload/extensions/enable-locked-remote-desktop.sh" --user "$au" \
+                || warn "enable-locked-remote-desktop failed (run it in $au's graphical session)"
+        fi
     fi
 
     cat <<EOF

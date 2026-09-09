@@ -115,6 +115,14 @@ if [ "$SECURITY" = "negotiate" ]; then SECLINE="/sec:rdp:off"; else SECLINE="/se
 # guacd's own enable-audio + audio-servername, which is a separate path.
 # Smartcard is likewise absent: /smartcard would redirect the reader attached to
 # this machine, never the browser user's, and VNC has no smartcard channel at all.
+#
+# Keyboard: left in xfreerdp3's default SCANCODE mode (no /kbd option). An earlier build
+# set /kbd:unicode:on ("send characters, not scancodes"), but a controlled test on an
+# Ubuntu 26.04 / GNOME 50 VM showed unicode mode MANGLES keys injected through the
+# x11vnc XTEST -> Xvfb path -- winpr logs int_MultiByteToWideChar "insufficient buffer
+# supplied, got 1, required 2" and the wrong password lands, making password fields WORSE.
+# Plain scancode carries the browser's keys faithfully for this bridge topology; keep it.
+# (See docs/KNOWN_ISSUES I39a and memory allow-locked-remote-desktop-vm.)
 EDY_RDP_ARGS="$(printf '%s\n' \
   "/v:$HOST:$PORT" "/u:$USERNAME" "/p:$PASSWORD" "$CERTARG" "/gfx" "/clipboard" \
   "$SECLINE" "/f" "/size:$GEOM" "/log-level:WARN")"

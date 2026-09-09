@@ -538,3 +538,56 @@ with `LockedHint=yes` and, if found, returns "the physical screen is locked — 
 instead of the raw error. The check FAILS OPEN (never blocks a connection; only relabels a
 failure). Fix the underlying condition by unlocking the session (`loginctl unlock-session`)
 or disabling auto-lock. BY-DESIGN in grd — the mirror cannot display a locked screen.
+
+**RESOLUTION available (opt-in, 2026-09-09):** the third-party GNOME extension **"Allow Locked Remote
+Desktop"** no-ops grd's teardown-on-lock, so the console/virtual mirror STAYS connected through a lock and
+the lock screen can be unlocked remotely. Bundled at `extensions/allowlockedremotedesktop@kamens.us/`,
+enabled with `extensions/enable-locked-remote-desktop.sh` or `deploy.sh --with-locked-remote-desktop`.
+**Off by default** — it also lets a remote unlock open the physical console. Verified on Ubuntu 26.04 /
+GNOME 50. Full writeup + the security tradeoff: [docs/LOCKED-REMOTE-DESKTOP.md](LOCKED-REMOTE-DESKTOP.md).
+
+### I39 · Cannot type a password at the mirrored lock screen — grd tears the mirror down on lock · Sev M · BY-DESIGN (upstream)
+Reported as "the mirrored GNOME lock screen shows my user + a password box but the typed password never
+logs in." Investigation (live relay logs + upstream sources) shows the mirror mode **cannot present an
+interactive lock screen at all**, so this is not a plugin bug and not fixable in the plugin. When the
+seat0 session locks, gnome-shell enters `unlock-dialog` session mode (`allowScreencast=false`); `js/ui/
+main.js _sessionUpdated()` then calls `MetaRemoteAccessController.inhibit_remote_access()`, whose
+documented contract is to **terminate any active remote-access session and refuse new ones**. So grd
+drops the console/virtual mirror the instant the seat locks, and refuses a fresh connect while locked —
+surfacing as the `Broken pipe` / `ERRCONNECT_CONNECT_TRANSPORT_FAILED` that the relay relabels "the
+physical screen is locked" (see I38). A viewer holding the last frame may briefly show a frozen pre-lock
+image, which *reads* as "the lock screen is shown," but no input is delivered. Stock GNOME behavior
+(gnome-shell MR !1210, unchanged 46→50); there is **no supported grd/mutter/gsettings knob** to allow
+streaming+input at the shield. **Live evidence (2026-09-08):** conn#17 connected while locked → bridge
+FAILED (broken pipe) → relay REFUSED "screen is locked"; the user then hit the panel Unlock button and
+conn#18 reconnected to the now-unlocked desktop. Confirmed with the user: they see the "screen is locked"
+failure, never a typable shield.
+
+**Recovery paths that DO work:** (a) the panel **Unlock** button — the admin-gated `control.py` `unlock`
+op → `edy-rdp-unlock@<uid>` → `loginctl unlock-session` of the caller's OWN locked seat. Verified secure:
+the helper unlocks only a session that is owned by the caller's uid AND on a seat AND Active AND
+LockedHint=yes AND graphical; a **different user cannot unlock the logged-on user's console** (the unit
+is instanced on the caller's SO_PEERCRED uid, and a non-admin is refused before that). (b) Prevent
+auto-lock on the shared seat (`org.gnome.desktop.screensaver lock-enabled=false`, `org.gnome.desktop.
+session idle-delay=0`). (c) For a *fresh* session (not the physical seat), use greeter/Remote-Login
+(native RDSTLS clients only on stock grd — see I29) or the Isolated / Wayland-VNC scenarios. The
+third-party "Allow Locked Remote Desktop" extension no-ops `inhibit_remote_access` (streams the shield
+and accepts a remote unlock). It is now **adopted as an OPT-IN, off by default** — bundled under
+`extensions/` and verified on GNOME 50.1 (see I38's RESOLUTION note and
+[docs/LOCKED-REMOTE-DESKTOP.md](LOCKED-REMOTE-DESKTOP.md)). The caveat stands — it also unlocks the
+physical console — which is exactly why it is never enabled by default.
+
+### I39a · Bridge keyboard mode — scancode kept; `/kbd:unicode:on` was tried and REVERTED · resolved
+The bridge launches xfreerdp3 in its **default SCANCODE mode** (no `/kbd:` option). A build in this cycle
+set **`/kbd:unicode:on`** on the theory that sending literal codepoints would carry password characters
+more faithfully through the browser-keysym → x11vnc XTEST → Xvfb → xfreerdp3 path. A controlled test on
+an Ubuntu 26.04 / GNOME 50 VM (memory `allow-locked-remote-desktop-vm`) **disproved that**: with unicode
+mode xfreerdp3 logged `int_MultiByteToWideChar: insufficient buffer supplied, got 1, required 2` for the
+injected keys and the **wrong password landed** — the field filled with the right *number* of dots, but
+authentication was rejected. Plain scancode transmitted the exact password and unlocked. **Resolution:
+reverted to scancode** in `bridge/edy-rdp-bridge-start.sh` (and on the live
+`/usr/libexec/edy-rdp/edy-rdp-bridge-start`). Lesson: for this X11-injection topology scancode is the
+faithful path — unicode input is meant for a client reading a real keyboard, not synthetic XTEST events.
+NOTE the original "typed password does nothing" report was **not** this: it was the *physical* seat's own
+gnome-shell unlock dialog (a local issue, not the browser path — see the memory), and the browser-path
+keyboard was already working.

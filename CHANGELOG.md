@@ -1,3 +1,21 @@
+## 1.1.3.20260909 - 2026-09-09
+
+Opt-in remote-unlock of a locked screen, and a keyboard-mode correction.
+
+- **NEW (opt-in, off by default): "Allow Locked Remote Desktop".** Bundled the pinned
+  third-party GNOME extension `allowlockedremotedesktop@kamens.us` (GPL) under
+  `extensions/`, with an enabler `extensions/enable-locked-remote-desktop.sh` and a
+  `deploy.sh --with-locked-remote-desktop` flag. It no-ops grd's teardown-on-lock so the
+  console/virtual mirror stays connected through a lock and can be unlocked remotely —
+  the resolution to KNOWN_ISSUES I38. Security tradeoff (it also unlocks the physical
+  console): see `docs/LOCKED-REMOTE-DESKTOP.md`. Verified end-to-end on Ubuntu 26.04 /
+  GNOME 50.
+- **REVERTED `/kbd:unicode:on` in the bridge (I39a).** A VM test showed unicode mode
+  mangles keys injected through the x11vnc→Xvfb path (`MultiByteToWideChar` buffer
+  errors → wrong password); scancode is faithful. Back to scancode.
+- Keyboard capture in the plugin now binds to the focusable display element (not the
+  document) so keystrokes reach the session.
+
 ## 1.1.2.20260907 - 2026-09-07
 
 Install classification is now decided by LAYOUT, not by a development-root path

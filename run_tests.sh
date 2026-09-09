@@ -41,12 +41,12 @@ echo "== DEPLOY-CONTRACT standing greps (section 4.4) =="
 g=0
 # 1. no shipped file names a source .env
 if grep -RIn --exclude-dir=.git -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
-     -- relay/ bridge/ headless/ rotate/ ./*.js ./*.sh 2>/dev/null; then
+     -- relay/ bridge/ headless/ rotate/ extensions/ ./*.js ./*.sh 2>/dev/null; then
   echo "  FAIL a shipped file names a source .env"; g=1; fi
 # 2. nothing resolves .env relative to itself
 if grep -RIn --exclude-dir=.git \
      -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
-     -- relay/ bridge/ headless/ rotate/ 2>/dev/null; then
+     -- relay/ bridge/ headless/ rotate/ extensions/ 2>/dev/null; then
   echo "  FAIL something resolves .env relative to itself"; g=1; fi
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -62,7 +62,7 @@ DEV_ROOT="/srv/smb/share/sc/${_ao}-group/${_ao}-storage/projects"
 RETIRED_ROOT="/opt/sc/${_retired}"
 if grep -RIn --exclude-dir=.git -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
      -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
-        headless/ rotate/ 2>/dev/null; then
+        headless/ rotate/ extensions/ 2>/dev/null; then
   echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
 # PAGE_DIRS must be installed as REAL directories of per-file links. cockpit-ws
 # serves a symlinked file but returns 404 for anything requested through a

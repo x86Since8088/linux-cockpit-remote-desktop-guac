@@ -440,7 +440,24 @@
             mouse.onEach(["mousedown", "mouseup", "mousemove"], function (e) { if (client) client.sendMouseState(e.state); });
         else
             mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function (st) { if (client) client.sendMouseState(st); };
-        keyboard = new Guacamole.Keyboard(document);
+        // Keyboard capture needs FOCUS. This plugin runs inside a Cockpit iframe,
+        // and Guacamole.Keyboard only sees keydown/keyup while its target element
+        // holds focus. It previously listened on `document` with nothing ever
+        // focusing the iframe, so keystrokes went to the Cockpit page and never
+        // into the RDP tunnel -- the relay saw mouse events but ZERO `key` events,
+        // so no password field (lock screen, sudo/polkit, greeter, remote host)
+        // ever received input. Bind the keyboard to the FOCUSABLE display element
+        // and (re)focus it on connect and on any pointer press so typing lands in
+        // the session. Binding to the display rather than `document` also keeps
+        // keystrokes out of the remote while the user edits the plugin's own form
+        // fields (host/port/credentials).
+        box.tabIndex = 0;
+        box.style.outline = "none";
+        var refocusDisplay = function () { try { box.focus(); } catch (e) {} };
+        display.getElement().addEventListener("mousedown", refocusDisplay, true);
+        display.getElement().addEventListener("touchstart", refocusDisplay, true);
+        refocusDisplay();
+        keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, k); };
         keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, k); };
         $("stop").disabled = false;
