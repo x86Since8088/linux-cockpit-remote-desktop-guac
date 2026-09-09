@@ -48,6 +48,7 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          relay/control.py:control.py
          relay/bridge.py:bridge.py
          bridge/edy-rdp-bridge-start.sh:edy-rdp-bridge-start
+         bridge/edy-rdp-krb-preflight.sh:edy-rdp-krb-preflight.sh
          headless/edy-rdp-headless-start.sh:edy-rdp-headless-start
          headless/edy-rdp-headless-stop.sh:edy-rdp-headless-stop
          waylandvnc/edy-rdp-waylandvnc-start.sh:edy-rdp-waylandvnc-start

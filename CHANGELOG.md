@@ -1,3 +1,21 @@
+## 1.1.4.20260909 - 2026-09-09
+
+Greeter (3390 Remote Login) works again, and NLA no longer hangs on a dead DC.
+
+- **NEW: Kerberos preflight for local-grd NLA** (`bridge/edy-rdp-krb-preflight.sh`,
+  wired into the bridge for loopback targets). FreeRDP3 tries Kerberos first, so a
+  down AD DC made xfreerdp3 hang ~2 min before falling back to NTLM. The preflight
+  probes every configured KDC's port 88 **in parallel with a 500 ms timeout**, points
+  krb5 at only the ones that answer, and — when none do — writes a krb5.conf with no
+  KDC so Kerberos fails instantly and NLA drops straight to NTLM (the door/gate users
+  are local grd credentials, never AD principals). Every attempt/result/decision is
+  logged to `<key>.krblog`. This unblocked the greeter, which was failing NLA before
+  the handover ever ran.
+- **grd handover patch re-deployed on edt1** (KNOWN_ISSUES I29): the method-call
+  handover daemon (`patches/grd-handover-method-call.patch`, sha `5c08514e`) is
+  installed over stock (backed up to `.orig-edt1`) and the package is held. With the
+  preflight in front of it, the GDM greeter renders and logs in over the browser path.
+
 ## 1.1.3.20260909 - 2026-09-09
 
 Opt-in remote-unlock of a locked screen, and a keyboard-mode correction.
