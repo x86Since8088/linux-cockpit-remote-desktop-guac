@@ -41,12 +41,12 @@ echo "== DEPLOY-CONTRACT standing greps (section 4.4) =="
 g=0
 # 1. no shipped file names a source .env
 if grep -RIn --exclude-dir=.git -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
-     -- relay/ bridge/ headless/ rotate/ ./*.js ./*.sh 2>/dev/null; then
+     -- relay/ bridge/ headless/ rotate/ extensions/ ./*.js ./*.sh 2>/dev/null; then
   echo "  FAIL a shipped file names a source .env"; g=1; fi
 # 2. nothing resolves .env relative to itself
 if grep -RIn --exclude-dir=.git \
      -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
-     -- relay/ bridge/ headless/ rotate/ 2>/dev/null; then
+     -- relay/ bridge/ headless/ rotate/ extensions/ 2>/dev/null; then
   echo "  FAIL something resolves .env relative to itself"; g=1; fi
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -62,8 +62,20 @@ DEV_ROOT="/srv/smb/share/sc/${_ao}-group/${_ao}-storage/projects"
 RETIRED_ROOT="/opt/sc/${_retired}"
 if grep -RIn --exclude-dir=.git -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
      -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
-        headless/ rotate/ 2>/dev/null; then
+        headless/ rotate/ extensions/ 2>/dev/null; then
   echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
+# PAGE_DIRS must be installed as REAL directories of per-file links. cockpit-ws
+# serves a symlinked file but returns 404 for anything requested through a
+# symlinked DIRECTORY, with nothing logged -- the page loads, then dies on the
+# first reference to what the directory held. A clean Rocky 9 install reproduced
+# it: every per-file link served 200 while guacamole-common-js/all.min.js served
+# 404 and the page threw "ReferenceError: Guacamole is not defined".
+if ! grep -q 'link_dir  *"\$SRC/\$f"' install.sh; then
+  echo "  FAIL install.sh does not install PAGE_DIRS via link_dir"; g=1; fi
+if grep -qE 'for f in "\$\{PAGE\[@\]\}" "\$\{PAGE_DIRS\[@\]\}"; do link_one' install.sh; then
+  echo "  FAIL install.sh symlinks PAGE_DIRS as if they were files"; g=1; fi
+if ! grep -q 'is a directory symlink' install.sh; then
+  echo "  FAIL install.sh lost its post-install directory-symlink assertion"; g=1; fi
 # every unit template renders with no placeholder left over
 for u in systemd/*.in; do
   [ -e "$u" ] || continue

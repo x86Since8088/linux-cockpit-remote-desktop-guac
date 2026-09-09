@@ -207,6 +207,31 @@ link_one() {
     say linked "$link -> $target"
 }
 
+# An asset DIRECTORY must be a real directory holding per-file links, never a
+# symlink to a directory. cockpit-ws serves a symlinked FILE inside a package
+# but will not serve anything through a symlinked DIRECTORY: the request comes
+# back 404 with nothing logged, so the page loads and then dies on the first
+# reference to whatever the directory held. Measured on a clean Rocky 9 install,
+# every per-file link answered 200 while the one directory link answered
+#     404  /cockpit/@localhost/guac-rdp/guacamole-common-js/all.min.js
+# and the page threw "ReferenceError: Guacamole is not defined". This is the
+# same rule install already applies to $CPKGDIR itself, one level down.
+link_dir() {
+    local src=$1 dir=$2 base
+    if [[ -L "$dir" ]]; then rm -f -- "$dir"; say unlinked "$dir (was a directory symlink)"; fi
+    install -d -m 0755 -- "$dir"
+    local f
+    for f in "$src"/*; do
+        [[ -e "$f" ]] || continue
+        link_one "$f" "$dir/$(basename -- "$f")"
+    done
+    # sweep entries that the payload no longer ships
+    while IFS= read -r -d '' stale; do
+        base="$(basename -- "$stale")"
+        [[ -e "$src/$base" ]] || { say sweeping "$base (gone from $src)"; remove_link "$stale"; }
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0)
+}
+
 render_unit_to_stdout() {
     # Two statements, not one. `local n=$1 tpl="$SRC/systemd/$n.in"` expands
     # BOTH assignment words before either binds, so $n is still unset when tpl
@@ -434,11 +459,16 @@ do_verify() {
     preflight
     printf 'installed state\n'
     local f t n
-    for f in "${PAGE[@]}" "${PAGE_DIRS[@]}"; do
+    for f in "${PAGE[@]}"; do
         if   [[ ! -L "$CPKGDIR/$f" ]]; then fail "$CPKGDIR/$f is not a symlink"
         elif ! t="$(readlink -f -- "$CPKGDIR/$f")" || [[ ! -e "$t" ]]; then
              fail "$CPKGDIR/$f DANGLES"
         else ok "$CPKGDIR/$f -> $t"; fi
+    done
+    for f in "${PAGE_DIRS[@]}"; do
+        if   [[ -L "$CPKGDIR/$f" ]]; then fail "$CPKGDIR/$f is a directory SYMLINK (cockpit will 404 through it)"
+        elif [[ ! -d "$CPKGDIR/$f" ]]; then fail "$CPKGDIR/$f is not a directory"
+        else ok "$CPKGDIR/$f is a real directory of $(find "$CPKGDIR/$f" -mindepth 1 -maxdepth 1 | wc -l) link(s)"; fi
     done
     for f in "${LIBEXEC[@]}"; do
         n="$(libexec_name "$f")"
@@ -489,7 +519,17 @@ do_uninstall() {
             && say removed "$LIBEXECDIR_D/__pycache__ (stale bytecode cache)"
     fi
     remove_dir_if_empty "$LIBEXECDIR_D"
-    for f in "${PAGE[@]}" "${PAGE_DIRS[@]}"; do remove_link "$CPKGDIR/$f"; done
+    for f in "${PAGE[@]}"; do remove_link "$CPKGDIR/$f"; done
+    for f in "${PAGE_DIRS[@]}"; do
+        # a real directory of links: empty it, then drop the directory itself
+        if [[ -d "$CPKGDIR/$f" && ! -L "$CPKGDIR/$f" ]]; then
+            while IFS= read -r -d '' e; do remove_link "$e"; done \
+                < <(find "$CPKGDIR/$f" -mindepth 1 -maxdepth 1 -print0)
+            remove_dir_if_empty "$CPKGDIR/$f"
+        else
+            remove_link "$CPKGDIR/$f"
+        fi
+    done
     remove_dir_if_empty "$CPKGDIR"
     remove_file "$INSTALL_CONF"
     remove_dir_if_empty "$ETCDIR"
@@ -517,7 +557,8 @@ do_install() {
     [[ -L "$CPKGDIR" ]] && die "$CPKGDIR is a symlink. /usr/share/cockpit/<name> is a
     WEB ROOT and must be a real directory of per-file links."
     local f n
-    for f in "${PAGE[@]}" "${PAGE_DIRS[@]}"; do link_one "$SRC/$f" "$CPKGDIR/$f"; done
+    for f in "${PAGE[@]}";      do link_one "$SRC/$f" "$CPKGDIR/$f"; done
+    for f in "${PAGE_DIRS[@]}"; do link_dir  "$SRC/$f" "$CPKGDIR/$f"; done
 
     local base keep stale
     while IFS= read -r -d '' stale; do
@@ -585,10 +626,22 @@ EOF
 
     printf '\npost-install assertion\n'
     local t
-    for f in "${PAGE[@]}" "${PAGE_DIRS[@]}"; do
+    for f in "${PAGE[@]}"; do
         [[ -L "$CPKGDIR/$f" ]] || die "post-install: $CPKGDIR/$f is not a symlink"
         t="$(readlink -f -- "$CPKGDIR/$f")"
         [[ -e "$t" && "$t" == "$SRC"/* ]] || die "post-install: $CPKGDIR/$f -> $t"
+    done
+    for f in "${PAGE_DIRS[@]}"; do
+        [[ -L "$CPKGDIR/$f" ]] && die "post-install: $CPKGDIR/$f is a directory symlink.
+    cockpit-ws returns 404 for every file requested through one."
+        [[ -d "$CPKGDIR/$f" ]] || die "post-install: $CPKGDIR/$f is not a directory"
+        local e n_e=0
+        while IFS= read -r -d '' e; do
+            t="$(readlink -f -- "$e")"
+            [[ -e "$t" && "$t" == "$SRC"/* ]] || die "post-install: $e -> $t"
+            n_e=$((n_e+1))
+        done < <(find "$CPKGDIR/$f" -mindepth 1 -maxdepth 1 -print0)
+        (( n_e > 0 )) || die "post-install: $CPKGDIR/$f is empty"
     done
     ok "${#PAGE[@]} page links + ${#PAGE_DIRS[@]} asset dir(s) resolve inside $SRC"
     for f in "${LIBEXEC[@]}"; do
