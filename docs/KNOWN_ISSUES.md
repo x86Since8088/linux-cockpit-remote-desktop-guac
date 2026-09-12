@@ -591,3 +591,18 @@ faithful path — unicode input is meant for a client reading a real keyboard, n
 NOTE the original "typed password does nothing" report was **not** this: it was the *physical* seat's own
 gnome-shell unlock dialog (a local issue, not the browser path — see the memory), and the browser-path
 keyboard was already working.
+
+### I40 · Door-credential NLA hangs ~2 min when the AD DC is down (FreeRDP3 Kerberos-first) · Sev M · FIXED (krb preflight)
+FreeRDP3 attempts **Kerberos before NTLM**. The local-seat scenarios authenticate to grd with a LOCAL grd
+"door"/"gate" credential (`rdplogin` on 3390, `rdplocal`/gate key on 3389) whose principal is **not in the
+AD KDB**, so Kerberos can only ever fail for them — but when a domain controller is *unreachable*
+(e.g. the samba-AD-lab DCs are down after a reboot), xfreerdp3 **hangs ~2 minutes** on the dead KDC before
+NLA fails and it would fall back to NTLM. Observed live: `client authentication failure` logged ~2¼ min
+after connect; the greeter never reached its handover (looked like the I29 handover failure but was NLA).
+The realm's KDCs (`dc1..dc5.ad.edt1.lab`) come from `/etc/krb5.conf.d/`; `172.15.4.10:88` was closed.
+**Fix:** `bridge/edy-rdp-krb-preflight.sh` (wired into the bridge for loopback targets) reads the realm +
+its KDC list and probes **every KDC's port 88 in parallel with a 500 ms timeout**, then writes a
+per-request `KRB5_CONFIG` listing only the KDCs that answered (`dns_lookup_kdc=false`) — or, if none answer,
+one with **no KDC** so Kerberos fails instantly and NLA uses NTLM. Total added latency ~0.5–0.7 s. Every
+probe result + the decision are logged to `<key>.krblog`. Scoped to loopback so a remote host's own realm
+is untouched. This unblocked the greeter (I29) on a host whose AD DCs were down.
