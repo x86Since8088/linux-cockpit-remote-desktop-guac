@@ -225,10 +225,41 @@
     var client = null, tunnel = null, keyboard = null, isAdmin = false;
 
     // Lock-key (NumLock/CapsLock/ScrollLock) sync state. remoteLocks models the
-    // lock state the SESSION currently has (relative to the all-off baseline a
-    // fresh bridge starts from); lockSyncHandler is the capture-phase keydown
-    // listener that keeps it aligned to the browser. See the keyboard block.
-    var remoteLocks = null, lockSyncHandler = null;
+    // lock state the SESSION currently has (baseline all-off, a fresh bridge);
+    // browserLocks is the last-seen browser state (null until first observed);
+    // lockSyncHandler is the capture-phase keydown listener. See the keyboard
+    // block for how they interact with the on-screen Num Lock toggle.
+    var remoteLocks = null, browserLocks = null, lockSyncHandler = null;
+    var LOCK_KEYSYM = { NumLock: 0xFF7F, CapsLock: 0xFFE5, ScrollLock: 0xFF14 };
+
+    // Send a lock key (press+release) into the session. It rides the normal key
+    // path (guacd -> x11vnc XTEST -> Xvfb -> xfreerdp3 -> grd), toggling the lock
+    // at every hop, including grd's own RDP lock sync.
+    function sendLockKeysym(name) {
+        if (!client || !LOCK_KEYSYM[name]) return;
+        client.sendKeyEvent(1, LOCK_KEYSYM[name]);
+        client.sendKeyEvent(0, LOCK_KEYSYM[name]);
+    }
+    // Reflect the session's NumLock state on the on-screen toggle button.
+    function updateLockButtons() {
+        var b = $("numlock");
+        if (!b) return;
+        var on = !!(remoteLocks && remoteLocks.NumLock);
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    // Toggle a session lock from the on-screen control, independent of the
+    // physical keyboard (for laptops/keyboards without a numpad, or browsers that
+    // will not forward NumLock). It moves the SESSION but NOT browserLocks, and
+    // the auto-sync only mirrors CHANGES to the browser's locks, so a manual
+    // toggle is never reverted by the next keystroke.
+    function toggleSessionLock(name) {
+        if (!client || !remoteLocks) return;
+        sendLockKeysym(name);
+        remoteLocks[name] = !remoteLocks[name];
+        updateLockButtons();
+        try { $("display").focus(); } catch (e) {}   // keep typing landing in the session
+    }
 
     var disposing = false;
 
@@ -241,7 +272,12 @@
         if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
         var lockBox = $("display");
         if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
-        lockSyncHandler = null; remoteLocks = null;
+        lockSyncHandler = null; remoteLocks = null; browserLocks = null;
+        if ($("numlock")) {
+            $("numlock").disabled = true;
+            $("numlock").classList.remove("on");
+            $("numlock").setAttribute("aria-pressed", "false");
+        }
 
         function dispose() {
             try { if (tunnel) tunnel.disconnect(); } catch (e) { /* ignore */ }
@@ -470,41 +506,52 @@
         keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, k); };
         keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, k); };
 
-        // NumLock/CapsLock/ScrollLock sync. Guacamole.Keyboard forwards a lock
-        // KEY when it is pressed live, but it does not know the browser's CURRENT
-        // lock state -- so a session started while the browser already holds (say)
-        // NumLock gets the opposite state, and x11vnc then has to fake the missing
-        // modifier when it XTEST-injects KP_* keysyms into the Xvfb and mis-types
-        // the numpad (End instead of 1, etc.). We reconcile here. The session's
-        // baseline at connect is all locks OFF (a fresh Xvfb; xfreerdp3 syncs that
-        // to grd on connect), so remoteLocks starts all-false and, on the first
-        // real key (and on any later drift), we toggle the session's locks to match
-        // the browser by sending the lock keysym -- which rides the normal key path
-        // (guacd -> x11vnc XTEST -> Xvfb -> xfreerdp3 -> grd), toggling every hop.
-        var LOCK_KEYSYM = { NumLock: 0xFF7F, CapsLock: 0xFFE5, ScrollLock: 0xFF14 };
-        remoteLocks = { NumLock: false, CapsLock: false, ScrollLock: false };
+        // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
+        // forwards a lock KEY when it is pressed live, but never knew the browser's
+        // CURRENT lock state -- so a session opened while the browser already holds
+        // NumLock started inverted, and x11vnc then faked the missing modifier when
+        // it XTEST-injected KP_* keysyms into the Xvfb and mis-typed the numpad
+        // (End instead of 1, etc.). We ALIGN the session to the browser once (the
+        // first keystroke), then MIRROR only later CHANGES to the browser's locks
+        // -- edge-triggered, not level-forced -- so the on-screen "Num Lock" button
+        // (toggleSessionLock, which moves the session but not browserLocks) is
+        // never reverted by the next keystroke. Baseline is the fresh Xvfb's
+        // all-off state, which xfreerdp3 syncs to grd on connect. The keysyms ride
+        // the normal key path (guacd -> x11vnc XTEST -> Xvfb -> xfreerdp3 -> grd).
+        remoteLocks  = { NumLock: false, CapsLock: false, ScrollLock: false };
+        browserLocks = { NumLock: null,  CapsLock: null,  ScrollLock: null };
         if (lockSyncHandler) box.removeEventListener("keydown", lockSyncHandler, true);
         lockSyncHandler = function (e) {
             if (!client || !remoteLocks || typeof e.getModifierState !== "function") return;
             var lk = e.code || e.key;
-            // The lock keys themselves are already forwarded by Guacamole.Keyboard
-            // (which toggles the session); just track that so our model stays
-            // truthful and we do not double-toggle.
-            if (LOCK_KEYSYM.hasOwnProperty(lk)) { remoteLocks[lk] = !remoteLocks[lk]; return; }
-            // Any other key: bring the session's locks in line with the browser's
-            // actual state. Runs in the CAPTURE phase, before Guacamole forwards
-            // this key, so a numpad key lands with the modifier already correct.
+            if (LOCK_KEYSYM.hasOwnProperty(lk)) {
+                // Physical lock key: Guacamole.Keyboard forwards it (toggling the
+                // session); track both models so we neither double-toggle nor
+                // later mis-mirror it as a browser "change".
+                remoteLocks[lk] = !remoteLocks[lk];
+                if (browserLocks[lk] !== null) browserLocks[lk] = !browserLocks[lk];
+                updateLockButtons();
+                return;
+            }
+            // Any other key (CAPTURE phase, before Guacamole forwards it): align to
+            // the browser on first sight, then mirror only subsequent changes.
             Object.keys(LOCK_KEYSYM).forEach(function (name) {
-                var on;
-                try { on = e.getModifierState(name); } catch (err) { return; }
-                if (on === remoteLocks[name]) return;
-                var ks = LOCK_KEYSYM[name];
-                client.sendKeyEvent(1, ks); client.sendKeyEvent(0, ks);
-                remoteLocks[name] = on;
+                var cur;
+                try { cur = e.getModifierState(name); } catch (err) { return; }
+                if (browserLocks[name] === null) {
+                    if (cur !== remoteLocks[name]) { sendLockKeysym(name); remoteLocks[name] = cur; }
+                    browserLocks[name] = cur;
+                } else if (cur !== browserLocks[name]) {
+                    sendLockKeysym(name); remoteLocks[name] = !remoteLocks[name];
+                    browserLocks[name] = cur;
+                }
             });
+            updateLockButtons();
         };
         box.addEventListener("keydown", lockSyncHandler, true);
         $("stop").disabled = false;
+        if ($("numlock")) $("numlock").disabled = false;
+        updateLockButtons();
     }
 
     function refreshUi() {
@@ -835,6 +882,7 @@
         $("target").addEventListener("change", refreshUi);
         $("authmode").addEventListener("change", refreshUi);
         $("go").addEventListener("click", function () { connect(); });
+        $("numlock").addEventListener("click", function () { toggleSessionLock("NumLock"); });
         $("scale").addEventListener("change", function () {
             scaleMode = $("scale").value; applyScale();
         });

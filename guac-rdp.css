@@ -17,6 +17,8 @@ select, input, button { padding:.35rem .5rem; font:inherit; border:1px solid #8a
        border-radius:3px; background:var(--panel); color:var(--ink); }
 button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
 button.sec { background:var(--panel); color:var(--ink); border-color:#8a8d90; }
+/* A toggle button (e.g. Num Lock) shows its ON state with the accent fill. */
+button.toggle.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 button:disabled { opacity:.5; cursor:default; }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }

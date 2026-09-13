@@ -1,3 +1,19 @@
+## 1.1.6.20260913 - 2026-09-13
+
+On-screen **Num Lock** toggle, and lock sync is now edge-triggered.
+
+- **NEW: a "Num Lock" toggle button** in the connect bar (`index.html`,
+  `guac-rdp.js`, `guac-rdp.css`). It sends NumLock into the session on demand —
+  for laptops/keyboards with no numpad key, or browsers that will not forward
+  NumLock — shows its on/off state (accent fill), and refocuses the display so
+  typing keeps landing in the session. Enabled only while connected.
+- **Lock sync is now edge-triggered, not level-forced.** The reconcile added in
+  1.1.5 aligned the session to the browser on the first keystroke; it now mirrors
+  only *subsequent changes* to the browser's locks (tracked in `browserLocks`).
+  That is what lets the manual toggle coexist: it moves the session but not
+  `browserLocks`, so the next keystroke no longer reverts it. Physical lock-key
+  presses still ride Guacamole's own path and are tracked, never double-toggled.
+
 ## 1.1.5.20260913 - 2026-09-13
 
 Keyboard lock-state (NumLock / CapsLock / ScrollLock) sync.
