@@ -224,6 +224,12 @@
     // ---- connect flow -------------------------------------------------------
     var client = null, tunnel = null, keyboard = null, isAdmin = false;
 
+    // Lock-key (NumLock/CapsLock/ScrollLock) sync state. remoteLocks models the
+    // lock state the SESSION currently has (relative to the all-off baseline a
+    // fresh bridge starts from); lockSyncHandler is the capture-phase keydown
+    // listener that keeps it aligned to the browser. See the keyboard block.
+    var remoteLocks = null, lockSyncHandler = null;
+
     var disposing = false;
 
     // Graceful: send the Guacamole "disconnect" to the backend (relay -> guacd ->
@@ -233,6 +239,9 @@
         if (disposing) return;
         disposing = true;
         if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
+        var lockBox = $("display");
+        if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
+        lockSyncHandler = null; remoteLocks = null;
 
         function dispose() {
             try { if (tunnel) tunnel.disconnect(); } catch (e) { /* ignore */ }
@@ -460,6 +469,41 @@
         keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, k); };
         keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, k); };
+
+        // NumLock/CapsLock/ScrollLock sync. Guacamole.Keyboard forwards a lock
+        // KEY when it is pressed live, but it does not know the browser's CURRENT
+        // lock state -- so a session started while the browser already holds (say)
+        // NumLock gets the opposite state, and x11vnc then has to fake the missing
+        // modifier when it XTEST-injects KP_* keysyms into the Xvfb and mis-types
+        // the numpad (End instead of 1, etc.). We reconcile here. The session's
+        // baseline at connect is all locks OFF (a fresh Xvfb; xfreerdp3 syncs that
+        // to grd on connect), so remoteLocks starts all-false and, on the first
+        // real key (and on any later drift), we toggle the session's locks to match
+        // the browser by sending the lock keysym -- which rides the normal key path
+        // (guacd -> x11vnc XTEST -> Xvfb -> xfreerdp3 -> grd), toggling every hop.
+        var LOCK_KEYSYM = { NumLock: 0xFF7F, CapsLock: 0xFFE5, ScrollLock: 0xFF14 };
+        remoteLocks = { NumLock: false, CapsLock: false, ScrollLock: false };
+        if (lockSyncHandler) box.removeEventListener("keydown", lockSyncHandler, true);
+        lockSyncHandler = function (e) {
+            if (!client || !remoteLocks || typeof e.getModifierState !== "function") return;
+            var lk = e.code || e.key;
+            // The lock keys themselves are already forwarded by Guacamole.Keyboard
+            // (which toggles the session); just track that so our model stays
+            // truthful and we do not double-toggle.
+            if (LOCK_KEYSYM.hasOwnProperty(lk)) { remoteLocks[lk] = !remoteLocks[lk]; return; }
+            // Any other key: bring the session's locks in line with the browser's
+            // actual state. Runs in the CAPTURE phase, before Guacamole forwards
+            // this key, so a numpad key lands with the modifier already correct.
+            Object.keys(LOCK_KEYSYM).forEach(function (name) {
+                var on;
+                try { on = e.getModifierState(name); } catch (err) { return; }
+                if (on === remoteLocks[name]) return;
+                var ks = LOCK_KEYSYM[name];
+                client.sendKeyEvent(1, ks); client.sendKeyEvent(0, ks);
+                remoteLocks[name] = on;
+            });
+        };
+        box.addEventListener("keydown", lockSyncHandler, true);
         $("stop").disabled = false;
     }
 

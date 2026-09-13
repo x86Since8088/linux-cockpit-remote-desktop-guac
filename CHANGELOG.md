@@ -1,3 +1,22 @@
+## 1.1.5.20260913 - 2026-09-13
+
+Keyboard lock-state (NumLock / CapsLock / ScrollLock) sync.
+
+- **NEW: lock-key sync in the plugin** (`guac-rdp.js`). The bundled
+  `Guacamole.Keyboard` forwards a lock KEY when it is pressed live, but it does
+  not know the browser's CURRENT lock state, so a session opened while the
+  browser already holds NumLock started with the opposite state: x11vnc then had
+  to fake the missing modifier when it XTEST-injected `KP_*` keysyms into the
+  Xvfb and mis-typed the numpad (End instead of 1, and so on). The plugin now
+  reconciles NumLock/CapsLock/ScrollLock to the browser's actual state (read via
+  the DOM `getModifierState`) on the first keystroke, and self-heals on drift, by
+  sending the lock keysym — which rides the normal key path
+  (guacd → x11vnc XTEST → Xvfb → xfreerdp3 → grd), toggling every hop, including
+  grd's own RDP lock sync. Live lock-key presses still ride Guacamole's own path
+  (the handler only tracks them, so it never double-toggles). The session's
+  baseline is all-off (a fresh Xvfb, synced to grd on connect); no bridge, relay
+  or guacd change was needed.
+
 ## 1.1.4.20260909 - 2026-09-09
 
 Greeter (3390 Remote Login) works again, and NLA no longer hangs on a dead DC.
