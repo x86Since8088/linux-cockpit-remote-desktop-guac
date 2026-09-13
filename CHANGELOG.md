@@ -1,3 +1,27 @@
+## 1.1.7.20260913 - 2026-09-13
+
+Sound and clipboard passthrough are now gated by **live** toggles.
+
+- **Clipboard passthrough is now actually wired to the browser** and gated live by
+  the Clipboard checkbox (`guac-rdp.js`). Previously the checkbox only set guacd's
+  `disable-copy`/`disable-paste` at connect while the plugin implemented no
+  client-side clipboard at all, so nothing reached the browser. Now
+  `client.onclipboard` writes the remote clipboard into the browser (remote →
+  local) and a display-focus reader pushes the local clipboard into the session
+  (local → remote), each honouring a live `clipboardOn` flag — the browser's own
+  clipboard is touched only while the toggle is on. Best-effort: the browser
+  Clipboard API can be restricted inside a Cockpit iframe, so every access is
+  guarded and a denial degrades to "no sync", never an error.
+- **Sound gates live** (`guac-rdp.js`). Audio is now always negotiated with guacd
+  and playback is muted/unmuted instantly by suspending/resuming Guacamole's
+  shared `AudioContext` — so Sound toggles mid-session with no reconnect (resume
+  runs from the toggle click, satisfying autoplay policy). guacd produces silence
+  when the deployment has no audio source, so always offering the channel is
+  harmless.
+- Both toggles are wired to apply on `change` during a live session; `guacdValues`
+  no longer sets `disable-copy`/`disable-paste` (a connect-time gate that would
+  defeat a live toggle) — the gate now lives in the browser.
+
 ## 1.1.6.20260913 - 2026-09-13
 
 On-screen **Num Lock** toggle, and lock sync is now edge-triggered.

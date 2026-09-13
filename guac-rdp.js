@@ -63,17 +63,43 @@
     }
 
     function $(id) { return document.getElementById(id); }
-    // Clipboard is on by default because a remote desktop you cannot paste into is
-    // a demo, not a tool. Audio is off by default: it needs an audio server the
-    // deployment may not have wired, and silently negotiating a channel that then
-    // produces nothing is worse than not offering it.
+    // guacd VNC parameters. Both the clipboard and the audio channels are ALWAYS
+    // negotiated with guacd so the Clipboard/Sound toggles can gate them LIVE in
+    // the browser -- with no reconnect -- rather than only at connect:
+    //   * clipboard: client.onclipboard (remote->browser) and a focus reader
+    //     (browser->remote) honour the live clipboardOn flag; the browser's own
+    //     clipboard is only ever touched while the toggle is on.
+    //   * sound: playback is gated by suspending/resuming the shared Guacamole
+    //     AudioContext (instant, mid-stream). guacd simply produces silence when
+    //     the deployment has no audio source, so always offering it is harmless.
+    // We deliberately do NOT set disable-copy/disable-paste here: those are fixed
+    // at connect and would defeat a live toggle. The gate lives in the browser.
     function guacdValues() {
-        var v = {};
-        var clip = $("opt-clipboard");
-        if (clip && !clip.checked) { v["disable-copy"] = "true"; v["disable-paste"] = "true"; }
-        var aud = $("opt-audio");
-        if (aud && aud.checked) v["enable-audio"] = "true";
-        return v;
+        return { "enable-audio": "true" };
+    }
+
+    // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
+    var clipboardOn = true, soundOn = false, clipReadHandler = null;
+    function syncPassthroughFlags() {
+        clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
+        soundOn = !!($("opt-audio") && $("opt-audio").checked);
+    }
+    // Sound gate: suspend/resume Guacamole's shared AudioContext. suspend() mutes
+    // playback instantly, mid-stream; resume() is driven from the toggle's own
+    // click (a user gesture), which satisfies browser autoplay policy.
+    function applySoundGate() {
+        try {
+            var f = Guacamole.AudioContextFactory;
+            var ctx = f && f.getAudioContext && f.getAudioContext();
+            if (!ctx) return;
+            if (soundOn) { if (ctx.state === "suspended" && ctx.resume) ctx.resume(); }
+            else if (ctx.state === "running" && ctx.suspend) ctx.suspend();
+        } catch (e) { /* no Web Audio in this context -> nothing to gate */ }
+    }
+    // Read and drop a text stream we will not use (clipboard toggled off).
+    function discardTextStream(stream) {
+        try { var r = new Guacamole.StringReader(stream); r.ontext = function () {}; r.onend = function () {}; }
+        catch (e) { /* ignore */ }
     }
 
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
@@ -272,7 +298,8 @@
         if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
         var lockBox = $("display");
         if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
-        lockSyncHandler = null; remoteLocks = null; browserLocks = null;
+        if (lockBox && clipReadHandler) lockBox.removeEventListener("focus", clipReadHandler, true);
+        lockSyncHandler = null; clipReadHandler = null; remoteLocks = null; browserLocks = null;
         if ($("numlock")) {
             $("numlock").disabled = true;
             $("numlock").classList.remove("on");
@@ -426,6 +453,24 @@
         var display = client.getDisplay();
         box.innerHTML = ""; box.appendChild(display.getElement());
 
+        // Clipboard passthrough (remote -> browser), gated live by the Clipboard
+        // toggle. Best-effort: the browser Clipboard API can be restricted inside a
+        // Cockpit iframe, so every access is guarded -- a denial degrades to "no
+        // sync", never an error, and the OS clipboard is only written while ON.
+        syncPassthroughFlags();
+        client.onclipboard = function (stream, mimetype) {
+            if (!clipboardOn || !/^text\//.test(mimetype || "text/plain")) { discardTextStream(stream); return; }
+            var reader = new Guacamole.StringReader(stream), text = "";
+            reader.ontext = function (t) { text += t; };
+            reader.onend = function () {
+                if (!clipboardOn) return;
+                try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text); }
+                catch (e) { /* clipboard-write blocked */ }
+            };
+        };
+        // Sound is negotiated (enable-audio); start it gated to the toggle's state.
+        applySoundGate();
+
         var errored = false;
         function explain(prefix, e) {
             errored = true;
@@ -502,6 +547,26 @@
         display.getElement().addEventListener("mousedown", refocusDisplay, true);
         display.getElement().addEventListener("touchstart", refocusDisplay, true);
         refocusDisplay();
+        // Clipboard passthrough (browser -> remote), gated live by the Clipboard
+        // toggle: when the display takes focus and the toggle is on, push the local
+        // clipboard into the session. Best-effort (readText may be blocked in the
+        // iframe); failure is silent so it never disrupts the connection.
+        if (clipReadHandler) box.removeEventListener("focus", clipReadHandler, true);
+        clipReadHandler = function () {
+            if (!client || !clipboardOn) return;
+            try {
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    navigator.clipboard.readText().then(function (text) {
+                        if (!client || !clipboardOn || !text) return;
+                        try {
+                            var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
+                            w.sendText(text); w.sendEnd();
+                        } catch (e) { /* stream unavailable */ }
+                    }).catch(function () { /* clipboard-read blocked */ });
+                }
+            } catch (e) { /* no Clipboard API */ }
+        };
+        box.addEventListener("focus", clipReadHandler, true);
         keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, k); };
         keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, k); };
@@ -883,6 +948,17 @@
         $("authmode").addEventListener("change", refreshUi);
         $("go").addEventListener("click", function () { connect(); });
         $("numlock").addEventListener("click", function () { toggleSessionLock("NumLock"); });
+        // Sound / Clipboard passthrough toggles gate LIVE, during a session.
+        $("opt-clipboard").addEventListener("change", function () {
+            clipboardOn = $("opt-clipboard").checked;
+            if (client) setStatus(clipboardOn ? "Clipboard passthrough on." : "Clipboard passthrough off.");
+        });
+        $("opt-audio").addEventListener("change", function () {
+            soundOn = $("opt-audio").checked;
+            applySoundGate();
+            if (client) setStatus(soundOn ? "Sound on." : "Sound muted.");
+        });
+        syncPassthroughFlags();
         $("scale").addEventListener("change", function () {
             scaleMode = $("scale").value; applyScale();
         });
