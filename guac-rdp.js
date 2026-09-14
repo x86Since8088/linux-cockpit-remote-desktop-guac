@@ -574,14 +574,19 @@
 
     function start(key, cred, sessiontoken, geomOverride) {
         var t = TARGETS[key], box = $("display");
-        // geomOverride pins the internal path to a fixed (native) resolution; the
-        // browser then scales it (display.onresize -> applyScale). Otherwise the
-        // session is sized to the current window.
+        var winW = Math.max(box.clientWidth, 640), winH = Math.max(box.clientHeight, 480);
+        // Resolution policy for the mirror (geomOverride = the monitor's NATIVE
+        // resolution). Never send MORE pixels than the monitor has -- cap at native
+        // and let the BROWSER upscale above it. BELOW native, downscale on the
+        // server (grd/guacd) to the window size to cut network traffic, preserving
+        // the native aspect. Non-mirror scenarios are sized to the window as before.
         var w, h;
         if (geomOverride && geomOverride.w && geomOverride.h) {
-            w = geomOverride.w; h = geomOverride.h;
+            var s = Math.min(1, winW / geomOverride.w, winH / geomOverride.h);
+            w = Math.max(1, Math.round(geomOverride.w * s));
+            h = Math.max(1, Math.round(geomOverride.h * s));
         } else {
-            w = Math.max(box.clientWidth, 640); h = Math.max(box.clientHeight, 480);
+            w = winW; h = winH;
         }
         // The relay injects the VNC target (the per-connection FreeRDP3 bridge); the
         // browser sends no target values. For non-managed scenarios the fetched/entered

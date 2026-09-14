@@ -1,3 +1,16 @@
+## 1.2.3.20260913 - 2026-09-13
+
+Mirror resolution policy: downscale on the server, upscale in the browser.
+
+- **The mirror now caps the requested resolution at native and downscales
+  server-side when the window is smaller** (`guac-rdp.js`). 1.2.2 always sent the
+  full native resolution, which wasted bandwidth when the window was smaller than
+  the monitor. Now the geometry is the native resolution scaled by
+  `min(1, winW/nativeW, winH/nativeH)`: below native, grd/guacd downscale to the
+  window size (fewer pixels on the wire — a half-size window sends ~¼ the pixels),
+  preserving the native aspect; at or above native the browser upscales (never
+  send more pixels than the monitor has). Non-mirror scenarios are unchanged.
+
 ## 1.2.2.20260913 - 2026-09-13
 
 Mirror runs at native resolution; the browser does all the scaling.
