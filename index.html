@@ -59,6 +59,17 @@
                autocomplete="new-password" size="14">
       </div>
       <div class="f">
+        <label for="resolution" title="The resolution requested from the session (the guest framebuffer). The browser scales it to the window. 'Window size' tracks the window; a fixed value pins the guest resolution.">Resolution</label>
+        <select id="resolution">
+          <option value="window">Window size</option>
+          <option value="1280x720">1280 &times; 720</option>
+          <option value="1600x900">1600 &times; 900</option>
+          <option value="1920x1080">1920 &times; 1080</option>
+          <option value="2560x1440">2560 &times; 1440</option>
+          <option value="3840x2160">3840 &times; 2160</option>
+        </select>
+      </div>
+      <div class="f">
         <label for="scale">Scale</label>
         <select id="scale">
           <option value="fit">Fit to window</option>
@@ -119,6 +130,6 @@
     </table>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.2.5.20260913</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.2.6.20260914</span></footer>
 </body>
 </html>

@@ -204,6 +204,7 @@
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
     // the point -- an operator pinning 100% wants pixel-exact, not helpfully resized.
     var scaleMode = "fit";
+    var activeKey = null;   // scenario of the live session, for reconnect-on-change
     // The factor currently applied via display.scale(). The bundled
     // Guacamole.Mouse maps pointer events through the display element's LAYOUT
     // box (offsetLeft/offsetParent) WITHOUT dividing by the scale, and
@@ -259,6 +260,17 @@
                 return best ? { w: parseInt(best[1], 10), h: parseInt(best[2], 10) } : null;
             })
             .catch(function () { return null; });
+    }
+
+    // Resolution the session should render at, from the toolbar selector.
+    //   "Window size" -> the mirror uses the native-capped policy (start() downscales
+    //                    below native); other scenarios use the window size.
+    //   a fixed WxH   -> pin the guest framebuffer to exactly that (browser scales it).
+    function chosenGeom(key) {
+        var sel = $("resolution"), r = sel ? sel.value : "window";
+        var m = /^(\d+)x(\d+)$/.exec(r);
+        if (m) return cockpit.resolve({ w: parseInt(m[1], 10), h: parseInt(m[2], 10), exact: true });
+        return (key === "console") ? queryNativeGeom() : cockpit.resolve(null);
     }
 
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
@@ -544,9 +556,9 @@
             }
             ensureMode(key).then(function () { return creds; })
                 .then(function (cred) {
-                    // The mirror runs the internal path at the monitor's NATIVE
-                    // resolution (no server-side scaling); the browser scales it.
-                    return ((key === "console") ? queryNativeGeom() : cockpit.resolve(null))
+                    // Geometry from the Resolution selector (Window size vs a pinned
+                    // resolution); the mirror's "Window size" is native-capped.
+                    return chosenGeom(key)
                         .then(function (geom) { start(key, cred, reg.token, geom); });
                 })
                 .catch(function (e) {
@@ -573,18 +585,26 @@
     }
 
     function start(key, cred, sessiontoken, geomOverride) {
+        activeKey = key;
         var t = TARGETS[key], box = $("display");
         var winW = Math.max(box.clientWidth, 640), winH = Math.max(box.clientHeight, 480);
-        // Resolution policy for the mirror (geomOverride = the monitor's NATIVE
-        // resolution). Never send MORE pixels than the monitor has -- cap at native
-        // and let the BROWSER upscale above it. BELOW native, downscale on the
-        // server (grd/guacd) to the window size to cut network traffic, preserving
-        // the native aspect. Non-mirror scenarios are sized to the window as before.
+        // Geometry sent to the backend; the browser always scales the result to the
+        // window (display.onresize -> applyScale). geomOverride:
+        //   .exact -> a PINNED resolution from the selector: send it verbatim, and
+        //             let the browser up/downscale it to the window.
+        //   else   -> a native cap (the mirror's "Window size"): send min(window,
+        //             native), so the server downscales BELOW native to cut network
+        //             traffic (aspect preserved) and never sends more than native.
+        // No override -> size to the window.
         var w, h;
         if (geomOverride && geomOverride.w && geomOverride.h) {
-            var s = Math.min(1, winW / geomOverride.w, winH / geomOverride.h);
-            w = Math.max(1, Math.round(geomOverride.w * s));
-            h = Math.max(1, Math.round(geomOverride.h * s));
+            if (geomOverride.exact) {
+                w = geomOverride.w; h = geomOverride.h;
+            } else {
+                var s = Math.min(1, winW / geomOverride.w, winH / geomOverride.h);
+                w = Math.max(1, Math.round(geomOverride.w * s));
+                h = Math.max(1, Math.round(geomOverride.h * s));
+            }
         } else {
             w = winW; h = winH;
         }
@@ -1129,6 +1149,15 @@
         syncPassthroughFlags();
         $("scale").addEventListener("change", function () {
             scaleMode = $("scale").value; applyScale();
+        });
+        // Resolution is fixed at connect, so changing it live reconnects the session
+        // (same scenario) at the new geometry. Idle -> applies on the next connect.
+        $("resolution").addEventListener("change", function () {
+            if (client && activeKey) {
+                setStatus("Applying resolution…");
+                teardown(true);
+                window.setTimeout(function () { connect(activeKey); }, 80);
+            }
         });
         // On resize, re-fit and re-sync the pointer mapping. applyScale() recomputes
         // curScale (fit follows the window; a pinned factor stays put) and the mouse

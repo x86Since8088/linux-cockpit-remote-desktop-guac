@@ -1,3 +1,17 @@
+## 1.2.6.20260914 - 2026-09-14
+
+Resolution selector.
+
+- **NEW: a "Resolution" dropdown** in the toolbar (`index.html`, `guac-rdp.js`).
+  It sets the resolution requested from the session (the guest framebuffer); the
+  browser then scales it to the window with the existing machinery (fit-scaling +
+  the 1.2.1 pointer alignment). Default **"Window size"** keeps today's behaviour
+  (the mirror stays native-capped/​bandwidth-saving; other scenarios track the
+  window). A fixed value (1280x720 ... 3840x2160) **pins** the guest resolution
+  verbatim. Because resolution is fixed at connect, changing it live reconnects the
+  same scenario at the new geometry; idle, it applies on the next connect. Distinct
+  from **Scale**, which only zooms whatever is streaming.
+
 ## 1.2.5.20260913 - 2026-09-13
 
 Desktop audio streaming for the mirror (opt-in).
