@@ -73,6 +73,28 @@ GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
 #   Janua (FreeRDP 3 fork)   -> /usr/local/sbin/guacd
 GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
 
+# --- audio streaming (optional, off by default) -----------------------------
+# The Sound toggle streams the desktop's audio to the browser. guacd captures it
+# from the seat's PipeWire/PulseAudio and the unit passes these vars into the
+# container. The unit bind-mounts the seat's pulse SOCKET to a stable host path
+# and hands it in as unix:/run/pulse.sock (a TCP endpoint was tried first but
+# pipewire-pulse does not deliver recording audio over module-native-protocol-tcp).
+# To enable (see docs/AUDIO.md for detail):
+#   1. Find the monitor of the sink the desktop plays to, as the seat user:
+#        pactl get-default-sink          # e.g. alsa_output.pci-0000_01_00.1.hdmi-stereo
+#      then append ".monitor" for PULSE_SOURCE below.
+#   2. Uncomment PULSE_SERVER + PULSE_SOURCE, then: systemctl restart edy-rdp-guacd
+#
+# Use an EXPLICIT monitor name, NOT the @DEFAULT_MONITOR@ alias: that alias does
+# not resolve on pipewire-pulse and records silence. A sink's ".monitor" is what
+# is PLAYING on the desktop -- never a microphone. Left unset = no audio channel.
+#
+# EDY_RDP_PULSE_SEAT_SOCKET overrides the seat pulse socket the unit bind-mounts;
+# it defaults to /run/user/1000/pulse/native. Set it if the seat user is not uid 1000.
+#EDY_RDP_PULSE_SEAT_SOCKET=/run/user/1000/pulse/native
+#PULSE_SERVER=unix:/run/pulse.sock
+#PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor
+
 # --- the 3390 "Remote Login" door -------------------------------------------
 
 # Username of the greeter door credential that edy-rdp-rotate-rdplogin rotates.

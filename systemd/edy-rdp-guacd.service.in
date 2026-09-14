@@ -23,8 +23,25 @@ Environment=GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
 # 127 and no clue which path was wrong.
 Environment=GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
 EnvironmentFile=@ENV_FILE@
+# Desktop audio (the Sound toggle): guacd records the seat's PipeWire/PulseAudio.
+# The seat socket lives under the user's XDG_RUNTIME_DIR (0700), which the
+# container cannot traverse, so we bind-mount the SOCKET FILE itself to a stable
+# host path and pass that in as /run/pulse.sock. The seat socket path defaults to
+# uid 1000 and is overridable with EDY_RDP_PULSE_SEAT_SOCKET in the .env. If the
+# seat socket is absent we leave an empty regular file at the target so the -v
+# bind still resolves and guacd just fails to connect audio (graceful: no audio,
+# no crash). The bind is idempotent across restarts (mountpoint guard).
+ExecStartPre=-/bin/sh -c 'S="${EDY_RDP_PULSE_SEAT_SOCKET:-/run/user/1000/pulse/native}"; mountpoint -q /run/edy-rdp-pulse.sock || : > /run/edy-rdp-pulse.sock; if [ -S "$S" ] && ! mountpoint -q /run/edy-rdp-pulse.sock; then mount --bind "$S" /run/edy-rdp-pulse.sock; fi; true'
 ExecStartPre=-/usr/bin/podman rm -f edy-rdp-guacd
+# -e PULSE_SERVER/-e PULSE_SOURCE pass those vars from the service env (the .env
+# below) INTO the container so guacd can capture desktop audio for the Sound
+# toggle. PULSE_SERVER points at the bind-mounted socket (unix:/run/pulse.sock);
+# PULSE_SOURCE names the sink monitor to record (an EXPLICIT name -- the
+# @DEFAULT_MONITOR@ alias does not resolve on pipewire-pulse and yields silence).
+# When PULSE_SOURCE is unset the audio channel never connects -- no behaviour
+# change. See .env + docs/AUDIO.md.
 ExecStart=/usr/bin/podman run --replace --name edy-rdp-guacd --network host --health-cmd none \
+    -v /run/edy-rdp-pulse.sock:/run/pulse.sock -e PULSE_SERVER -e PULSE_SOURCE \
     --entrypoint ${GUACD_ENTRYPOINT} \
     ${GUACD_IMAGE} -b 127.0.0.1 -l 4822 -L info -f
 ExecStop=/usr/bin/podman stop -t 5 edy-rdp-guacd

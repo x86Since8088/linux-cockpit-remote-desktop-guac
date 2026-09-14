@@ -1,11 +1,15 @@
 # grd handover patch — 3390 Remote-Login greeter (KNOWN_ISSUES I29)
 
-> **STATUS: NOT DEPLOYED.** Reverted to the stock package daemon on user request
-> (2026-09-01, I29 addendum 5): stock binary restored (dpkg-clean), D-Bus drop-in
-> removed, apt hold released, backup deleted. This patch stays as the reproducible
-> recipe if the greeter fix is ever wanted again. NOTE: the original "signal never
-> delivered" symptom was likely the old receive-deny drop-in (also now gone), so
-> stock grd may hand over correctly without this patch — untested.
+> **STATUS: RE-DEPLOYED on edt1 (2026-09-09), verified.** The method-call handover
+> daemon (sha `5c08514e`) is installed over stock at
+> `/usr/libexec/gnome-remote-desktop-daemon` (stock backed up to `.orig-edt1`), and the
+> package is `apt-mark hold` so an upgrade cannot silently clobber it. The GDM greeter
+> renders and logs in over the browser path. **On this host it also needs the bridge's
+> Kerberos preflight** (`bridge/edy-rdp-krb-preflight.sh`, v1.1.4): the door user auths
+> via NLA and FreeRDP3 tries Kerberos first, which hangs ~2 min when the AD DC is down —
+> failing NLA before this handover ever runs. Deploy BOTH. (It was reverted to stock
+> 2026-09-01 per I29 addendum 5; this file is the reproducible recipe. Re-run it after
+> any deliberate `gnome-remote-desktop` upgrade.)
 
 ## THE FIX: `grd-handover-method-call.patch`  ✅ verified working when deployed (2026-09-01)
 

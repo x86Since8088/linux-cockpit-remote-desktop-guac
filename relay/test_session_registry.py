@@ -50,6 +50,47 @@ class GreeterReap(unittest.TestCase):
         self.assertEqual(len(self.r.prune(now=SR.CONNECTING_TTL + 1)), 1)
 
 
+class EphemeralReap(unittest.TestCase):
+    """Non-resumable scenarios (mirror/console, remote, vnc) hold no backend once
+    disconnected, so a non-live entry is reaped promptly instead of lingering for
+    the 15-min session TTL -- this is what stops duplicated mirror sessions from
+    piling up in Active Sessions."""
+    def setUp(self):
+        self.r = SR.SessionRegistry()
+
+    def test_console_reaped_promptly(self):
+        self.r.open("m", 1000, "console", now=0)
+        self.r.mark_active("m", now=1)
+        self.r.mark_disconnected("m", now=10)
+        # still within the short ephemeral TTL -> kept
+        self.assertEqual(self.r.prune(now=10 + SR.EPHEMERAL_DISCONNECT_TTL - 1), [])
+        reap = self.r.prune(now=10 + SR.EPHEMERAL_DISCONNECT_TTL + 1)
+        self.assertEqual([(e[0], e[2]) for e in reap], [("m", "console")])
+
+    def test_console_gone_well_before_session_ttl(self):
+        # a disconnected mirror must NOT survive to the 15-min session TTL
+        self.r.open("m", 1000, "console", now=0)
+        self.r.mark_disconnected("m", now=0)
+        self.assertEqual(len(self.r.prune(now=SR.EPHEMERAL_DISCONNECT_TTL + 1)), 1)
+
+    def test_remote_and_vnc_are_ephemeral(self):
+        self.r.open("r", 1000, "remote", now=0); self.r.mark_disconnected("r", now=0)
+        self.r.open("n", 1000, "vnc", now=0); self.r.mark_disconnected("n", now=0)
+        reap = self.r.prune(now=SR.EPHEMERAL_DISCONNECT_TTL + 1)
+        self.assertEqual({e[0] for e in reap}, {"r", "n"})
+
+    def test_reconnectable_not_reaped_early(self):
+        # virtual/isolated are non-live too but stay for the long TTL (resumable)
+        self.r.open("v", 1000, "virtual", now=0); self.r.mark_disconnected("v", now=0)
+        self.r.open("i", 1000, "isolated", now=0); self.r.mark_disconnected("i", now=0)
+        self.assertEqual(self.r.prune(now=SR.EPHEMERAL_DISCONNECT_TTL + 1), [])
+
+    def test_ephemeral_ttl_is_tunable(self):
+        self.r.open("m", 1000, "console", now=0); self.r.mark_disconnected("m", now=0)
+        self.assertEqual(self.r.prune(now=20, ephemeral_ttl=30), [])       # under override
+        self.assertEqual(len(self.r.prune(now=40, ephemeral_ttl=30)), 1)   # past override
+
+
 class Reconnect(unittest.TestCase):
     def setUp(self):
         self.r = SR.SessionRegistry()

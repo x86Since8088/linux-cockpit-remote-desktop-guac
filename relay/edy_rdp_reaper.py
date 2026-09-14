@@ -31,7 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from session_registry import GREETER_DISCONNECT_TTL
+from session_registry import GREETER_DISCONNECT_TTL, EPHEMERAL_DISCONNECT_TTL
 
 
 def _run(cmd, timeout=15):
@@ -130,10 +130,13 @@ def _control_call(control_path, req):
         return None
 
 
-def prune_via_control(control_path, now, greeter_ttl):
+def prune_via_control(control_path, now, greeter_ttl, ephemeral_ttl=None):
     """Ask the relay to prune stale registry sessions. Returns the reaped entries,
     or [] if the control socket is unavailable (greeter reap still runs)."""
-    resp = _control_call(control_path, {"op": "prune", "now": now, "greeter_ttl": greeter_ttl})
+    req = {"op": "prune", "now": now, "greeter_ttl": greeter_ttl}
+    if ephemeral_ttl is not None:
+        req["ephemeral_ttl"] = ephemeral_ttl
+    resp = _control_call(control_path, req)
     if resp is None:
         print("  registry prune skipped: control socket unavailable")
         return []
@@ -244,11 +247,15 @@ def main(argv=None):
     ap.add_argument("--state-file", default=None,
                     help="deprecated/ignored: the relay owns the registry now")
     ap.add_argument("--greeter-ttl", type=int, default=GREETER_DISCONNECT_TTL)
+    ap.add_argument("--ephemeral-ttl", type=int, default=EPHEMERAL_DISCONNECT_TTL,
+                    help="reap a disconnected non-resumable session (mirror/remote/"
+                         "vnc) after this many seconds")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
     now = time.time()
-    reaped = [] if args.dry_run else prune_via_control(args.control, now, args.greeter_ttl)
+    reaped = [] if args.dry_run else prune_via_control(
+        args.control, now, args.greeter_ttl, args.ephemeral_ttl)
     for r in reaped:
         print("  registry prune: %s uid=%s scenario=%s (%s)" %
               (str(r.get("uuid"))[:12], r.get("uid"), r.get("scenario"), r.get("reason")))

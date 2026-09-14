@@ -74,7 +74,7 @@ cleanup() {
   [ -n "$rdp_pid" ]  && kill "$rdp_pid"  2>/dev/null
   [ -n "$xvfb_pid" ] && kill "$xvfb_pid" 2>/dev/null
   [ -n "$argsfile" ] && rm -f "$argsfile" 2>/dev/null
-  rm -f "$pwfile" "$STATE/$KEY.env" 2>/dev/null
+  rm -f "$pwfile" "$STATE/$KEY.env" "$STATE/$KEY.krb5.conf" 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -99,6 +99,21 @@ case "$HOST" in
   *) CERTARG="/cert:tofu"
      export XDG_CONFIG_HOME="${EDY_RDP_FREERDP_HOME:-/run/edy-rdp/freerdp}"
      mkdir -p "$XDG_CONFIG_HOME" 2>/dev/null || true ;;
+esac
+# Kerberos preflight (loopback / local grd only). FreeRDP3 tries Kerberos FIRST, and a
+# dead AD DC makes xfreerdp3 hang ~2 min before NLA falls back to NTLM. The local grd
+# door/gate users are LOCAL credentials (never AD principals), so point krb5 only at the
+# KDCs that answer right now -- or none, for an INSTANT NTLM fallback. Scoped to loopback
+# so a remote host's own realm is left alone. Non-fatal: on any error the system krb5 stands.
+case "$HOST" in
+  127.0.0.1|::1|localhost)
+    _pf="$(dirname -- "$0")/edy-rdp-krb-preflight.sh"
+    [ -x "$_pf" ] || _pf="$(command -v edy-rdp-krb-preflight.sh 2>/dev/null || true)"
+    if [ -n "${_pf:-}" ] && [ -x "$_pf" ]; then
+      eval "$("$_pf" "$KEY" 2>>"$STATE/$KEY.krblog")" && export KRB5_CONFIG
+      echo "[bridge $KEY] krb preflight: KRB5_CONFIG=${KRB5_CONFIG:-<system>}"
+    fi
+    ;;
 esac
 # Security protocol. Local grd uses an explicit protocol (nla / rdstls). A REMOTE
 # host "negotiates": offer NLA+TLS but DISABLE plain RDP-standard security

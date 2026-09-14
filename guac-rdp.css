@@ -17,7 +17,35 @@ select, input, button { padding:.35rem .5rem; font:inherit; border:1px solid #8a
        border-radius:3px; background:var(--panel); color:var(--ink); }
 button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
 button.sec { background:var(--panel); color:var(--ink); border-color:#8a8d90; }
+/* A toggle button (e.g. Num Lock) shows its ON state with the accent fill. */
+button.toggle.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 button:disabled { opacity:.5; cursor:default; }
+
+/* "Add Monitor" pop-up (index.html opened with #monitor): chromeless — no tabs,
+   toolbar or app bar — with the virtual monitor filling the whole window. Only a
+   connection error surfaces (as a bottom overlay). */
+html.monitor .tabs,
+html.monitor .bar,
+html.monitor .hint,
+html.monitor #appfoot { display:none !important; }
+html.monitor, html.monitor body { height:100%; margin:0; background:var(--display-bg); }
+html.monitor .panel { margin:0; padding:0; }
+html.monitor #display { margin-top:var(--seatbar-h); height:calc(100vh - var(--seatbar-h)); width:100vw; }
+html.monitor .status { display:none; }
+html.monitor .status.err { display:block; position:fixed; left:0; right:0; bottom:0; z-index:10; }
+
+/* Pop-out control bar (#seat and #monitor): a slim strip at the top holding the
+   window's controls (monitor picker / resolution / sound). The mirror sits BELOW
+   it (the #display margin-top above) so the pointer can reach the guest's top row. */
+#seatbar { display:none; }
+html.monitor { --seatbar-h: 2rem; }
+html.monitor #seatbar { display:flex; gap:.7rem; align-items:center;
+  position:fixed; top:0; left:0; right:0; z-index:20;
+  height:var(--seatbar-h); box-sizing:border-box; overflow:hidden;
+  background:rgba(0,0,0,.6); color:#fff; padding:.1rem .6rem; font-size:.8rem; }
+html.monitor #seatbar .f { flex-direction:row; gap:.3rem; align-items:center; margin:0; }
+html.monitor #seatbar label { color:#fff; font-weight:400; font-size:.8rem; }
+html.monitor #seatbar select, html.monitor #seatbar input { font:inherit; padding:.05rem .3rem; }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }
