@@ -73,6 +73,17 @@ GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
 #   Janua (FreeRDP 3 fork)   -> /usr/local/sbin/guacd
 GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
 
+# --- audio streaming (optional, off by default) -----------------------------
+# The Sound toggle streams the desktop's audio to the browser. guacd captures it
+# from a PulseAudio/PipeWire server and the unit passes these two vars into the
+# container. To enable (see docs/AUDIO.md for the one-time seat setup):
+#   1. Expose the seat's pipewire-pulse over loopback TCP (127.0.0.1:4713).
+#   2. Uncomment the two lines below, then: systemctl restart edy-rdp-guacd
+# PULSE_SOURCE=@DEFAULT_MONITOR@ records the DEFAULT SINK's monitor -- i.e. what
+# is PLAYING on the desktop -- never a microphone. Left unset = no audio channel.
+#PULSE_SERVER=tcp:127.0.0.1:4713
+#PULSE_SOURCE=@DEFAULT_MONITOR@
+
 # --- the 3390 "Remote Login" door -------------------------------------------
 
 # Username of the greeter door credential that edy-rdp-rotate-rdplogin rotates.

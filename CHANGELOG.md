@@ -1,3 +1,18 @@
+## 1.2.5.20260913 - 2026-09-13
+
+Desktop audio streaming for the mirror (opt-in).
+
+- **The Sound toggle can now stream real desktop audio.** guacd (which runs on the
+  host network) captures the seat's PulseAudio/PipeWire and streams it to the
+  browser. The `edy-rdp-guacd` unit now passes `-e PULSE_SERVER -e PULSE_SOURCE`
+  into the container; set them in `.env` (`PULSE_SERVER=tcp:127.0.0.1:4713`,
+  `PULSE_SOURCE=@DEFAULT_MONITOR@`) after exposing pipewire-pulse over loopback TCP
+  — see the new `docs/AUDIO.md`. `@DEFAULT_MONITOR@` records the default sink's
+  monitor (what is PLAYING on the desktop), never a microphone. Unset = no audio
+  channel (unchanged default). There is no mic/audio-input path (the browser leg
+  is VNC). Verified on edt1: guacd reaches the seat's Pulse over TCP and records
+  the HDMI sink monitor.
+
 ## 1.2.4.20260913 - 2026-09-13
 
 Pop-out: keep the mirror below the monitor picker.

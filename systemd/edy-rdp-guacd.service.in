@@ -24,7 +24,12 @@ Environment=GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
 Environment=GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
 EnvironmentFile=@ENV_FILE@
 ExecStartPre=-/usr/bin/podman rm -f edy-rdp-guacd
+# -e PULSE_SERVER/-e PULSE_SOURCE pass those vars from the service env (the .env
+# below) INTO the container so guacd can capture desktop audio for the Sound
+# toggle. When they are unset (the default) podman omits them and the audio
+# channel simply never connects -- no behaviour change. See .env + docs/AUDIO.md.
 ExecStart=/usr/bin/podman run --replace --name edy-rdp-guacd --network host --health-cmd none \
+    -e PULSE_SERVER -e PULSE_SOURCE \
     --entrypoint ${GUACD_ENTRYPOINT} \
     ${GUACD_IMAGE} -b 127.0.0.1 -l 4822 -L info -f
 ExecStop=/usr/bin/podman stop -t 5 edy-rdp-guacd
