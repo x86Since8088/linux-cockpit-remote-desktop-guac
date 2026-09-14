@@ -1,3 +1,27 @@
+## 1.2.9.20260914 - 2026-09-14
+
+Desktop audio actually works now (the Sound toggle).
+
+- **Root cause of the silence: `PULSE_SOURCE=@DEFAULT_MONITOR@`.** That alias does
+  not resolve on this host's pipewire-pulse — a record stream on it returns zero
+  bytes even with the default sink active. An **explicit** sink-monitor name
+  (`<sink>.monitor`) records fine (verified: ~196 KB in 3 s of tone). The install
+  `.env` now sets `PULSE_SOURCE` to the explicit monitor of the desktop's sink.
+- **The guacd unit template now carries the audio wiring** that had only ever been
+  applied live (`systemd/edy-rdp-guacd.service.in`): an `ExecStartPre` that
+  bind-mounts the seat's pulse **socket** to a stable host path, and the matching
+  `-v /run/edy-rdp-pulse.sock:/run/pulse.sock`. The seat socket path is overridable
+  with `EDY_RDP_PULSE_SEAT_SOCKET` (default uid 1000). A fresh deploy now ships a
+  working audio path instead of needing hand-editing.
+- **Docs/config corrected** (`.envdefault`, `docs/AUDIO.md`): the earlier TCP
+  approach (`tcp:127.0.0.1:4713`) is removed — pipewire-pulse delivers no recording
+  audio over `module-native-protocol-tcp`; only the local UNIX socket works. Both
+  now describe the socket + explicit-monitor setup, with the `@DEFAULT_MONITOR@`
+  and TCP dead ends documented so they are not re-attempted.
+- **Note on mute:** the Sound toggle mutes **per-viewer at the browser**, by design.
+  It does not mute the seat's OS sink, because muting the sink also silences the
+  `.monitor` guacd records — which would kill the stream rather than quiet the view.
+
 ## 1.2.8.20260914 - 2026-09-14
 
 Controls in the pop-out / virtual-monitor windows.
