@@ -1,3 +1,22 @@
+## 1.1.8.20260913 - 2026-09-13
+
+**Add Monitor** — a virtual monitor in its own chromeless window.
+
+- **NEW: "Add Monitor" button** in the connect bar (`index.html`, `guac-rdp.js`,
+  `guac-rdp.css`). It re-opens this Cockpit page in a minimal pop-up window (no
+  tabs, toolbar or address bar; `window.open(..., "popup,…")`) marked with
+  `#monitor` in the hash. That pop-up goes chromeless (a `html.monitor` CSS class
+  hides the tabs/bar/footer and makes the display fill the window), sets a
+  descriptive title (`Virtual Monitor N — <host>`), and auto-connects a fresh
+  **virtual** monitor (grd `extend` mode) at the window's size. The pop-up carries
+  its own Cockpit transport (shared session cookie).
+- **Closing the window closes the monitor.** On `pagehide`/`beforeunload` the
+  pop-up disconnects and sends `terminate` for its session; even absent that, the
+  window's transport drop makes the relay reap the bridge and grd drop the virtual
+  monitor, so the virtual desktop never lingers.
+- The button is available in every mode (not just the mirror), so you can spin up
+  extra virtual monitors alongside a console mirror or any other session.
+
 ## 1.1.7.20260913 - 2026-09-13
 
 Sound and clipboard passthrough are now gated by **live** toggles.

@@ -102,6 +102,39 @@
         catch (e) { /* ignore */ }
     }
 
+    // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
+    // Re-opens THIS Cockpit page in a minimal pop-up (no tabs, toolbar or address
+    // bar) that auto-connects a fresh "virtual" monitor and fills the window. The
+    // pop-up carries its OWN Cockpit transport (shared session cookie), so closing
+    // it drops that transport -> the relay reaps the bridge and grd removes the
+    // virtual (extend) monitor; an explicit terminate on close makes that instant.
+    var MONITOR_MODE = /(?:^|[#&?])monitor\b/.test(location.hash);
+    var monitorSeq = 0;
+    function openMonitorWindow() {
+        monitorSeq += 1;
+        var url = location.href.split("#")[0] + "#monitor=" + monitorSeq;
+        var feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes,width=1440,height=900";
+        var w = window.open(url, "edy-monitor-" + monitorSeq + "-" + Date.now(), feat);
+        if (!w) { setStatus("The browser blocked the monitor window — allow pop-ups for this site, then click Add Monitor again.", "err"); return; }
+        try { w.focus(); } catch (e) { /* ignore */ }
+    }
+    function monitorTeardown() {
+        // Close the virtual desktop when the window closes. The transport drop
+        // reaps it on its own; terminate makes the removal immediate and explicit.
+        try { if (currentUuid) controlRequest({ op: "terminate", uuid: currentUuid }); } catch (e) { /* best effort */ }
+        try { teardown(true); } catch (e) { /* ignore */ }
+    }
+    function enterMonitorMode() {
+        document.documentElement.classList.add("monitor");
+        var m = location.hash.match(/monitor=(\d+)/);
+        document.title = "Virtual Monitor" + (m ? " " + m[1] : "") + " — " + location.hostname;
+        window.addEventListener("pagehide", monitorTeardown);
+        window.addEventListener("beforeunload", monitorTeardown);
+        $("target").value = "virtual";
+        refreshUi();
+        connect("virtual");
+    }
+
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
     // the point -- an operator pinning 100% wants pixel-exact, not helpfully resized.
     var scaleMode = "fit";
@@ -976,7 +1009,11 @@
             setStatus("Disconnecting…");
             teardown(false);
         });
+        $("addmon").addEventListener("click", openMonitorWindow);
         refreshUi();
         setStatus("Idle. Choose a session and connect.");
+        // If this page was opened as a monitor pop-up (#monitor), go chromeless and
+        // auto-connect a fresh virtual monitor that closes with the window.
+        if (MONITOR_MODE) enterMonitorMode();
     });
 })();

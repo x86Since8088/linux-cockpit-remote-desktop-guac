@@ -20,6 +20,19 @@ button.sec { background:var(--panel); color:var(--ink); border-color:#8a8d90; }
 /* A toggle button (e.g. Num Lock) shows its ON state with the accent fill. */
 button.toggle.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 button:disabled { opacity:.5; cursor:default; }
+
+/* "Add Monitor" pop-up (index.html opened with #monitor): chromeless — no tabs,
+   toolbar or app bar — with the virtual monitor filling the whole window. Only a
+   connection error surfaces (as a bottom overlay). */
+html.monitor .tabs,
+html.monitor .bar,
+html.monitor .hint,
+html.monitor #appfoot { display:none !important; }
+html.monitor, html.monitor body { height:100%; margin:0; background:var(--display-bg); }
+html.monitor .panel { margin:0; padding:0; }
+html.monitor #display { height:100vh; width:100vw; }
+html.monitor .status { display:none; }
+html.monitor .status.err { display:block; position:fixed; left:0; right:0; bottom:0; z-index:10; }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }
