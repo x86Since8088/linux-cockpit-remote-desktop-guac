@@ -75,7 +75,15 @@
     // We deliberately do NOT set disable-copy/disable-paste here: those are fixed
     // at connect and would defeat a live toggle. The gate lives in the browser.
     function guacdValues() {
-        return { "enable-audio": "true" };
+        var v = {};
+        // Negotiate the audio channel ONLY when Sound is on at connect. Forcing it
+        // on unconditionally made guacd attempt (and log a failed) PulseAudio
+        // connection on every session and was implicated in a login-screen
+        // regression, so it is opt-in again. Live mute/unmute via the shared
+        // AudioContext still applies while connected; turning Sound on from off
+        // takes effect on the next connect.
+        if ($("opt-audio") && $("opt-audio").checked) v["enable-audio"] = "true";
+        return v;
     }
 
     // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
@@ -586,7 +594,11 @@
         // iframe); failure is silent so it never disrupts the connection.
         if (clipReadHandler) box.removeEventListener("focus", clipReadHandler, true);
         clipReadHandler = function () {
-            if (!client || !clipboardOn) return;
+            // Only push the local clipboard once the session is fully OPEN
+            // (currentUuid is set on tunnel OPEN). Writing to the RDP clipboard
+            // channel during connect/teardown raised cliprdr VirtualChannelWrite
+            // errors and could disturb the connection.
+            if (!client || !clipboardOn || !currentUuid) return;
             try {
                 if (navigator.clipboard && navigator.clipboard.readText) {
                     navigator.clipboard.readText().then(function (text) {

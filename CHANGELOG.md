@@ -1,3 +1,18 @@
+## 1.1.9.20260913 - 2026-09-13
+
+Fix a connection regression from 1.1.7's always-on audio / eager clipboard.
+
+- **`enable-audio` is opt-in again** (`guac-rdp.js`). 1.1.7 negotiated audio on
+  every connect, so guacd tried and failed a PulseAudio connection each time
+  (`Connecting to PulseAudio... PulseAudio connection failed`) — noise at best,
+  and implicated in a login-screen connect regression. Audio is once more
+  negotiated only when Sound is on at connect; live mute/unmute still works while
+  connected.
+- **Outbound clipboard only fires on a fully-open session.** The focus reader that
+  pushes the local clipboard now checks `currentUuid` (set on tunnel OPEN), so it
+  no longer writes to the RDP clipboard channel during connect/teardown (which
+  surfaced `cliprdr VirtualChannelWrite failed`).
+
 ## 1.1.8.20260913 - 2026-09-13
 
 **Add Monitor** — a virtual monitor in its own chromeless window.
