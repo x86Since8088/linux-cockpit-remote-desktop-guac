@@ -239,6 +239,28 @@
             st.left, st.middle, st.right, st.up, st.down);
     }
 
+    // The native framebuffer resolution grd mirrors (mirror-primary = the primary
+    // monitor's current mode). We request THIS as the RDP geometry for the mirror
+    // so the whole internal path (grd -> xfreerdp -> Xvfb -> x11vnc -> guacd) runs
+    // 1:1 at native resolution with NO server-side scaling, and the browser does
+    // all the scaling. Resolves to {w,h}, or null (fall back to the window size)
+    // if it cannot be determined -- so a parse miss never blocks a connect.
+    function queryNativeGeom() {
+        return cockpit.spawn(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+                              "--object-path", "/org/gnome/Mutter/DisplayConfig",
+                              "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState"], { err: "message" })
+            .then(function (out) {
+                // Mode ids read '1920x1080@60.000'; the active one is tagged
+                // 'is-current': <true>. Take the last mode id before that marker.
+                var cur = out.search(/'is-current':\s*<true>/);
+                if (cur < 0) return null;
+                var re = /'(\d+)x(\d+)@[\d.]+'/g, m, best = null;
+                while ((m = re.exec(out)) && m.index < cur) best = m;
+                return best ? { w: parseInt(best[1], 10), h: parseInt(best[2], 10) } : null;
+            })
+            .catch(function () { return null; });
+    }
+
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
 
     // Unlocking the seat is the ONLY way to resume the session the user left.
@@ -521,7 +543,12 @@
                 creds = fetchGateKey(t.port);
             }
             ensureMode(key).then(function () { return creds; })
-                .then(function (cred) { start(key, cred, reg.token); })
+                .then(function (cred) {
+                    // The mirror runs the internal path at the monitor's NATIVE
+                    // resolution (no server-side scaling); the browser scales it.
+                    return ((key === "console") ? queryNativeGeom() : cockpit.resolve(null))
+                        .then(function (geom) { start(key, cred, reg.token, geom); });
+                })
                 .catch(function (e) {
                     var msg = (e && e.message) || String(e);
                     if (/not-authorized|access-denied|superuser|not permitted|permission denied/i.test(msg))
@@ -545,9 +572,17 @@
             });
     }
 
-    function start(key, cred, sessiontoken) {
+    function start(key, cred, sessiontoken, geomOverride) {
         var t = TARGETS[key], box = $("display");
-        var w = Math.max(box.clientWidth, 640), h = Math.max(box.clientHeight, 480);
+        // geomOverride pins the internal path to a fixed (native) resolution; the
+        // browser then scales it (display.onresize -> applyScale). Otherwise the
+        // session is sized to the current window.
+        var w, h;
+        if (geomOverride && geomOverride.w && geomOverride.h) {
+            w = geomOverride.w; h = geomOverride.h;
+        } else {
+            w = Math.max(box.clientWidth, 640); h = Math.max(box.clientHeight, 480);
+        }
         // The relay injects the VNC target (the per-connection FreeRDP3 bridge); the
         // browser sends no target values. For non-managed scenarios the fetched/entered
         // RDP gate credential travels as rdpcred (0x1f separates user/pass), which the
@@ -571,6 +606,9 @@
         client = new Guacamole.Client(tunnel);
         var display = client.getDisplay();
         box.innerHTML = ""; box.appendChild(display.getElement());
+        // Re-fit whenever the guest framebuffer size becomes known or changes. With
+        // a native-resolution session this is what scales it into the window.
+        display.onresize = function () { applyScale(); };
 
         // Clipboard passthrough (remote -> browser), gated live by the Clipboard
         // toggle. Best-effort: the browser Clipboard API can be restricted inside a

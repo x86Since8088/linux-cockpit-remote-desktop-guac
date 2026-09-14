@@ -1,3 +1,22 @@
+## 1.2.2.20260913 - 2026-09-13
+
+Mirror runs at native resolution; the browser does all the scaling.
+
+- **The console mirror now requests the monitor's NATIVE resolution** as the RDP
+  geometry (`guac-rdp.js`), instead of the browser window size. Previously the
+  bridge was sized to the window, so grd scaled the native primary framebuffer to
+  that size SERVER-side and the browser scaled again — double-scaling, and the
+  pop-out and main window (different sizes) never aligned. Now `queryNativeGeom()`
+  reads the primary monitor's current mode from Mutter `DisplayConfig` (1920×1080
+  here) and the whole internal path (grd → xfreerdp → Xvfb → x11vnc → guacd) runs
+  1:1 at native resolution with no server-side scaling. Falls back to the window
+  size if the resolution can't be read, so a parse miss never blocks a connect.
+- **The browser does all the scaling.** `display.onresize` now re-fits whenever the
+  guest framebuffer size becomes known, so the native frame is scaled into the
+  window client-side; with the 1.2.1 pointer-scale fix the mouse stays aligned.
+  Every window that mirrors the same seat now shows identical native pixels, each
+  scaled to its own size — so the pop-out and the main view align.
+
 ## 1.2.1.20260913 - 2026-09-13
 
 Fix mouse alignment at non-100% scale and on window resize.
