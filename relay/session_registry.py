@@ -31,10 +31,23 @@ CLOSED = "closed"             # terminated; pruned from the registry
 # reconnect resumes it rather than starting fresh.
 RECONNECTABLE_SCENARIOS = {"isolated", "virtual"}
 
+# Scenarios with NO resumable backend: the per-connection bridge is already torn
+# down when the client disconnects (the relay's teardown stops xfreerdp3/Xvfb/
+# x11vnc), so a DISCONNECTED entry for one of these can never be reconnected to --
+# it is pure "Active Sessions" clutter holding no live resource. Reap it promptly
+# instead of holding it for the full session_ttl. The mirror (console) is the
+# motivating case: reconnect-on-change (resolution/sound/resize each reconnect)
+# otherwise left a pile of non-live console entries for the full 15 minutes.
+# "remote"/"vnc" are one-shot direct connections with the same property. (Greeter
+# has its own loginctl-based reap; wayland-vnc is treated as resumable by the
+# reaper, so neither is listed here.)
+EPHEMERAL_SCENARIOS = {"console", "remote", "vnc"}
+
 # Default lifecycle policy (seconds).
 GREETER_DISCONNECT_TTL = 60      # reap a greeter 60s after disconnect unless logged on
 SESSION_DISCONNECT_TTL = 900     # reap a logged-on desktop 15min after disconnect
 CONNECTING_TTL = 120             # reap a stuck half-open connect
+EPHEMERAL_DISCONNECT_TTL = 15    # reap a disconnected non-resumable session (mirror etc.) after 15s
 
 
 class Session:
@@ -174,15 +187,21 @@ class SessionRegistry:
     def prune(self, now,
               greeter_ttl=GREETER_DISCONNECT_TTL,
               session_ttl=SESSION_DISCONNECT_TTL,
-              connecting_ttl=CONNECTING_TTL):
+              connecting_ttl=CONNECTING_TTL,
+              ephemeral_ttl=EPHEMERAL_DISCONNECT_TTL):
         """Return a list of (uuid, uid, scenario, reason) that should be reaped,
         and remove them from the registry. Policy:
-          * DISCONNECTED session -> reap after session_ttl (kept meanwhile so a
-            reconnect resumes the same isolated desktop). NOTE: "isolated" now
-            means the caller's own headless GNOME session (I29), a real desktop --
-            NOT the deprecated 3390 bare greeter, so it is NOT reaped at 60s.
-            Actual GDM greeter *OS* sessions are reaped separately by the reaper's
-            loginctl pass using greeter_ttl.
+          * DISCONNECTED session in an EPHEMERAL scenario (console/mirror, remote,
+            vnc) -> reap after ephemeral_ttl. These have no resumable backend (the
+            bridge is already gone), so a non-live entry is clutter that can never
+            be reconnected to; reaping it promptly is what stops mirror sessions
+            from piling up in "Active Sessions".
+          * Any OTHER DISCONNECTED session -> reap after session_ttl (kept
+            meanwhile so a reconnect resumes the same isolated/virtual desktop).
+            NOTE: "isolated" now means the caller's own headless GNOME session
+            (I29), a real desktop -- NOT the deprecated 3390 bare greeter, so it is
+            NOT reaped at 60s. Actual GDM greeter *OS* sessions are reaped
+            separately by the reaper's loginctl pass using greeter_ttl.
           * CONNECTING that never became active -> reap after connecting_ttl.
         """
         reap = []
@@ -191,7 +210,11 @@ class SessionRegistry:
                 age = now - s.last_seen
                 reason = None
                 if s.state == DISCONNECTED:
-                    if age > session_ttl:
+                    if s.scenario in EPHEMERAL_SCENARIOS:
+                        if age > ephemeral_ttl:
+                            reason = "%s disconnected >%ds (not reconnectable)" % (
+                                s.scenario, ephemeral_ttl)
+                    elif age > session_ttl:
                         reason = "session idle >%ds" % session_ttl
                 elif s.state == CONNECTING:
                     if age > connecting_ttl:

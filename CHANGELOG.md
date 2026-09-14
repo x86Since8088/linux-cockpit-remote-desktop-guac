@@ -1,3 +1,24 @@
+## 1.2.10.20260914 - 2026-09-14
+
+Auto-close non-live mirror sessions (stop the "Active Sessions" pile-up).
+
+- **Disconnected sessions in non-resumable scenarios (console/mirror, remote, vnc)
+  are now reaped ~15s after the client leaves**, instead of being held for the
+  15-minute `session_ttl` (`relay/session_registry.py`). They have no backend to
+  resume — the xfreerdp3/Xvfb/x11vnc bridge is already torn down on disconnect —
+  so a non-live entry was pure clutter. Reconnect-on-change (resolution/sound/
+  resize each reconnect) had been leaving a stack of non-live mirror entries per
+  user until the 15-minute TTL. Reconnectable scenarios (isolated/virtual) are
+  unchanged — still kept for `session_ttl` so a reconnect resumes the same desktop.
+- New `EPHEMERAL_SCENARIOS` / `EPHEMERAL_DISCONNECT_TTL` registry policy; the
+  `ephemeral_ttl` is plumbed through the control `prune` op and the reaper
+  (`--ephemeral-ttl`, default 15s; the reaper runs every 30s). Greeter
+  (loginctl-reaped) and wayland-vnc (reaper treats it as resumable) are excluded.
+- Tests extended (mirror reaped promptly; remote/vnc ephemeral; reconnectable
+  untouched; TTL tunable; control pass-through). Full relay suite green (79 tests).
+- **Live apply requires an `edy-rdp-relay` restart** (the prune runs in the relay
+  daemon); the grd backend and guacd :4822 are untouched.
+
 ## 1.2.9.20260914 - 2026-09-14
 
 Desktop audio actually works now (the Sound toggle).

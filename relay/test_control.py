@@ -75,6 +75,16 @@ class PruneOp(unittest.TestCase):
         self.live.register("old", lambda: killed.__setitem__("old", True))
         C.handle_control({"op":"prune","now":1000,"greeter_ttl":60}, 0, self.reg, self.live, True)
         self.assertTrue(killed["old"])  # any lingering live conn for a reaped uuid is dropped
+    def test_ephemeral_ttl_forwarded(self):
+        # a disconnected mirror is reaped by the control prune, and ephemeral_ttl
+        # is forwarded to registry.prune (large override keeps it; default reaps).
+        self.reg.open("mir", 1000, "console", now=0); self.reg.mark_disconnected("mir", now=0)
+        r = C.handle_control({"op":"prune","now":5,"ephemeral_ttl":30}, 0,
+                             self.reg, self.live, is_admin=True)
+        self.assertTrue(r["ok"]); self.assertEqual(self.reg.owner("mir"), 1000)  # under override
+        r = C.handle_control({"op":"prune","now":100}, 0, self.reg, self.live, is_admin=True)
+        self.assertIn("mir", {e["uuid"] for e in r["reaped"]})                   # default TTL reaps
+        self.assertIsNone(self.reg.owner("mir"))
 
 
 class Misc(unittest.TestCase):
