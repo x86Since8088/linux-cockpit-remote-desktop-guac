@@ -204,19 +204,39 @@
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
     // the point -- an operator pinning 100% wants pixel-exact, not helpfully resized.
     var scaleMode = "fit";
+    // The factor currently applied via display.scale(). The bundled
+    // Guacamole.Mouse maps pointer events through the display element's LAYOUT
+    // box (offsetLeft/offsetParent) WITHOUT dividing by the scale, and
+    // display.scale(f) sets that element's layout size to guest*f -- so the mouse
+    // state arrives in RENDERED pixels (0..guest*f). We divide by curScale before
+    // sendMouseState to get guest pixels, keeping the pointer aligned at any zoom
+    // and after every resize. curScale MUST track exactly what we pass to scale().
+    var curScale = 1;
 
     function applyScale() {
         if (!client) return;
         var d = client.getDisplay();
         if (!d || !d.getWidth()) return;
+        var s;
         if (scaleMode === "fit") {
             var box = $("display");
             var w = box.clientWidth || d.getWidth();
             var h = box.clientHeight || d.getHeight();
-            d.scale(Math.min(w / d.getWidth(), h / d.getHeight()) || 1);
+            s = Math.min(w / d.getWidth(), h / d.getHeight()) || 1;
         } else {
-            d.scale(parseFloat(scaleMode) || 1);
+            s = parseFloat(scaleMode) || 1;
         }
+        curScale = s;
+        d.scale(s);
+    }
+
+    // Translate a Guacamole.Mouse.State from rendered pixels to guest pixels using
+    // the live scale, preserving buttons and scroll. See curScale above.
+    function guestMouseState(st) {
+        var s = curScale || 1;
+        return new Guacamole.Mouse.State(
+            Math.round(st.x / s), Math.round(st.y / s),
+            st.left, st.middle, st.right, st.up, st.down);
     }
 
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
@@ -625,10 +645,12 @@
         client.connect();
 
         var mouse = new Guacamole.Mouse(display.getElement());
+        // Divide the mouse position by the live display scale (guestMouseState) so
+        // clicks land on the right guest pixel at any zoom and after any resize.
         if (typeof mouse.onEach === "function")
-            mouse.onEach(["mousedown", "mouseup", "mousemove"], function (e) { if (client) client.sendMouseState(e.state); });
+            mouse.onEach(["mousedown", "mouseup", "mousemove"], function (e) { if (client) client.sendMouseState(guestMouseState(e.state)); });
         else
-            mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function (st) { if (client) client.sendMouseState(st); };
+            mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function (st) { if (client) client.sendMouseState(guestMouseState(st)); };
         // Keyboard capture needs FOCUS. This plugin runs inside a Cockpit iframe,
         // and Guacamole.Keyboard only sees keydown/keyup while its target element
         // holds focus. It previously listened on `document` with nothing ever
@@ -1065,8 +1087,19 @@
         $("scale").addEventListener("change", function () {
             scaleMode = $("scale").value; applyScale();
         });
+        // On resize, re-fit and re-sync the pointer mapping. applyScale() recomputes
+        // curScale (fit follows the window; a pinned factor stays put) and the mouse
+        // handler divides by it, so the pointer stays aligned. Debounced so a drag-
+        // resize does not thrash display.scale(). A trailing rAF settles the final
+        // layout before the last recompute.
+        var resizeTimer = null;
         window.addEventListener("resize", function () {
-            if (scaleMode === "fit") applyScale();
+            if (resizeTimer) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(function () {
+                resizeTimer = null;
+                applyScale();
+                if (typeof requestAnimationFrame === "function") requestAnimationFrame(applyScale);
+            }, 60);
         });
         $("stop").addEventListener("click", function () {
             // Disconnect ONLY. Do NOT send control "terminate": that deletes the

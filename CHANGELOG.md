@@ -1,3 +1,23 @@
+## 1.2.1.20260913 - 2026-09-13
+
+Fix mouse alignment at non-100% scale and on window resize.
+
+- **Mouse coordinates are now divided by the live display scale** (`guac-rdp.js`).
+  The bundled `Guacamole.Mouse.fromClientPosition` maps pointer events through the
+  display element's LAYOUT box (offsetLeft/offsetParent) and does NOT divide by the
+  scale, while `display.scale(f)` sets that element's layout size to `guest*f` — so
+  the reported state was in RENDERED pixels (0..guest*f) but `sendMouseState` needs
+  guest pixels. Clicks therefore drifted at any zoom other than 100%, which is
+  exactly what a resized "Fit to window" produces. A new `guestMouseState()`
+  divides x/y by the tracked `curScale` before sending, keeping the pointer aligned
+  at every zoom, on letterboxed aspect ratios, and while scrolled.
+- **Resize now re-fits and re-syncs the pointer** (debounced, with a trailing
+  `requestAnimationFrame`): `applyScale()` recomputes `curScale` (Fit follows the
+  window; a pinned factor stays put) and the mouse handler reads it live, so the
+  surface stays aligned after a resize. (The guest resolution itself is fixed at
+  connect — the bridge's Xvfb is a fixed size — so this scales+aligns rather than
+  re-resolutioning.)
+
 ## 1.2.0.20260913 - 2026-09-13
 
 **Pop-out** — the mirrored seat in its own chromeless window, with a monitor picker.
