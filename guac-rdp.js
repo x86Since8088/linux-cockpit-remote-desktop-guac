@@ -132,12 +132,26 @@
         try { if (currentUuid) controlRequest({ op: "terminate", uuid: currentUuid }); } catch (e) { /* best effort */ }
         try { teardown(true); } catch (e) { /* ignore */ }
     }
+    // Move a control's whole .f wrapper out of the (hidden) main bar into the
+    // chromeless top strip, so the pop-out windows can drive it. Each pop-out is
+    // its own window/DOM, so this never affects the main window.
+    function moveField(bar, id) {
+        var el = $(id); if (!el || !bar) return;
+        var f = (el.closest && el.closest(".f")) || el.parentNode;
+        if (f) bar.appendChild(f);
+    }
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
         document.title = "Virtual Monitor" + (m ? " " + m[1] : "") + " — " + location.hostname;
         window.addEventListener("pagehide", monitorTeardown);
         window.addEventListener("beforeunload", monitorTeardown);
+        // top control strip: Resolution + Sound (grd honours the resolution for a
+        // virtual monitor). Moved out of the hidden main bar.
+        var bar = document.createElement("div"); bar.id = "seatbar";
+        document.body.appendChild(bar);
+        moveField(bar, "resolution");
+        moveField(bar, "opt-audio");
         $("target").value = "virtual";
         refreshUi();
         connect("virtual");
@@ -196,6 +210,7 @@
             if (client) { setStatus("Switching monitor…"); teardown(true); window.setTimeout(function () { connect("console"); }, 80); }
         });
         populateSeatMonitors(sel);
+        moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
         $("target").value = "console";
         refreshUi();
         connect("console");
@@ -1149,7 +1164,13 @@
         $("opt-audio").addEventListener("change", function () {
             soundOn = $("opt-audio").checked;
             applySoundGate();
-            if (client) setStatus(soundOn ? "Sound on." : "Sound muted.");
+            // enable-audio is negotiated at connect, so toggling Sound live
+            // reconnects the same scenario to add/drop the audio channel.
+            if (client && activeKey) {
+                setStatus(soundOn ? "Enabling sound…" : "Muting sound…");
+                teardown(true);
+                window.setTimeout(function () { connect(activeKey); }, 80);
+            }
         });
         syncPassthroughFlags();
         $("scale").addEventListener("change", function () {

@@ -1,3 +1,18 @@
+## 1.2.8.20260914 - 2026-09-14
+
+Controls in the pop-out / virtual-monitor windows.
+
+- **The chromeless pop-out (#seat) and virtual-monitor (#monitor) windows now show
+  a slim top control strip** (`guac-rdp.js`, `guac-rdp.css`). Previously they hid
+  the whole toolbar, so Sound/Resolution were unreachable there (which is why audio
+  could never be enabled in a pop-out). The relevant controls are moved out of the
+  hidden bar into the strip: the virtual-monitor window gets **Resolution + Sound**;
+  the mirror pop-out gets its **monitor picker + Sound** (resolution N/A — the
+  mirror is always native). The display sits below the strip.
+- **The Sound toggle now (re)negotiates audio live**: because `enable-audio` is a
+  connect-time parameter, toggling Sound reconnects the same scenario to add or
+  drop the audio channel (mic was dropped — the VNC leg has no audio input).
+
 ## 1.2.7.20260914 - 2026-09-14
 
 Fix the console mirror being clipped (right/bottom cut off).
