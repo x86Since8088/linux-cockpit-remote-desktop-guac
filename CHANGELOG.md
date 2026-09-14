@@ -1,3 +1,17 @@
+## 1.2.7.20260914 - 2026-09-14
+
+Fix the console mirror being clipped (right/bottom cut off).
+
+- **The console mirror now always requests the NATIVE resolution** (`guac-rdp.js`).
+  1.2.3 downscaled the mirror's requested size below native to save bandwidth, but
+  grd's `mirror-primary` **ignores a smaller request and always streams the primary
+  at native**, so xfreerdp rendered a native frame into a smaller Xvfb and the
+  right/bottom were clipped. `chosenGeom` now returns native (exact) for `console`
+  and lets the browser scale it; the Resolution selector still applies to the
+  virtual monitor (grd honours it there) and remote hosts. Net: no server-side
+  bandwidth saving for the mirror (grd streams native regardless), but the whole
+  screen is visible again.
+
 ## 1.2.6.20260914 - 2026-09-14
 
 Resolution selector.

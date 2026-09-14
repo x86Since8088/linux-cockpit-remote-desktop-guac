@@ -267,10 +267,15 @@
     //                    below native); other scenarios use the window size.
     //   a fixed WxH   -> pin the guest framebuffer to exactly that (browser scales it).
     function chosenGeom(key) {
-        var sel = $("resolution"), r = sel ? sel.value : "window";
-        var m = /^(\d+)x(\d+)$/.exec(r);
-        if (m) return cockpit.resolve({ w: parseInt(m[1], 10), h: parseInt(m[2], 10), exact: true });
-        return (key === "console") ? queryNativeGeom() : cockpit.resolve(null);
+        // grd's mirror-primary ALWAYS streams the primary at its native resolution
+        // and ignores a smaller requested size, so the Xvfb must be native or the
+        // frame is clipped (right/bottom cut off). The console mirror therefore
+        // always requests native (exact) and the browser scales it. The Resolution
+        // selector applies to the virtual monitor (grd honours it there) and remote.
+        if (key === "console")
+            return queryNativeGeom().then(function (g) { return g ? { w: g.w, h: g.h, exact: true } : null; });
+        var sel = $("resolution"), m = /^(\d+)x(\d+)$/.exec(sel ? sel.value : "window");
+        return cockpit.resolve(m ? { w: parseInt(m[1], 10), h: parseInt(m[2], 10), exact: true } : null);
     }
 
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
