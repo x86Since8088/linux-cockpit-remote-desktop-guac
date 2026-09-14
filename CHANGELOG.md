@@ -1,3 +1,13 @@
+## 1.2.4.20260913 - 2026-09-13
+
+Pop-out: keep the mirror below the monitor picker.
+
+- The `#seat` monitor picker is a fixed bar at the top, but the mirror filled the
+  whole window from `top:0`, so the bar sat OVER the guest's top rows and the
+  pointer could not reach them. The seatbar now has a fixed height and the display
+  starts below it (`margin-top`/`height: calc(100vh - bar)`), so the guest's full
+  height — top row included — is live.
+
 ## 1.2.3.20260913 - 2026-09-13
 
 Mirror resolution policy: downscale on the server, upscale in the browser.

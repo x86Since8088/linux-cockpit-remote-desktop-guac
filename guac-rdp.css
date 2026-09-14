@@ -34,12 +34,17 @@ html.monitor #display { height:100vh; width:100vw; }
 html.monitor .status { display:none; }
 html.monitor .status.err { display:block; position:fixed; left:0; right:0; bottom:0; z-index:10; }
 
-/* Pop-out (#seat): a slim physical-monitor picker overlaid on the mirror. */
+/* Pop-out (#seat): a slim physical-monitor picker at the top; the mirror sits
+   BELOW it (not under it) so the pointer can reach the guest's top row. */
 #seatbar { display:none; }
+html.seat { --seatbar-h: 2rem; }
 html.seat #seatbar { display:flex; gap:.5rem; align-items:center;
   position:fixed; top:0; left:0; right:0; z-index:20;
-  background:rgba(0,0,0,.55); color:#fff; padding:.3rem .6rem; font-size:.8rem; }
+  height:var(--seatbar-h); box-sizing:border-box;
+  background:rgba(0,0,0,.55); color:#fff; padding:.2rem .6rem; font-size:.8rem; }
 html.seat #seatbar select { font:inherit; padding:.1rem .3rem; }
+/* Start the display under the bar so its full height (top row included) is live. */
+html.seat #display { margin-top:var(--seatbar-h); height:calc(100vh - var(--seatbar-h)); }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }
