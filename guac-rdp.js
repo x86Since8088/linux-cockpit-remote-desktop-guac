@@ -143,6 +143,64 @@
         connect("virtual");
     }
 
+    // ---- "Pop-out": the mirrored physical seat in its own chromeless window ----
+    // Like Add Monitor, but for the CONSOLE mirror, with a picker of the seat's
+    // physical monitors. Closing the window only DISCONNECTS this view; it never
+    // terminates the physical desktop.
+    var SEAT_MODE = /(?:^|[#&?])seat\b/.test(location.hash);
+    function openSeatWindow() {
+        var url = location.href.split("#")[0] + "#seat";
+        var feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes,width=1600,height=1000";
+        var w = window.open(url, "edy-seat-" + Date.now(), feat);
+        if (!w) { setStatus("The browser blocked the pop-out window — allow pop-ups for this site, then click Pop-out again.", "err"); return; }
+        try { w.focus(); } catch (e) { /* ignore */ }
+    }
+    function seatTeardown() {
+        // The mirror IS the physical seat: never terminate it, just drop this view.
+        try { teardown(true); } catch (e) { /* ignore */ }
+    }
+    function populateSeatMonitors(sel) {
+        if (!sel || typeof cockpit === "undefined") return;
+        cockpit.spawn(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+                       "--object-path", "/org/gnome/Mutter/DisplayConfig",
+                       "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState"], { err: "message" })
+        .then(function (out) {
+            // Physical connectors read as 'HDMI-3' / 'DP-1' / 'eDP-1'; grd's own
+            // outputs read as 'Virtual remote monitor' (spaces) and are skipped.
+            var names = [], re = /'([A-Za-z]+-[0-9]+(?:-[0-9]+)?)'/g, m;
+            while ((m = re.exec(out))) { if (names.indexOf(m[1]) < 0) names.push(m[1]); }
+            sel.innerHTML = "";
+            (names.length ? names : ["(single monitor)"]).forEach(function (n) {
+                var o = document.createElement("option"); o.value = n; o.textContent = n; sel.appendChild(o);
+            });
+        }, function () {
+            sel.innerHTML = ""; var o = document.createElement("option");
+            o.textContent = "(monitor list unavailable)"; sel.appendChild(o);
+        });
+    }
+    function enterSeatMode() {
+        document.documentElement.classList.add("monitor", "seat");
+        document.title = "Physical Monitor — " + location.hostname;
+        window.addEventListener("pagehide", seatTeardown);
+        window.addEventListener("beforeunload", seatTeardown);
+        // a slim monitor picker overlaid on the mirror
+        var bar = document.createElement("div"); bar.id = "seatbar";
+        var lbl = document.createElement("span"); lbl.textContent = "Physical monitor:";
+        var sel = document.createElement("select"); sel.id = "seatmon";
+        var o0 = document.createElement("option"); o0.textContent = "Detecting…"; sel.appendChild(o0);
+        bar.appendChild(lbl); bar.appendChild(sel); document.body.appendChild(bar);
+        sel.addEventListener("change", function () {
+            // grd mirrors the PRIMARY monitor, so reconnect to reflect the current
+            // seat. (Mirroring a specific non-primary output needs a grd capability
+            // that does not exist yet; the picker is here for when it does.)
+            if (client) { setStatus("Switching monitor…"); teardown(true); window.setTimeout(function () { connect("console"); }, 80); }
+        });
+        populateSeatMonitors(sel);
+        $("target").value = "console";
+        refreshUi();
+        connect("console");
+    }
+
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
     // the point -- an operator pinning 100% wants pixel-exact, not helpfully resized.
     var scaleMode = "fit";
@@ -1022,10 +1080,12 @@
             teardown(false);
         });
         $("addmon").addEventListener("click", openMonitorWindow);
+        $("popout").addEventListener("click", openSeatWindow);
         refreshUi();
         setStatus("Idle. Choose a session and connect.");
-        // If this page was opened as a monitor pop-up (#monitor), go chromeless and
-        // auto-connect a fresh virtual monitor that closes with the window.
+        // Pop-up modes: #monitor = a fresh virtual monitor (closes with the window);
+        // #seat = the physical-seat mirror with a monitor picker (disconnect only).
         if (MONITOR_MODE) enterMonitorMode();
+        else if (SEAT_MODE) enterSeatMode();
     });
 })();

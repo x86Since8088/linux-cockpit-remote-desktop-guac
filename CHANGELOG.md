@@ -1,3 +1,20 @@
+## 1.2.0.20260913 - 2026-09-13
+
+**Pop-out** — the mirrored seat in its own chromeless window, with a monitor picker.
+
+- **NEW: "Pop-out" button** (`index.html`, `guac-rdp.js`, `guac-rdp.css`). It
+  re-opens this page in a minimal pop-up (no tabs/toolbar/address bar) marked
+  `#seat`: chromeless, titled `Physical Monitor — <host>`, auto-connecting the
+  console mirror at the window's size. Unlike Add Monitor, closing the window only
+  **disconnects this view** — it never terminates the physical desktop.
+- A slim **physical-monitor picker** overlays the top of the pop-out, populated
+  from the seat's real outputs via Mutter `DisplayConfig` (grd's own "Virtual
+  remote monitor" entries are filtered out). NOTE: grd mirrors the *primary*
+  monitor, so with several physical monitors the picker currently reflects the
+  layout and shows the primary; mirroring a chosen non-primary output needs a grd
+  capability that does not exist yet. On a single-monitor seat it simply shows that
+  monitor.
+
 ## 1.1.9.20260913 - 2026-09-13
 
 Fix a connection regression from 1.1.7's always-on audio / eager clipboard.
