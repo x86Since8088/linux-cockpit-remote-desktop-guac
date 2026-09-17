@@ -195,6 +195,49 @@
         });
         return b;
     }
+    // A one-shot key TAP into the session (press then release), for keys the local
+    // OS refuses to hand the browser -- above all the Windows/Super key, which
+    // GNOME/Wayland (mutter) and Windows both reserve at the compositor/OS level
+    // BELOW any web page, so the Keyboard Lock API cannot capture it. This injects
+    // the keysym straight down the Guacamole channel, so the guest receives it no
+    // matter what the local OS does with the physical key.
+    function sendKeysymTap(keysym) {
+        if (!client) return;
+        try { client.sendKeyEvent(1, keysym); client.sendKeyEvent(0, keysym); } catch (e) { /* ignore */ }
+        try { $("display").focus(); } catch (e) { /* keep focus in the session */ }
+    }
+    // Keysym fix-ups on the way to the guest. Both are needed because the bridge
+    // runs x11vnc in -nomodtweak (which preserves the modifiers the browser sends,
+    // so Ctrl+Shift / Alt+Shift combos are not stripped):
+    //   * Windows/Super key: Guacamole maps keyCode 91/92 to Meta_L/Meta_R
+    //     (0xFFE7/0xFFE8), but remotes want Super_L/R -- GNOME's overview overlay-key
+    //     is Super_L and a Windows host's Start menu is LWin (= Super_L's scancode).
+    //     Meta_L lands elsewhere (the guest sees an Alt-ish key) and opens neither.
+    //   * Parentheses: "(" / ")" arrive as parenleft/parenright, which x11vnc routes
+    //     to phantom keycodes 187/188 that xfreerdp3 cannot scancode. Send the plain
+    //     9/0 keysym instead; the browser's held Shift (preserved by -nomodtweak)
+    //     makes keycode 18/19 produce "(" / ")" in the guest. (Under -nomodtweak the
+    //     bridge's -skip_keycodes no longer applies, so this moves here.)
+    function remapKeysym(ks) {
+        switch (ks) {
+            case 0xFFE7: return 0xFFEB;   // Meta_L     -> Super_L
+            case 0xFFE8: return 0xFFEC;   // Meta_R     -> Super_R
+            case 0x28:   return 0x39;     // parenleft  -> 9  (held Shift makes it "(")
+            case 0x29:   return 0x30;     // parenright -> 0  (held Shift makes it ")")
+            default:     return ks;
+        }
+    }
+    function addWinKeyButton(bar) {
+        var wrap = document.createElement("div"); wrap.className = "f";
+        var b = document.createElement("button");
+        b.type = "button"; b.className = "sec"; b.id = "winkey";
+        b.textContent = "⊞ Win";   // squared-plus glyph
+        b.title = "Send the Windows/Super key to the session. Use this for Super — the "
+                + "local OS/compositor reserves the physical key and the browser cannot capture it.";
+        b.addEventListener("click", function () { sendKeysymTap(0xFFEB); });   // Super_L
+        wrap.appendChild(b); bar.appendChild(wrap);
+        return b;
+    }
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
@@ -834,8 +877,8 @@
         };
         box.addEventListener("focus", clipReadHandler, true);
         keyboard = new Guacamole.Keyboard(box);
-        keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, k); };
-        keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, k); };
+        keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, remapKeysym(k)); };
+        keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, remapKeysym(k)); };
 
         // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
         // forwards a lock KEY when it is pressed live, but never knew the browser's
