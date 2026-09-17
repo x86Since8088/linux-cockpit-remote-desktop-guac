@@ -1,3 +1,21 @@
+## 1.2.12.20260917 - 2026-09-17
+
+Fix: parentheses could not be typed in the mirror/RDP session.
+
+- **`( ` and `)` silently produced nothing** while every other key worked. Root
+  cause: Xvfb's us/pc105 keymap maps parenleft/parenright onto BOTH Shift+9/0
+  (keycodes 18/19) AND phantom *unshifted* keycodes 187/188. x11vnc (in its
+  auto-enabled `-xkb` mode) preferred the phantom 187/188, but xfreerdp3's
+  scancode path has no RDP scancode for those extended keycodes, so the parens
+  never reached grd.
+- **Fix:** the bridge now runs x11vnc with `-skip_keycodes 187,188`, so it falls
+  back to Shift+9 / Shift+0 (keycode 18/19), which xfreerdp3 maps to real RDP
+  scancodes (`bridge/edy-rdp-bridge-start.sh`). Verified with `x11vnc
+  -debug_keyboard`: parenleft now injects `Shift_L` + keycode `0x12 "9"`. Only
+  187/188 are affected — the numpad and all other keys are untouched, and the
+  option applies only in `-xkb` mode (already active). Takes effect on the next
+  connection; no service restart.
+
 ## 1.2.11.20260917 - 2026-09-17
 
 Pop-out layout fit + connect-bar settings persist across refresh.

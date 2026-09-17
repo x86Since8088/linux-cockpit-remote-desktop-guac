@@ -165,7 +165,17 @@ done
 # $vncport (else x11vnc also grabs the default 5900) and background it directly so
 # $vnc_pid is the real server the teardown trap kills (v1: -nopw; hardening adds a
 # VNC password + an nft owner-match on the loopback port).
+# Keyboard: Xvfb's us/pc105 keymap carries parenleft/parenright on BOTH Shift+9/0
+# (keycodes 18/19) AND phantom UNSHIFTED keycodes 187/188. In -xkb mode (which
+# x11vnc auto-enables here) x11vnc prefers the phantom 187/188 -- but xfreerdp3's
+# scancode path has no RDP scancode for those extended keycodes, so "(" and ")"
+# silently vanish while every other key types fine. -skip_keycodes drops 187/188
+# as candidates, so x11vnc falls back to Shift+9 / Shift+0 (keycode 18/19), which
+# xfreerdp3 maps to real RDP scancodes. Verified with x11vnc -debug_keyboard:
+# parenleft then injects Shift_L + keycode 0x12 "9". Only affects 187/188 (numpad
+# and all other keys are untouched); -skip_keycodes applies only in -xkb mode.
 x11vnc -display ":$disp" -localhost -rfbport "$vncport" -rfbportv6 "$vncport" \
+  -skip_keycodes 187,188 \
   -passwdfile "$pwfile" -forever -shared -noxdamage -o /dev/null >/dev/null 2>&1 &
 vnc_pid=$!
 for i in $(seq 1 25); do ss -tlnH 2>/dev/null | grep -q "127.0.0.1:$vncport " && break; sleep 0.2; done
