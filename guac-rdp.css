@@ -30,7 +30,12 @@ html.monitor .hint,
 html.monitor #appfoot { display:none !important; }
 html.monitor, html.monitor body { height:100%; margin:0; background:var(--display-bg); }
 html.monitor .panel { margin:0; padding:0; }
-html.monitor #display { margin-top:var(--seatbar-h); height:calc(100vh - var(--seatbar-h)); width:100vw; }
+/* Fit-scaling reads #display's clientWidth/Height (see applyScale), so sizing the
+   container sizes the inner Guacamole div. Trim 10px off each axis so neither the
+   viewport's scrollbar gutter (width:100vw) nor the exact-100vh total force a
+   scrollbar; the fixed #seatbar reserves the top strip via margin-top. */
+html.monitor #display { margin-top:var(--seatbar-h);
+  height:calc(100vh - 10px - var(--seatbar-h)); width:calc(100vw - 10px); }
 html.monitor .status { display:none; }
 html.monitor .status.err { display:block; position:fixed; left:0; right:0; bottom:0; z-index:10; }
 
