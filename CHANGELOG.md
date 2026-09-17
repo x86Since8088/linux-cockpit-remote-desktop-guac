@@ -1,3 +1,313 @@
+## 1.2.11.20260917 - 2026-09-17
+
+Pop-out layout fit + connect-bar settings persist across refresh.
+
+- **Pop-out / virtual-monitor windows now fit the viewport with no scrollbars**:
+  `#display` is `calc(100vw - 10px)` wide and `calc(100vh - 10px - seatbar)` tall,
+  so the browser's scrollbar gutter (width:100vw) and an exact-100vh total no
+  longer force a bottom/side scrollbar. The fixed seatbar keeps reserving the top
+  strip via margin-top (`guac-rdp.css`).
+- **The connect-bar toggles/selectors persist** (Session, Resolution, Scale,
+  Clipboard, Sound). On change they are written to the URL hash — after any
+  `#seat`/`#monitor` mode token, which is preserved — and mirrored to
+  localStorage; on load they are restored (hash wins; localStorage is the
+  refresh-safe fallback inside Cockpit's shell iframe). Pop-out and Add-Monitor
+  windows inherit the current settings through their URL. Credentials
+  (username/password/host) are never persisted (`guac-rdp.js`).
+
+## 1.2.10.20260914 - 2026-09-14
+
+Auto-close non-live mirror sessions (stop the "Active Sessions" pile-up).
+
+- **Disconnected sessions in non-resumable scenarios (console/mirror, remote, vnc)
+  are now reaped ~15s after the client leaves**, instead of being held for the
+  15-minute `session_ttl` (`relay/session_registry.py`). They have no backend to
+  resume — the xfreerdp3/Xvfb/x11vnc bridge is already torn down on disconnect —
+  so a non-live entry was pure clutter. Reconnect-on-change (resolution/sound/
+  resize each reconnect) had been leaving a stack of non-live mirror entries per
+  user until the 15-minute TTL. Reconnectable scenarios (isolated/virtual) are
+  unchanged — still kept for `session_ttl` so a reconnect resumes the same desktop.
+- New `EPHEMERAL_SCENARIOS` / `EPHEMERAL_DISCONNECT_TTL` registry policy; the
+  `ephemeral_ttl` is plumbed through the control `prune` op and the reaper
+  (`--ephemeral-ttl`, default 15s; the reaper runs every 30s). Greeter
+  (loginctl-reaped) and wayland-vnc (reaper treats it as resumable) are excluded.
+- Tests extended (mirror reaped promptly; remote/vnc ephemeral; reconnectable
+  untouched; TTL tunable; control pass-through). Full relay suite green (79 tests).
+- **Live apply requires an `edy-rdp-relay` restart** (the prune runs in the relay
+  daemon); the grd backend and guacd :4822 are untouched.
+
+## 1.2.9.20260914 - 2026-09-14
+
+Desktop audio actually works now (the Sound toggle).
+
+- **Root cause of the silence: `PULSE_SOURCE=@DEFAULT_MONITOR@`.** That alias does
+  not resolve on this host's pipewire-pulse — a record stream on it returns zero
+  bytes even with the default sink active. An **explicit** sink-monitor name
+  (`<sink>.monitor`) records fine (verified: ~196 KB in 3 s of tone). The install
+  `.env` now sets `PULSE_SOURCE` to the explicit monitor of the desktop's sink.
+- **The guacd unit template now carries the audio wiring** that had only ever been
+  applied live (`systemd/edy-rdp-guacd.service.in`): an `ExecStartPre` that
+  bind-mounts the seat's pulse **socket** to a stable host path, and the matching
+  `-v /run/edy-rdp-pulse.sock:/run/pulse.sock`. The seat socket path is overridable
+  with `EDY_RDP_PULSE_SEAT_SOCKET` (default uid 1000). A fresh deploy now ships a
+  working audio path instead of needing hand-editing.
+- **Docs/config corrected** (`.envdefault`, `docs/AUDIO.md`): the earlier TCP
+  approach (`tcp:127.0.0.1:4713`) is removed — pipewire-pulse delivers no recording
+  audio over `module-native-protocol-tcp`; only the local UNIX socket works. Both
+  now describe the socket + explicit-monitor setup, with the `@DEFAULT_MONITOR@`
+  and TCP dead ends documented so they are not re-attempted.
+- **Note on mute:** the Sound toggle mutes **per-viewer at the browser**, by design.
+  It does not mute the seat's OS sink, because muting the sink also silences the
+  `.monitor` guacd records — which would kill the stream rather than quiet the view.
+
+## 1.2.8.20260914 - 2026-09-14
+
+Controls in the pop-out / virtual-monitor windows.
+
+- **The chromeless pop-out (#seat) and virtual-monitor (#monitor) windows now show
+  a slim top control strip** (`guac-rdp.js`, `guac-rdp.css`). Previously they hid
+  the whole toolbar, so Sound/Resolution were unreachable there (which is why audio
+  could never be enabled in a pop-out). The relevant controls are moved out of the
+  hidden bar into the strip: the virtual-monitor window gets **Resolution + Sound**;
+  the mirror pop-out gets its **monitor picker + Sound** (resolution N/A — the
+  mirror is always native). The display sits below the strip.
+- **The Sound toggle now (re)negotiates audio live**: because `enable-audio` is a
+  connect-time parameter, toggling Sound reconnects the same scenario to add or
+  drop the audio channel (mic was dropped — the VNC leg has no audio input).
+
+## 1.2.7.20260914 - 2026-09-14
+
+Fix the console mirror being clipped (right/bottom cut off).
+
+- **The console mirror now always requests the NATIVE resolution** (`guac-rdp.js`).
+  1.2.3 downscaled the mirror's requested size below native to save bandwidth, but
+  grd's `mirror-primary` **ignores a smaller request and always streams the primary
+  at native**, so xfreerdp rendered a native frame into a smaller Xvfb and the
+  right/bottom were clipped. `chosenGeom` now returns native (exact) for `console`
+  and lets the browser scale it; the Resolution selector still applies to the
+  virtual monitor (grd honours it there) and remote hosts. Net: no server-side
+  bandwidth saving for the mirror (grd streams native regardless), but the whole
+  screen is visible again.
+
+## 1.2.6.20260914 - 2026-09-14
+
+Resolution selector.
+
+- **NEW: a "Resolution" dropdown** in the toolbar (`index.html`, `guac-rdp.js`).
+  It sets the resolution requested from the session (the guest framebuffer); the
+  browser then scales it to the window with the existing machinery (fit-scaling +
+  the 1.2.1 pointer alignment). Default **"Window size"** keeps today's behaviour
+  (the mirror stays native-capped/​bandwidth-saving; other scenarios track the
+  window). A fixed value (1280x720 ... 3840x2160) **pins** the guest resolution
+  verbatim. Because resolution is fixed at connect, changing it live reconnects the
+  same scenario at the new geometry; idle, it applies on the next connect. Distinct
+  from **Scale**, which only zooms whatever is streaming.
+
+## 1.2.5.20260913 - 2026-09-13
+
+Desktop audio streaming for the mirror (opt-in).
+
+- **The Sound toggle can now stream real desktop audio.** guacd (which runs on the
+  host network) captures the seat's PulseAudio/PipeWire and streams it to the
+  browser. The `edy-rdp-guacd` unit now passes `-e PULSE_SERVER -e PULSE_SOURCE`
+  into the container; set them in `.env` (`PULSE_SERVER=tcp:127.0.0.1:4713`,
+  `PULSE_SOURCE=@DEFAULT_MONITOR@`) after exposing pipewire-pulse over loopback TCP
+  — see the new `docs/AUDIO.md`. `@DEFAULT_MONITOR@` records the default sink's
+  monitor (what is PLAYING on the desktop), never a microphone. Unset = no audio
+  channel (unchanged default). There is no mic/audio-input path (the browser leg
+  is VNC). Verified on edt1: guacd reaches the seat's Pulse over TCP and records
+  the HDMI sink monitor.
+
+## 1.2.4.20260913 - 2026-09-13
+
+Pop-out: keep the mirror below the monitor picker.
+
+- The `#seat` monitor picker is a fixed bar at the top, but the mirror filled the
+  whole window from `top:0`, so the bar sat OVER the guest's top rows and the
+  pointer could not reach them. The seatbar now has a fixed height and the display
+  starts below it (`margin-top`/`height: calc(100vh - bar)`), so the guest's full
+  height — top row included — is live.
+
+## 1.2.3.20260913 - 2026-09-13
+
+Mirror resolution policy: downscale on the server, upscale in the browser.
+
+- **The mirror now caps the requested resolution at native and downscales
+  server-side when the window is smaller** (`guac-rdp.js`). 1.2.2 always sent the
+  full native resolution, which wasted bandwidth when the window was smaller than
+  the monitor. Now the geometry is the native resolution scaled by
+  `min(1, winW/nativeW, winH/nativeH)`: below native, grd/guacd downscale to the
+  window size (fewer pixels on the wire — a half-size window sends ~¼ the pixels),
+  preserving the native aspect; at or above native the browser upscales (never
+  send more pixels than the monitor has). Non-mirror scenarios are unchanged.
+
+## 1.2.2.20260913 - 2026-09-13
+
+Mirror runs at native resolution; the browser does all the scaling.
+
+- **The console mirror now requests the monitor's NATIVE resolution** as the RDP
+  geometry (`guac-rdp.js`), instead of the browser window size. Previously the
+  bridge was sized to the window, so grd scaled the native primary framebuffer to
+  that size SERVER-side and the browser scaled again — double-scaling, and the
+  pop-out and main window (different sizes) never aligned. Now `queryNativeGeom()`
+  reads the primary monitor's current mode from Mutter `DisplayConfig` (1920×1080
+  here) and the whole internal path (grd → xfreerdp → Xvfb → x11vnc → guacd) runs
+  1:1 at native resolution with no server-side scaling. Falls back to the window
+  size if the resolution can't be read, so a parse miss never blocks a connect.
+- **The browser does all the scaling.** `display.onresize` now re-fits whenever the
+  guest framebuffer size becomes known, so the native frame is scaled into the
+  window client-side; with the 1.2.1 pointer-scale fix the mouse stays aligned.
+  Every window that mirrors the same seat now shows identical native pixels, each
+  scaled to its own size — so the pop-out and the main view align.
+
+## 1.2.1.20260913 - 2026-09-13
+
+Fix mouse alignment at non-100% scale and on window resize.
+
+- **Mouse coordinates are now divided by the live display scale** (`guac-rdp.js`).
+  The bundled `Guacamole.Mouse.fromClientPosition` maps pointer events through the
+  display element's LAYOUT box (offsetLeft/offsetParent) and does NOT divide by the
+  scale, while `display.scale(f)` sets that element's layout size to `guest*f` — so
+  the reported state was in RENDERED pixels (0..guest*f) but `sendMouseState` needs
+  guest pixels. Clicks therefore drifted at any zoom other than 100%, which is
+  exactly what a resized "Fit to window" produces. A new `guestMouseState()`
+  divides x/y by the tracked `curScale` before sending, keeping the pointer aligned
+  at every zoom, on letterboxed aspect ratios, and while scrolled.
+- **Resize now re-fits and re-syncs the pointer** (debounced, with a trailing
+  `requestAnimationFrame`): `applyScale()` recomputes `curScale` (Fit follows the
+  window; a pinned factor stays put) and the mouse handler reads it live, so the
+  surface stays aligned after a resize. (The guest resolution itself is fixed at
+  connect — the bridge's Xvfb is a fixed size — so this scales+aligns rather than
+  re-resolutioning.)
+
+## 1.2.0.20260913 - 2026-09-13
+
+**Pop-out** — the mirrored seat in its own chromeless window, with a monitor picker.
+
+- **NEW: "Pop-out" button** (`index.html`, `guac-rdp.js`, `guac-rdp.css`). It
+  re-opens this page in a minimal pop-up (no tabs/toolbar/address bar) marked
+  `#seat`: chromeless, titled `Physical Monitor — <host>`, auto-connecting the
+  console mirror at the window's size. Unlike Add Monitor, closing the window only
+  **disconnects this view** — it never terminates the physical desktop.
+- A slim **physical-monitor picker** overlays the top of the pop-out, populated
+  from the seat's real outputs via Mutter `DisplayConfig` (grd's own "Virtual
+  remote monitor" entries are filtered out). NOTE: grd mirrors the *primary*
+  monitor, so with several physical monitors the picker currently reflects the
+  layout and shows the primary; mirroring a chosen non-primary output needs a grd
+  capability that does not exist yet. On a single-monitor seat it simply shows that
+  monitor.
+
+## 1.1.9.20260913 - 2026-09-13
+
+Fix a connection regression from 1.1.7's always-on audio / eager clipboard.
+
+- **`enable-audio` is opt-in again** (`guac-rdp.js`). 1.1.7 negotiated audio on
+  every connect, so guacd tried and failed a PulseAudio connection each time
+  (`Connecting to PulseAudio... PulseAudio connection failed`) — noise at best,
+  and implicated in a login-screen connect regression. Audio is once more
+  negotiated only when Sound is on at connect; live mute/unmute still works while
+  connected.
+- **Outbound clipboard only fires on a fully-open session.** The focus reader that
+  pushes the local clipboard now checks `currentUuid` (set on tunnel OPEN), so it
+  no longer writes to the RDP clipboard channel during connect/teardown (which
+  surfaced `cliprdr VirtualChannelWrite failed`).
+
+## 1.1.8.20260913 - 2026-09-13
+
+**Add Monitor** — a virtual monitor in its own chromeless window.
+
+- **NEW: "Add Monitor" button** in the connect bar (`index.html`, `guac-rdp.js`,
+  `guac-rdp.css`). It re-opens this Cockpit page in a minimal pop-up window (no
+  tabs, toolbar or address bar; `window.open(..., "popup,…")`) marked with
+  `#monitor` in the hash. That pop-up goes chromeless (a `html.monitor` CSS class
+  hides the tabs/bar/footer and makes the display fill the window), sets a
+  descriptive title (`Virtual Monitor N — <host>`), and auto-connects a fresh
+  **virtual** monitor (grd `extend` mode) at the window's size. The pop-up carries
+  its own Cockpit transport (shared session cookie).
+- **Closing the window closes the monitor.** On `pagehide`/`beforeunload` the
+  pop-up disconnects and sends `terminate` for its session; even absent that, the
+  window's transport drop makes the relay reap the bridge and grd drop the virtual
+  monitor, so the virtual desktop never lingers.
+- The button is available in every mode (not just the mirror), so you can spin up
+  extra virtual monitors alongside a console mirror or any other session.
+
+## 1.1.7.20260913 - 2026-09-13
+
+Sound and clipboard passthrough are now gated by **live** toggles.
+
+- **Clipboard passthrough is now actually wired to the browser** and gated live by
+  the Clipboard checkbox (`guac-rdp.js`). Previously the checkbox only set guacd's
+  `disable-copy`/`disable-paste` at connect while the plugin implemented no
+  client-side clipboard at all, so nothing reached the browser. Now
+  `client.onclipboard` writes the remote clipboard into the browser (remote →
+  local) and a display-focus reader pushes the local clipboard into the session
+  (local → remote), each honouring a live `clipboardOn` flag — the browser's own
+  clipboard is touched only while the toggle is on. Best-effort: the browser
+  Clipboard API can be restricted inside a Cockpit iframe, so every access is
+  guarded and a denial degrades to "no sync", never an error.
+- **Sound gates live** (`guac-rdp.js`). Audio is now always negotiated with guacd
+  and playback is muted/unmuted instantly by suspending/resuming Guacamole's
+  shared `AudioContext` — so Sound toggles mid-session with no reconnect (resume
+  runs from the toggle click, satisfying autoplay policy). guacd produces silence
+  when the deployment has no audio source, so always offering the channel is
+  harmless.
+- Both toggles are wired to apply on `change` during a live session; `guacdValues`
+  no longer sets `disable-copy`/`disable-paste` (a connect-time gate that would
+  defeat a live toggle) — the gate now lives in the browser.
+
+## 1.1.6.20260913 - 2026-09-13
+
+On-screen **Num Lock** toggle, and lock sync is now edge-triggered.
+
+- **NEW: a "Num Lock" toggle button** in the connect bar (`index.html`,
+  `guac-rdp.js`, `guac-rdp.css`). It sends NumLock into the session on demand —
+  for laptops/keyboards with no numpad key, or browsers that will not forward
+  NumLock — shows its on/off state (accent fill), and refocuses the display so
+  typing keeps landing in the session. Enabled only while connected.
+- **Lock sync is now edge-triggered, not level-forced.** The reconcile added in
+  1.1.5 aligned the session to the browser on the first keystroke; it now mirrors
+  only *subsequent changes* to the browser's locks (tracked in `browserLocks`).
+  That is what lets the manual toggle coexist: it moves the session but not
+  `browserLocks`, so the next keystroke no longer reverts it. Physical lock-key
+  presses still ride Guacamole's own path and are tracked, never double-toggled.
+
+## 1.1.5.20260913 - 2026-09-13
+
+Keyboard lock-state (NumLock / CapsLock / ScrollLock) sync.
+
+- **NEW: lock-key sync in the plugin** (`guac-rdp.js`). The bundled
+  `Guacamole.Keyboard` forwards a lock KEY when it is pressed live, but it does
+  not know the browser's CURRENT lock state, so a session opened while the
+  browser already holds NumLock started with the opposite state: x11vnc then had
+  to fake the missing modifier when it XTEST-injected `KP_*` keysyms into the
+  Xvfb and mis-typed the numpad (End instead of 1, and so on). The plugin now
+  reconciles NumLock/CapsLock/ScrollLock to the browser's actual state (read via
+  the DOM `getModifierState`) on the first keystroke, and self-heals on drift, by
+  sending the lock keysym — which rides the normal key path
+  (guacd → x11vnc XTEST → Xvfb → xfreerdp3 → grd), toggling every hop, including
+  grd's own RDP lock sync. Live lock-key presses still ride Guacamole's own path
+  (the handler only tracks them, so it never double-toggles). The session's
+  baseline is all-off (a fresh Xvfb, synced to grd on connect); no bridge, relay
+  or guacd change was needed.
+
+## 1.1.4.20260909 - 2026-09-09
+
+Greeter (3390 Remote Login) works again, and NLA no longer hangs on a dead DC.
+
+- **NEW: Kerberos preflight for local-grd NLA** (`bridge/edy-rdp-krb-preflight.sh`,
+  wired into the bridge for loopback targets). FreeRDP3 tries Kerberos first, so a
+  down AD DC made xfreerdp3 hang ~2 min before falling back to NTLM. The preflight
+  probes every configured KDC's port 88 **in parallel with a 500 ms timeout**, points
+  krb5 at only the ones that answer, and — when none do — writes a krb5.conf with no
+  KDC so Kerberos fails instantly and NLA drops straight to NTLM (the door/gate users
+  are local grd credentials, never AD principals). Every attempt/result/decision is
+  logged to `<key>.krblog`. This unblocked the greeter, which was failing NLA before
+  the handover ever ran.
+- **grd handover patch re-deployed on edt1** (KNOWN_ISSUES I29): the method-call
+  handover daemon (`patches/grd-handover-method-call.patch`, sha `5c08514e`) is
+  installed over stock (backed up to `.orig-edt1`) and the package is held. With the
+  preflight in front of it, the GDM greeter renders and logs in over the browser path.
+
 ## 1.1.3.20260909 - 2026-09-09
 
 Opt-in remote-unlock of a locked screen, and a keyboard-mode correction.

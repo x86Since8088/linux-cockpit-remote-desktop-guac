@@ -159,7 +159,7 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
         if now is None:
             return {"ok": False, "error": "prune requires now"}
         kwargs = {}
-        for k in ("greeter_ttl", "session_ttl", "connecting_ttl"):
+        for k in ("greeter_ttl", "session_ttl", "connecting_ttl", "ephemeral_ttl"):
             v = request.get(k)
             if v is not None:
                 kwargs[k] = v

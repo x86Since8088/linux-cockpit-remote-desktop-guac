@@ -63,35 +63,236 @@
     }
 
     function $(id) { return document.getElementById(id); }
-    // Clipboard is on by default because a remote desktop you cannot paste into is
-    // a demo, not a tool. Audio is off by default: it needs an audio server the
-    // deployment may not have wired, and silently negotiating a channel that then
-    // produces nothing is worse than not offering it.
+    // guacd VNC parameters. Both the clipboard and the audio channels are ALWAYS
+    // negotiated with guacd so the Clipboard/Sound toggles can gate them LIVE in
+    // the browser -- with no reconnect -- rather than only at connect:
+    //   * clipboard: client.onclipboard (remote->browser) and a focus reader
+    //     (browser->remote) honour the live clipboardOn flag; the browser's own
+    //     clipboard is only ever touched while the toggle is on.
+    //   * sound: playback is gated by suspending/resuming the shared Guacamole
+    //     AudioContext (instant, mid-stream). guacd simply produces silence when
+    //     the deployment has no audio source, so always offering it is harmless.
+    // We deliberately do NOT set disable-copy/disable-paste here: those are fixed
+    // at connect and would defeat a live toggle. The gate lives in the browser.
     function guacdValues() {
         var v = {};
-        var clip = $("opt-clipboard");
-        if (clip && !clip.checked) { v["disable-copy"] = "true"; v["disable-paste"] = "true"; }
-        var aud = $("opt-audio");
-        if (aud && aud.checked) v["enable-audio"] = "true";
+        // Negotiate the audio channel ONLY when Sound is on at connect. Forcing it
+        // on unconditionally made guacd attempt (and log a failed) PulseAudio
+        // connection on every session and was implicated in a login-screen
+        // regression, so it is opt-in again. Live mute/unmute via the shared
+        // AudioContext still applies while connected; turning Sound on from off
+        // takes effect on the next connect.
+        if ($("opt-audio") && $("opt-audio").checked) v["enable-audio"] = "true";
         return v;
+    }
+
+    // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
+    var clipboardOn = true, soundOn = false, clipReadHandler = null;
+    function syncPassthroughFlags() {
+        clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
+        soundOn = !!($("opt-audio") && $("opt-audio").checked);
+    }
+    // Sound gate: suspend/resume Guacamole's shared AudioContext. suspend() mutes
+    // playback instantly, mid-stream; resume() is driven from the toggle's own
+    // click (a user gesture), which satisfies browser autoplay policy.
+    function applySoundGate() {
+        try {
+            var f = Guacamole.AudioContextFactory;
+            var ctx = f && f.getAudioContext && f.getAudioContext();
+            if (!ctx) return;
+            if (soundOn) { if (ctx.state === "suspended" && ctx.resume) ctx.resume(); }
+            else if (ctx.state === "running" && ctx.suspend) ctx.suspend();
+        } catch (e) { /* no Web Audio in this context -> nothing to gate */ }
+    }
+    // Read and drop a text stream we will not use (clipboard toggled off).
+    function discardTextStream(stream) {
+        try { var r = new Guacamole.StringReader(stream); r.ontext = function () {}; r.onend = function () {}; }
+        catch (e) { /* ignore */ }
+    }
+
+    // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
+    // Re-opens THIS Cockpit page in a minimal pop-up (no tabs, toolbar or address
+    // bar) that auto-connects a fresh "virtual" monitor and fills the window. The
+    // pop-up carries its OWN Cockpit transport (shared session cookie), so closing
+    // it drops that transport -> the relay reaps the bridge and grd removes the
+    // virtual (extend) monitor; an explicit terminate on close makes that instant.
+    var MONITOR_MODE = /(?:^|[#&?])monitor\b/.test(location.hash);
+    var monitorSeq = 0;
+    function openMonitorWindow() {
+        monitorSeq += 1;
+        var suf = controlHashSuffix();   // inherit the current toggle/selector choices
+        var url = location.href.split("#")[0] + "#monitor=" + monitorSeq + (suf ? "&" + suf : "");
+        var feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes,width=1440,height=900";
+        var w = window.open(url, "edy-monitor-" + monitorSeq + "-" + Date.now(), feat);
+        if (!w) { setStatus("The browser blocked the monitor window — allow pop-ups for this site, then click Add Monitor again.", "err"); return; }
+        try { w.focus(); } catch (e) { /* ignore */ }
+    }
+    function monitorTeardown() {
+        // Close the virtual desktop when the window closes. The transport drop
+        // reaps it on its own; terminate makes the removal immediate and explicit.
+        try { if (currentUuid) controlRequest({ op: "terminate", uuid: currentUuid }); } catch (e) { /* best effort */ }
+        try { teardown(true); } catch (e) { /* ignore */ }
+    }
+    // Move a control's whole .f wrapper out of the (hidden) main bar into the
+    // chromeless top strip, so the pop-out windows can drive it. Each pop-out is
+    // its own window/DOM, so this never affects the main window.
+    function moveField(bar, id) {
+        var el = $(id); if (!el || !bar) return;
+        var f = (el.closest && el.closest(".f")) || el.parentNode;
+        if (f) bar.appendChild(f);
+    }
+    function enterMonitorMode() {
+        document.documentElement.classList.add("monitor");
+        var m = location.hash.match(/monitor=(\d+)/);
+        document.title = "Virtual Monitor" + (m ? " " + m[1] : "") + " — " + location.hostname;
+        window.addEventListener("pagehide", monitorTeardown);
+        window.addEventListener("beforeunload", monitorTeardown);
+        // top control strip: Resolution + Sound (grd honours the resolution for a
+        // virtual monitor). Moved out of the hidden main bar.
+        var bar = document.createElement("div"); bar.id = "seatbar";
+        document.body.appendChild(bar);
+        moveField(bar, "resolution");
+        moveField(bar, "opt-audio");
+        $("target").value = "virtual";
+        refreshUi();
+        connect("virtual");
+    }
+
+    // ---- "Pop-out": the mirrored physical seat in its own chromeless window ----
+    // Like Add Monitor, but for the CONSOLE mirror, with a picker of the seat's
+    // physical monitors. Closing the window only DISCONNECTS this view; it never
+    // terminates the physical desktop.
+    var SEAT_MODE = /(?:^|[#&?])seat\b/.test(location.hash);
+    function openSeatWindow() {
+        var suf = controlHashSuffix();   // inherit the current toggle/selector choices
+        var url = location.href.split("#")[0] + "#seat" + (suf ? "&" + suf : "");
+        var feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes,width=1600,height=1000";
+        var w = window.open(url, "edy-seat-" + Date.now(), feat);
+        if (!w) { setStatus("The browser blocked the pop-out window — allow pop-ups for this site, then click Pop-out again.", "err"); return; }
+        try { w.focus(); } catch (e) { /* ignore */ }
+    }
+    function seatTeardown() {
+        // The mirror IS the physical seat: never terminate it, just drop this view.
+        try { teardown(true); } catch (e) { /* ignore */ }
+    }
+    function populateSeatMonitors(sel) {
+        if (!sel || typeof cockpit === "undefined") return;
+        cockpit.spawn(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+                       "--object-path", "/org/gnome/Mutter/DisplayConfig",
+                       "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState"], { err: "message" })
+        .then(function (out) {
+            // Physical connectors read as 'HDMI-3' / 'DP-1' / 'eDP-1'; grd's own
+            // outputs read as 'Virtual remote monitor' (spaces) and are skipped.
+            var names = [], re = /'([A-Za-z]+-[0-9]+(?:-[0-9]+)?)'/g, m;
+            while ((m = re.exec(out))) { if (names.indexOf(m[1]) < 0) names.push(m[1]); }
+            sel.innerHTML = "";
+            (names.length ? names : ["(single monitor)"]).forEach(function (n) {
+                var o = document.createElement("option"); o.value = n; o.textContent = n; sel.appendChild(o);
+            });
+        }, function () {
+            sel.innerHTML = ""; var o = document.createElement("option");
+            o.textContent = "(monitor list unavailable)"; sel.appendChild(o);
+        });
+    }
+    function enterSeatMode() {
+        document.documentElement.classList.add("monitor", "seat");
+        document.title = "Physical Monitor — " + location.hostname;
+        window.addEventListener("pagehide", seatTeardown);
+        window.addEventListener("beforeunload", seatTeardown);
+        // a slim monitor picker overlaid on the mirror
+        var bar = document.createElement("div"); bar.id = "seatbar";
+        var lbl = document.createElement("span"); lbl.textContent = "Physical monitor:";
+        var sel = document.createElement("select"); sel.id = "seatmon";
+        var o0 = document.createElement("option"); o0.textContent = "Detecting…"; sel.appendChild(o0);
+        bar.appendChild(lbl); bar.appendChild(sel); document.body.appendChild(bar);
+        sel.addEventListener("change", function () {
+            // grd mirrors the PRIMARY monitor, so reconnect to reflect the current
+            // seat. (Mirroring a specific non-primary output needs a grd capability
+            // that does not exist yet; the picker is here for when it does.)
+            if (client) { setStatus("Switching monitor…"); teardown(true); window.setTimeout(function () { connect("console"); }, 80); }
+        });
+        populateSeatMonitors(sel);
+        moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
+        $("target").value = "console";
+        refreshUi();
+        connect("console");
     }
 
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
     // the point -- an operator pinning 100% wants pixel-exact, not helpfully resized.
     var scaleMode = "fit";
+    var activeKey = null;   // scenario of the live session, for reconnect-on-change
+    // The factor currently applied via display.scale(). The bundled
+    // Guacamole.Mouse maps pointer events through the display element's LAYOUT
+    // box (offsetLeft/offsetParent) WITHOUT dividing by the scale, and
+    // display.scale(f) sets that element's layout size to guest*f -- so the mouse
+    // state arrives in RENDERED pixels (0..guest*f). We divide by curScale before
+    // sendMouseState to get guest pixels, keeping the pointer aligned at any zoom
+    // and after every resize. curScale MUST track exactly what we pass to scale().
+    var curScale = 1;
 
     function applyScale() {
         if (!client) return;
         var d = client.getDisplay();
         if (!d || !d.getWidth()) return;
+        var s;
         if (scaleMode === "fit") {
             var box = $("display");
             var w = box.clientWidth || d.getWidth();
             var h = box.clientHeight || d.getHeight();
-            d.scale(Math.min(w / d.getWidth(), h / d.getHeight()) || 1);
+            s = Math.min(w / d.getWidth(), h / d.getHeight()) || 1;
         } else {
-            d.scale(parseFloat(scaleMode) || 1);
+            s = parseFloat(scaleMode) || 1;
         }
+        curScale = s;
+        d.scale(s);
+    }
+
+    // Translate a Guacamole.Mouse.State from rendered pixels to guest pixels using
+    // the live scale, preserving buttons and scroll. See curScale above.
+    function guestMouseState(st) {
+        var s = curScale || 1;
+        return new Guacamole.Mouse.State(
+            Math.round(st.x / s), Math.round(st.y / s),
+            st.left, st.middle, st.right, st.up, st.down);
+    }
+
+    // The native framebuffer resolution grd mirrors (mirror-primary = the primary
+    // monitor's current mode). We request THIS as the RDP geometry for the mirror
+    // so the whole internal path (grd -> xfreerdp -> Xvfb -> x11vnc -> guacd) runs
+    // 1:1 at native resolution with NO server-side scaling, and the browser does
+    // all the scaling. Resolves to {w,h}, or null (fall back to the window size)
+    // if it cannot be determined -- so a parse miss never blocks a connect.
+    function queryNativeGeom() {
+        return cockpit.spawn(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+                              "--object-path", "/org/gnome/Mutter/DisplayConfig",
+                              "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState"], { err: "message" })
+            .then(function (out) {
+                // Mode ids read '1920x1080@60.000'; the active one is tagged
+                // 'is-current': <true>. Take the last mode id before that marker.
+                var cur = out.search(/'is-current':\s*<true>/);
+                if (cur < 0) return null;
+                var re = /'(\d+)x(\d+)@[\d.]+'/g, m, best = null;
+                while ((m = re.exec(out)) && m.index < cur) best = m;
+                return best ? { w: parseInt(best[1], 10), h: parseInt(best[2], 10) } : null;
+            })
+            .catch(function () { return null; });
+    }
+
+    // Resolution the session should render at, from the toolbar selector.
+    //   "Window size" -> the mirror uses the native-capped policy (start() downscales
+    //                    below native); other scenarios use the window size.
+    //   a fixed WxH   -> pin the guest framebuffer to exactly that (browser scales it).
+    function chosenGeom(key) {
+        // grd's mirror-primary ALWAYS streams the primary at its native resolution
+        // and ignores a smaller requested size, so the Xvfb must be native or the
+        // frame is clipped (right/bottom cut off). The console mirror therefore
+        // always requests native (exact) and the browser scales it. The Resolution
+        // selector applies to the virtual monitor (grd honours it there) and remote.
+        if (key === "console")
+            return queryNativeGeom().then(function (g) { return g ? { w: g.w, h: g.h, exact: true } : null; });
+        var sel = $("resolution"), m = /^(\d+)x(\d+)$/.exec(sel ? sel.value : "window");
+        return cockpit.resolve(m ? { w: parseInt(m[1], 10), h: parseInt(m[2], 10), exact: true } : null);
     }
 
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
@@ -224,6 +425,43 @@
     // ---- connect flow -------------------------------------------------------
     var client = null, tunnel = null, keyboard = null, isAdmin = false;
 
+    // Lock-key (NumLock/CapsLock/ScrollLock) sync state. remoteLocks models the
+    // lock state the SESSION currently has (baseline all-off, a fresh bridge);
+    // browserLocks is the last-seen browser state (null until first observed);
+    // lockSyncHandler is the capture-phase keydown listener. See the keyboard
+    // block for how they interact with the on-screen Num Lock toggle.
+    var remoteLocks = null, browserLocks = null, lockSyncHandler = null;
+    var LOCK_KEYSYM = { NumLock: 0xFF7F, CapsLock: 0xFFE5, ScrollLock: 0xFF14 };
+
+    // Send a lock key (press+release) into the session. It rides the normal key
+    // path (guacd -> x11vnc XTEST -> Xvfb -> xfreerdp3 -> grd), toggling the lock
+    // at every hop, including grd's own RDP lock sync.
+    function sendLockKeysym(name) {
+        if (!client || !LOCK_KEYSYM[name]) return;
+        client.sendKeyEvent(1, LOCK_KEYSYM[name]);
+        client.sendKeyEvent(0, LOCK_KEYSYM[name]);
+    }
+    // Reflect the session's NumLock state on the on-screen toggle button.
+    function updateLockButtons() {
+        var b = $("numlock");
+        if (!b) return;
+        var on = !!(remoteLocks && remoteLocks.NumLock);
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    // Toggle a session lock from the on-screen control, independent of the
+    // physical keyboard (for laptops/keyboards without a numpad, or browsers that
+    // will not forward NumLock). It moves the SESSION but NOT browserLocks, and
+    // the auto-sync only mirrors CHANGES to the browser's locks, so a manual
+    // toggle is never reverted by the next keystroke.
+    function toggleSessionLock(name) {
+        if (!client || !remoteLocks) return;
+        sendLockKeysym(name);
+        remoteLocks[name] = !remoteLocks[name];
+        updateLockButtons();
+        try { $("display").focus(); } catch (e) {}   // keep typing landing in the session
+    }
+
     var disposing = false;
 
     // Graceful: send the Guacamole "disconnect" to the backend (relay -> guacd ->
@@ -233,6 +471,15 @@
         if (disposing) return;
         disposing = true;
         if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
+        var lockBox = $("display");
+        if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
+        if (lockBox && clipReadHandler) lockBox.removeEventListener("focus", clipReadHandler, true);
+        lockSyncHandler = null; clipReadHandler = null; remoteLocks = null; browserLocks = null;
+        if ($("numlock")) {
+            $("numlock").disabled = true;
+            $("numlock").classList.remove("on");
+            $("numlock").setAttribute("aria-pressed", "false");
+        }
 
         function dispose() {
             try { if (tunnel) tunnel.disconnect(); } catch (e) { /* ignore */ }
@@ -330,7 +577,12 @@
                 creds = fetchGateKey(t.port);
             }
             ensureMode(key).then(function () { return creds; })
-                .then(function (cred) { start(key, cred, reg.token); })
+                .then(function (cred) {
+                    // Geometry from the Resolution selector (Window size vs a pinned
+                    // resolution); the mirror's "Window size" is native-capped.
+                    return chosenGeom(key)
+                        .then(function (geom) { start(key, cred, reg.token, geom); });
+                })
                 .catch(function (e) {
                     var msg = (e && e.message) || String(e);
                     if (/not-authorized|access-denied|superuser|not permitted|permission denied/i.test(msg))
@@ -354,9 +606,30 @@
             });
     }
 
-    function start(key, cred, sessiontoken) {
+    function start(key, cred, sessiontoken, geomOverride) {
+        activeKey = key;
         var t = TARGETS[key], box = $("display");
-        var w = Math.max(box.clientWidth, 640), h = Math.max(box.clientHeight, 480);
+        var winW = Math.max(box.clientWidth, 640), winH = Math.max(box.clientHeight, 480);
+        // Geometry sent to the backend; the browser always scales the result to the
+        // window (display.onresize -> applyScale). geomOverride:
+        //   .exact -> a PINNED resolution from the selector: send it verbatim, and
+        //             let the browser up/downscale it to the window.
+        //   else   -> a native cap (the mirror's "Window size"): send min(window,
+        //             native), so the server downscales BELOW native to cut network
+        //             traffic (aspect preserved) and never sends more than native.
+        // No override -> size to the window.
+        var w, h;
+        if (geomOverride && geomOverride.w && geomOverride.h) {
+            if (geomOverride.exact) {
+                w = geomOverride.w; h = geomOverride.h;
+            } else {
+                var s = Math.min(1, winW / geomOverride.w, winH / geomOverride.h);
+                w = Math.max(1, Math.round(geomOverride.w * s));
+                h = Math.max(1, Math.round(geomOverride.h * s));
+            }
+        } else {
+            w = winW; h = winH;
+        }
         // The relay injects the VNC target (the per-connection FreeRDP3 bridge); the
         // browser sends no target values. For non-managed scenarios the fetched/entered
         // RDP gate credential travels as rdpcred (0x1f separates user/pass), which the
@@ -380,6 +653,27 @@
         client = new Guacamole.Client(tunnel);
         var display = client.getDisplay();
         box.innerHTML = ""; box.appendChild(display.getElement());
+        // Re-fit whenever the guest framebuffer size becomes known or changes. With
+        // a native-resolution session this is what scales it into the window.
+        display.onresize = function () { applyScale(); };
+
+        // Clipboard passthrough (remote -> browser), gated live by the Clipboard
+        // toggle. Best-effort: the browser Clipboard API can be restricted inside a
+        // Cockpit iframe, so every access is guarded -- a denial degrades to "no
+        // sync", never an error, and the OS clipboard is only written while ON.
+        syncPassthroughFlags();
+        client.onclipboard = function (stream, mimetype) {
+            if (!clipboardOn || !/^text\//.test(mimetype || "text/plain")) { discardTextStream(stream); return; }
+            var reader = new Guacamole.StringReader(stream), text = "";
+            reader.ontext = function (t) { text += t; };
+            reader.onend = function () {
+                if (!clipboardOn) return;
+                try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text); }
+                catch (e) { /* clipboard-write blocked */ }
+            };
+        };
+        // Sound is negotiated (enable-audio); start it gated to the toggle's state.
+        applySoundGate();
 
         var errored = false;
         function explain(prefix, e) {
@@ -436,10 +730,12 @@
         client.connect();
 
         var mouse = new Guacamole.Mouse(display.getElement());
+        // Divide the mouse position by the live display scale (guestMouseState) so
+        // clicks land on the right guest pixel at any zoom and after any resize.
         if (typeof mouse.onEach === "function")
-            mouse.onEach(["mousedown", "mouseup", "mousemove"], function (e) { if (client) client.sendMouseState(e.state); });
+            mouse.onEach(["mousedown", "mouseup", "mousemove"], function (e) { if (client) client.sendMouseState(guestMouseState(e.state)); });
         else
-            mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function (st) { if (client) client.sendMouseState(st); };
+            mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function (st) { if (client) client.sendMouseState(guestMouseState(st)); };
         // Keyboard capture needs FOCUS. This plugin runs inside a Cockpit iframe,
         // and Guacamole.Keyboard only sees keydown/keyup while its target element
         // holds focus. It previously listened on `document` with nothing ever
@@ -457,10 +753,80 @@
         display.getElement().addEventListener("mousedown", refocusDisplay, true);
         display.getElement().addEventListener("touchstart", refocusDisplay, true);
         refocusDisplay();
+        // Clipboard passthrough (browser -> remote), gated live by the Clipboard
+        // toggle: when the display takes focus and the toggle is on, push the local
+        // clipboard into the session. Best-effort (readText may be blocked in the
+        // iframe); failure is silent so it never disrupts the connection.
+        if (clipReadHandler) box.removeEventListener("focus", clipReadHandler, true);
+        clipReadHandler = function () {
+            // Only push the local clipboard once the session is fully OPEN
+            // (currentUuid is set on tunnel OPEN). Writing to the RDP clipboard
+            // channel during connect/teardown raised cliprdr VirtualChannelWrite
+            // errors and could disturb the connection.
+            if (!client || !clipboardOn || !currentUuid) return;
+            try {
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    navigator.clipboard.readText().then(function (text) {
+                        if (!client || !clipboardOn || !text) return;
+                        try {
+                            var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
+                            w.sendText(text); w.sendEnd();
+                        } catch (e) { /* stream unavailable */ }
+                    }).catch(function () { /* clipboard-read blocked */ });
+                }
+            } catch (e) { /* no Clipboard API */ }
+        };
+        box.addEventListener("focus", clipReadHandler, true);
         keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, k); };
         keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, k); };
+
+        // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
+        // forwards a lock KEY when it is pressed live, but never knew the browser's
+        // CURRENT lock state -- so a session opened while the browser already holds
+        // NumLock started inverted, and x11vnc then faked the missing modifier when
+        // it XTEST-injected KP_* keysyms into the Xvfb and mis-typed the numpad
+        // (End instead of 1, etc.). We ALIGN the session to the browser once (the
+        // first keystroke), then MIRROR only later CHANGES to the browser's locks
+        // -- edge-triggered, not level-forced -- so the on-screen "Num Lock" button
+        // (toggleSessionLock, which moves the session but not browserLocks) is
+        // never reverted by the next keystroke. Baseline is the fresh Xvfb's
+        // all-off state, which xfreerdp3 syncs to grd on connect. The keysyms ride
+        // the normal key path (guacd -> x11vnc XTEST -> Xvfb -> xfreerdp3 -> grd).
+        remoteLocks  = { NumLock: false, CapsLock: false, ScrollLock: false };
+        browserLocks = { NumLock: null,  CapsLock: null,  ScrollLock: null };
+        if (lockSyncHandler) box.removeEventListener("keydown", lockSyncHandler, true);
+        lockSyncHandler = function (e) {
+            if (!client || !remoteLocks || typeof e.getModifierState !== "function") return;
+            var lk = e.code || e.key;
+            if (LOCK_KEYSYM.hasOwnProperty(lk)) {
+                // Physical lock key: Guacamole.Keyboard forwards it (toggling the
+                // session); track both models so we neither double-toggle nor
+                // later mis-mirror it as a browser "change".
+                remoteLocks[lk] = !remoteLocks[lk];
+                if (browserLocks[lk] !== null) browserLocks[lk] = !browserLocks[lk];
+                updateLockButtons();
+                return;
+            }
+            // Any other key (CAPTURE phase, before Guacamole forwards it): align to
+            // the browser on first sight, then mirror only subsequent changes.
+            Object.keys(LOCK_KEYSYM).forEach(function (name) {
+                var cur;
+                try { cur = e.getModifierState(name); } catch (err) { return; }
+                if (browserLocks[name] === null) {
+                    if (cur !== remoteLocks[name]) { sendLockKeysym(name); remoteLocks[name] = cur; }
+                    browserLocks[name] = cur;
+                } else if (cur !== browserLocks[name]) {
+                    sendLockKeysym(name); remoteLocks[name] = !remoteLocks[name];
+                    browserLocks[name] = cur;
+                }
+            });
+            updateLockButtons();
+        };
+        box.addEventListener("keydown", lockSyncHandler, true);
         $("stop").disabled = false;
+        if ($("numlock")) $("numlock").disabled = false;
+        updateLockButtons();
     }
 
     function refreshUi() {
@@ -779,6 +1145,91 @@
         if (id === "tab-sessions") renderSessions();
     }
 
+    // ---- toggle/selector persistence -----------------------------------------
+    // The connect-bar controls (Session, Resolution, Scale, Clipboard, Sound) are
+    // written into the location hash on change and re-applied on load, so a browser
+    // refresh -- and a freshly opened pop-out/monitor window -- keeps the chosen
+    // settings instead of snapping back to defaults. Credentials (username/password/
+    // host) are DELIBERATELY never persisted. The control params sit AFTER any mode
+    // token (#seat / #monitor=N), which is preserved on every write, so the existing
+    // mode detection still matches. We also mirror to localStorage: the plugin runs
+    // inside Cockpit's shell iframe, where the raw hash may not survive a full-page
+    // refresh, so localStorage is the guaranteed restore; the hash is what makes the
+    // choice visible, shareable, and inheritable by the pop-out windows.
+    var URL_CONTROLS = [
+        { key: "target", id: "target",        kind: "select" },
+        { key: "res",    id: "resolution",    kind: "select" },
+        { key: "scale",  id: "scale",         kind: "select" },
+        { key: "clip",   id: "opt-clipboard", kind: "check"  },
+        { key: "audio",  id: "opt-audio",     kind: "check"  }
+    ];
+    var CONTROLS_LS_KEY = "edy-rdp-controls";
+    function _hashSegments() {
+        var h = location.hash.replace(/^#/, "");
+        return h ? h.split("&") : [];
+    }
+    function _segKey(seg) { var i = seg.indexOf("="); return i < 0 ? seg : seg.slice(0, i); }
+    function hashParam(key) {
+        var segs = _hashSegments();
+        for (var i = 0; i < segs.length; i++) {
+            if (_segKey(segs[i]) === key) {
+                var eq = segs[i].indexOf("=");
+                return eq < 0 ? "" : decodeURIComponent(segs[i].slice(eq + 1));
+            }
+        }
+        return null;
+    }
+    function _controlValue(c) {
+        var el = $(c.id); if (!el) return null;
+        return c.kind === "check" ? (el.checked ? "1" : "0") : el.value;
+    }
+    // "key=val&key=val" for the current controls -- used to seed a pop-out URL.
+    function controlHashSuffix() {
+        return URL_CONTROLS.map(function (c) {
+            var v = _controlValue(c);
+            return v === null ? null : c.key + "=" + encodeURIComponent(v);
+        }).filter(Boolean).join("&");
+    }
+    function _applyControl(c, v) {
+        if (v === null || v === undefined) return;
+        var el = $(c.id); if (!el) return;
+        if (c.kind === "check") { el.checked = (v === "1"); return; }
+        for (var i = 0; i < el.options.length; i++) {   // only adopt an offered value
+            if (el.options[i].value === v) { el.value = v; return; }
+        }
+    }
+    // Restore controls: an explicit hash param (a shared link or a pop-out URL) wins;
+    // otherwise fall back to the last localStorage snapshot.
+    function loadControls() {
+        var stored = {};
+        try { stored = JSON.parse(localStorage.getItem(CONTROLS_LS_KEY) || "{}") || {}; }
+        catch (e) { stored = {}; }
+        URL_CONTROLS.forEach(function (c) {
+            var v = hashParam(c.key);
+            if (v === null && Object.prototype.hasOwnProperty.call(stored, c.key)) v = stored[c.key];
+            _applyControl(c, v);
+        });
+        if ($("scale")) scaleMode = $("scale").value || "fit";
+        syncPassthroughFlags();
+    }
+    // Persist controls on change: rewrite the hash (preserving any mode token) via
+    // replaceState -- no reload, no history spam, no Cockpit-shell navigation side
+    // effect -- and snapshot to localStorage.
+    function saveControls() {
+        var keep = [], controlKeys = URL_CONTROLS.map(function (c) { return c.key; }), vals = {};
+        _hashSegments().forEach(function (seg) {
+            if (controlKeys.indexOf(_segKey(seg)) < 0) keep.push(seg);   // keep mode token(s)
+        });
+        URL_CONTROLS.forEach(function (c) {
+            var v = _controlValue(c); if (v === null) return;
+            vals[c.key] = v;
+            keep.push(c.key + "=" + encodeURIComponent(v));
+        });
+        var newHash = "#" + keep.join("&");
+        try { history.replaceState(history.state, "", newHash); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(CONTROLS_LS_KEY, JSON.stringify(vals)); } catch (e) { /* ignore */ }
+    }
+
     document.addEventListener("DOMContentLoaded", function () {
         $("tab-connect").addEventListener("click", function () { selectTab("tab-connect"); });
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
@@ -788,14 +1239,58 @@
         var perm = cockpit.permission({ admin: true });
         perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); });
         isAdmin = !!perm.allowed;
+        loadControls();   // restore persisted toggles/selectors BEFORE any auto-connect
         $("target").addEventListener("change", refreshUi);
         $("authmode").addEventListener("change", refreshUi);
         $("go").addEventListener("click", function () { connect(); });
+        $("numlock").addEventListener("click", function () { toggleSessionLock("NumLock"); });
+        // Sound / Clipboard passthrough toggles gate LIVE, during a session.
+        $("opt-clipboard").addEventListener("change", function () {
+            clipboardOn = $("opt-clipboard").checked;
+            if (client) setStatus(clipboardOn ? "Clipboard passthrough on." : "Clipboard passthrough off.");
+        });
+        $("opt-audio").addEventListener("change", function () {
+            soundOn = $("opt-audio").checked;
+            applySoundGate();
+            // enable-audio is negotiated at connect, so toggling Sound live
+            // reconnects the same scenario to add/drop the audio channel.
+            if (client && activeKey) {
+                setStatus(soundOn ? "Enabling sound…" : "Muting sound…");
+                teardown(true);
+                window.setTimeout(function () { connect(activeKey); }, 80);
+            }
+        });
+        syncPassthroughFlags();
         $("scale").addEventListener("change", function () {
             scaleMode = $("scale").value; applyScale();
         });
+        // Resolution is fixed at connect, so changing it live reconnects the session
+        // (same scenario) at the new geometry. Idle -> applies on the next connect.
+        $("resolution").addEventListener("change", function () {
+            if (client && activeKey) {
+                setStatus("Applying resolution…");
+                teardown(true);
+                window.setTimeout(function () { connect(activeKey); }, 80);
+            }
+        });
+        // Persist every toggle/selector to the URL hash + localStorage on change, so
+        // a refresh (and any pop-out window) keeps the chosen settings.
+        URL_CONTROLS.forEach(function (c) {
+            var el = $(c.id); if (el) el.addEventListener("change", saveControls);
+        });
+        // On resize, re-fit and re-sync the pointer mapping. applyScale() recomputes
+        // curScale (fit follows the window; a pinned factor stays put) and the mouse
+        // handler divides by it, so the pointer stays aligned. Debounced so a drag-
+        // resize does not thrash display.scale(). A trailing rAF settles the final
+        // layout before the last recompute.
+        var resizeTimer = null;
         window.addEventListener("resize", function () {
-            if (scaleMode === "fit") applyScale();
+            if (resizeTimer) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(function () {
+                resizeTimer = null;
+                applyScale();
+                if (typeof requestAnimationFrame === "function") requestAnimationFrame(applyScale);
+            }, 60);
         });
         $("stop").addEventListener("click", function () {
             // Disconnect ONLY. Do NOT send control "terminate": that deletes the
@@ -808,7 +1303,13 @@
             setStatus("Disconnecting…");
             teardown(false);
         });
+        $("addmon").addEventListener("click", openMonitorWindow);
+        $("popout").addEventListener("click", openSeatWindow);
         refreshUi();
         setStatus("Idle. Choose a session and connect.");
+        // Pop-up modes: #monitor = a fresh virtual monitor (closes with the window);
+        // #seat = the physical-seat mirror with a monitor picker (disconnect only).
+        if (MONITOR_MODE) enterMonitorMode();
+        else if (SEAT_MODE) enterSeatMode();
     });
 })();

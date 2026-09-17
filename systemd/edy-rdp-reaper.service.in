@@ -9,7 +9,7 @@ Wants=edy-rdp-control.socket
 
 [Service]
 Type=oneshot
-ExecStart=@LIBEXEC@/edy_rdp_reaper.py --control /run/edy-rdp/control.sock --greeter-ttl 60
+ExecStart=@LIBEXEC@/edy_rdp_reaper.py --control /run/edy-rdp/control.sock --greeter-ttl 60 --ephemeral-ttl 15
 # The payload is immutable: no bytecode cache is written into it.
 Environment=PYTHONDONTWRITEBYTECODE=1
 User=root
