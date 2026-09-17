@@ -141,6 +141,60 @@
         var f = (el.closest && el.closest(".f")) || el.parentNode;
         if (f) bar.appendChild(f);
     }
+    // ---- "Special keys" toggle (pop-out windows only) -------------------------
+    // Route system/browser shortcuts -- Alt+Tab, Super/Win, Ctrl+W, Ctrl+T, Esc,
+    // F11, etc. -- INTO the session instead of letting the local browser/OS eat
+    // them. The web mechanism is the Keyboard Lock API, which only actually
+    // captures the OS-reserved keys while the page is FULLSCREEN (and needs a
+    // Chromium browser + secure context). Ctrl+Alt+Del is OS-level and can NEVER
+    // be captured. Off by default: it grabs the WHOLE keyboard, and turning it on
+    // needs the fullscreen user gesture, so it is not auto-restored on load.
+    function specialKeysSupported() {
+        return !!(navigator.keyboard && navigator.keyboard.lock);
+    }
+    function applySpecialKeys(on) {
+        var el = document.documentElement;
+        if (on) {
+            var lock = function () {
+                try { if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(function () {}); }
+                catch (e) { /* ignore */ }
+            };
+            // Fullscreen FIRST (rides the click gesture); lock once it settles.
+            if (el.requestFullscreen) {
+                var p; try { p = el.requestFullscreen(); } catch (e) { p = null; }
+                if (p && p.then) p.then(lock, lock); else lock();
+            } else { lock(); }
+        } else {
+            try { if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock(); } catch (e) { /* ignore */ }
+            try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen(); } catch (e) { /* ignore */ }
+        }
+    }
+    function addSpecialKeysToggle(bar) {
+        var wrap = document.createElement("div"); wrap.className = "f";
+        var b = document.createElement("button");
+        b.id = "specialkeys"; b.type = "button"; b.className = "sec toggle";
+        b.textContent = "Special keys"; b.setAttribute("aria-pressed", "false");
+        b.title = specialKeysSupported()
+            ? "Send system shortcuts (Alt+Tab, Super, Ctrl+W, Esc, F11…) to the session. Goes fullscreen; Ctrl+Alt+Del stays local."
+            : "This browser can only go fullscreen; capturing system keys needs a Chromium browser.";
+        b.addEventListener("click", function () {
+            var on = b.getAttribute("aria-pressed") !== "true";
+            applySpecialKeys(on);
+            b.setAttribute("aria-pressed", on ? "true" : "false");
+            b.classList.toggle("on", on);
+            try { $("display").focus(); } catch (e) { /* keep keys landing in the session */ }
+        });
+        wrap.appendChild(b); bar.appendChild(wrap);
+        // If fullscreen is left by ANY route (Esc, F11, the WM), the browser auto-
+        // releases the keyboard lock -- reflect that so the toggle never lies.
+        document.addEventListener("fullscreenchange", function () {
+            if (!document.fullscreenElement && b.getAttribute("aria-pressed") === "true") {
+                try { if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock(); } catch (e) { /* ignore */ }
+                b.setAttribute("aria-pressed", "false"); b.classList.remove("on");
+            }
+        });
+        return b;
+    }
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
@@ -153,6 +207,7 @@
         document.body.appendChild(bar);
         moveField(bar, "resolution");
         moveField(bar, "opt-audio");
+        addSpecialKeysToggle(bar);
         $("target").value = "virtual";
         refreshUi();
         connect("virtual");
@@ -213,6 +268,7 @@
         });
         populateSeatMonitors(sel);
         moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
+        addSpecialKeysToggle(bar);
         $("target").value = "console";
         refreshUi();
         connect("console");
