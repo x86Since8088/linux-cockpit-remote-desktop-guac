@@ -1,3 +1,20 @@
+## 1.2.13.20260917 - 2026-09-17
+
+Pop-out windows: a "Special keys" toggle to redirect system shortcuts to the session.
+
+- The pop-out (#seat) and virtual-monitor (#monitor) windows now carry a **Special
+  keys** toggle in their top strip. When on, it puts the window into fullscreen and
+  calls the **Keyboard Lock API** (`navigator.keyboard.lock()`), so system/browser
+  shortcuts — Alt+Tab, Super/Win, Ctrl+W, Ctrl+T, Esc, F11, etc. — are delivered to
+  the remote session instead of being eaten by the local browser/OS.
+- Off by default (it grabs the whole keyboard, and enabling needs the fullscreen
+  user gesture, so it is not auto-restored on load). Leaving fullscreen by any route
+  (Esc/F11/WM) auto-releases the lock and the toggle reflects that. Requires a
+  Chromium browser + secure context; where unsupported it falls back to fullscreen
+  only. **Ctrl+Alt+Del is OS-reserved and can never be captured** (`guac-rdp.js`).
+- Scoped to the pop-out/monitor windows: they are standalone windows where
+  fullscreen + keyboard-lock work cleanly, unlike the Cockpit shell iframe.
+
 ## 1.2.12.20260917 - 2026-09-17
 
 Fix: parentheses could not be typed in the mirror/RDP session.
