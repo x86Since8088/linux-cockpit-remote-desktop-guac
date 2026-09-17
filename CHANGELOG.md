@@ -1,3 +1,20 @@
+## 1.2.11.20260917 - 2026-09-17
+
+Pop-out layout fit + connect-bar settings persist across refresh.
+
+- **Pop-out / virtual-monitor windows now fit the viewport with no scrollbars**:
+  `#display` is `calc(100vw - 10px)` wide and `calc(100vh - 10px - seatbar)` tall,
+  so the browser's scrollbar gutter (width:100vw) and an exact-100vh total no
+  longer force a bottom/side scrollbar. The fixed seatbar keeps reserving the top
+  strip via margin-top (`guac-rdp.css`).
+- **The connect-bar toggles/selectors persist** (Session, Resolution, Scale,
+  Clipboard, Sound). On change they are written to the URL hash — after any
+  `#seat`/`#monitor` mode token, which is preserved — and mirrored to
+  localStorage; on load they are restored (hash wins; localStorage is the
+  refresh-safe fallback inside Cockpit's shell iframe). Pop-out and Add-Monitor
+  windows inherit the current settings through their URL. Credentials
+  (username/password/host) are never persisted (`guac-rdp.js`).
+
 ## 1.2.10.20260914 - 2026-09-14
 
 Auto-close non-live mirror sessions (stop the "Active Sessions" pile-up).

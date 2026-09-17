@@ -120,7 +120,8 @@
     var monitorSeq = 0;
     function openMonitorWindow() {
         monitorSeq += 1;
-        var url = location.href.split("#")[0] + "#monitor=" + monitorSeq;
+        var suf = controlHashSuffix();   // inherit the current toggle/selector choices
+        var url = location.href.split("#")[0] + "#monitor=" + monitorSeq + (suf ? "&" + suf : "");
         var feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes,width=1440,height=900";
         var w = window.open(url, "edy-monitor-" + monitorSeq + "-" + Date.now(), feat);
         if (!w) { setStatus("The browser blocked the monitor window — allow pop-ups for this site, then click Add Monitor again.", "err"); return; }
@@ -163,7 +164,8 @@
     // terminates the physical desktop.
     var SEAT_MODE = /(?:^|[#&?])seat\b/.test(location.hash);
     function openSeatWindow() {
-        var url = location.href.split("#")[0] + "#seat";
+        var suf = controlHashSuffix();   // inherit the current toggle/selector choices
+        var url = location.href.split("#")[0] + "#seat" + (suf ? "&" + suf : "");
         var feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes,width=1600,height=1000";
         var w = window.open(url, "edy-seat-" + Date.now(), feat);
         if (!w) { setStatus("The browser blocked the pop-out window — allow pop-ups for this site, then click Pop-out again.", "err"); return; }
@@ -1143,6 +1145,91 @@
         if (id === "tab-sessions") renderSessions();
     }
 
+    // ---- toggle/selector persistence -----------------------------------------
+    // The connect-bar controls (Session, Resolution, Scale, Clipboard, Sound) are
+    // written into the location hash on change and re-applied on load, so a browser
+    // refresh -- and a freshly opened pop-out/monitor window -- keeps the chosen
+    // settings instead of snapping back to defaults. Credentials (username/password/
+    // host) are DELIBERATELY never persisted. The control params sit AFTER any mode
+    // token (#seat / #monitor=N), which is preserved on every write, so the existing
+    // mode detection still matches. We also mirror to localStorage: the plugin runs
+    // inside Cockpit's shell iframe, where the raw hash may not survive a full-page
+    // refresh, so localStorage is the guaranteed restore; the hash is what makes the
+    // choice visible, shareable, and inheritable by the pop-out windows.
+    var URL_CONTROLS = [
+        { key: "target", id: "target",        kind: "select" },
+        { key: "res",    id: "resolution",    kind: "select" },
+        { key: "scale",  id: "scale",         kind: "select" },
+        { key: "clip",   id: "opt-clipboard", kind: "check"  },
+        { key: "audio",  id: "opt-audio",     kind: "check"  }
+    ];
+    var CONTROLS_LS_KEY = "edy-rdp-controls";
+    function _hashSegments() {
+        var h = location.hash.replace(/^#/, "");
+        return h ? h.split("&") : [];
+    }
+    function _segKey(seg) { var i = seg.indexOf("="); return i < 0 ? seg : seg.slice(0, i); }
+    function hashParam(key) {
+        var segs = _hashSegments();
+        for (var i = 0; i < segs.length; i++) {
+            if (_segKey(segs[i]) === key) {
+                var eq = segs[i].indexOf("=");
+                return eq < 0 ? "" : decodeURIComponent(segs[i].slice(eq + 1));
+            }
+        }
+        return null;
+    }
+    function _controlValue(c) {
+        var el = $(c.id); if (!el) return null;
+        return c.kind === "check" ? (el.checked ? "1" : "0") : el.value;
+    }
+    // "key=val&key=val" for the current controls -- used to seed a pop-out URL.
+    function controlHashSuffix() {
+        return URL_CONTROLS.map(function (c) {
+            var v = _controlValue(c);
+            return v === null ? null : c.key + "=" + encodeURIComponent(v);
+        }).filter(Boolean).join("&");
+    }
+    function _applyControl(c, v) {
+        if (v === null || v === undefined) return;
+        var el = $(c.id); if (!el) return;
+        if (c.kind === "check") { el.checked = (v === "1"); return; }
+        for (var i = 0; i < el.options.length; i++) {   // only adopt an offered value
+            if (el.options[i].value === v) { el.value = v; return; }
+        }
+    }
+    // Restore controls: an explicit hash param (a shared link or a pop-out URL) wins;
+    // otherwise fall back to the last localStorage snapshot.
+    function loadControls() {
+        var stored = {};
+        try { stored = JSON.parse(localStorage.getItem(CONTROLS_LS_KEY) || "{}") || {}; }
+        catch (e) { stored = {}; }
+        URL_CONTROLS.forEach(function (c) {
+            var v = hashParam(c.key);
+            if (v === null && Object.prototype.hasOwnProperty.call(stored, c.key)) v = stored[c.key];
+            _applyControl(c, v);
+        });
+        if ($("scale")) scaleMode = $("scale").value || "fit";
+        syncPassthroughFlags();
+    }
+    // Persist controls on change: rewrite the hash (preserving any mode token) via
+    // replaceState -- no reload, no history spam, no Cockpit-shell navigation side
+    // effect -- and snapshot to localStorage.
+    function saveControls() {
+        var keep = [], controlKeys = URL_CONTROLS.map(function (c) { return c.key; }), vals = {};
+        _hashSegments().forEach(function (seg) {
+            if (controlKeys.indexOf(_segKey(seg)) < 0) keep.push(seg);   // keep mode token(s)
+        });
+        URL_CONTROLS.forEach(function (c) {
+            var v = _controlValue(c); if (v === null) return;
+            vals[c.key] = v;
+            keep.push(c.key + "=" + encodeURIComponent(v));
+        });
+        var newHash = "#" + keep.join("&");
+        try { history.replaceState(history.state, "", newHash); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(CONTROLS_LS_KEY, JSON.stringify(vals)); } catch (e) { /* ignore */ }
+    }
+
     document.addEventListener("DOMContentLoaded", function () {
         $("tab-connect").addEventListener("click", function () { selectTab("tab-connect"); });
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
@@ -1152,6 +1239,7 @@
         var perm = cockpit.permission({ admin: true });
         perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); });
         isAdmin = !!perm.allowed;
+        loadControls();   // restore persisted toggles/selectors BEFORE any auto-connect
         $("target").addEventListener("change", refreshUi);
         $("authmode").addEventListener("change", refreshUi);
         $("go").addEventListener("click", function () { connect(); });
@@ -1184,6 +1272,11 @@
                 teardown(true);
                 window.setTimeout(function () { connect(activeKey); }, 80);
             }
+        });
+        // Persist every toggle/selector to the URL hash + localStorage on change, so
+        // a refresh (and any pop-out window) keeps the chosen settings.
+        URL_CONTROLS.forEach(function (c) {
+            var el = $(c.id); if (el) el.addEventListener("change", saveControls);
         });
         // On resize, re-fit and re-sync the pointer mapping. applyScale() recomputes
         // curScale (fit follows the window; a pinned factor stays put) and the mouse
