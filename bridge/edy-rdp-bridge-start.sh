@@ -165,17 +165,19 @@ done
 # $vncport (else x11vnc also grabs the default 5900) and background it directly so
 # $vnc_pid is the real server the teardown trap kills (v1: -nopw; hardening adds a
 # VNC password + an nft owner-match on the loopback port).
-# Keyboard: Xvfb's us/pc105 keymap carries parenleft/parenright on BOTH Shift+9/0
-# (keycodes 18/19) AND phantom UNSHIFTED keycodes 187/188. In -xkb mode (which
-# x11vnc auto-enables here) x11vnc prefers the phantom 187/188 -- but xfreerdp3's
-# scancode path has no RDP scancode for those extended keycodes, so "(" and ")"
-# silently vanish while every other key types fine. -skip_keycodes drops 187/188
-# as candidates, so x11vnc falls back to Shift+9 / Shift+0 (keycode 18/19), which
-# xfreerdp3 maps to real RDP scancodes. Verified with x11vnc -debug_keyboard:
-# parenleft then injects Shift_L + keycode 0x12 "9". Only affects 187/188 (numpad
-# and all other keys are untouched); -skip_keycodes applies only in -xkb mode.
+# Keyboard: run x11vnc in -nomodtweak so it TRUSTS the modifier keysyms Guacamole
+# already sends and does NOT re-tweak Shift. In its default (xkb modtweak) mode
+# x11vnc RELEASES a held Shift before injecting a key that "doesn't need" it --
+# which silently turned Ctrl+Shift+Tab into Ctrl+Tab, Shift+Arrow into Arrow, and
+# broke Alt+Shift+<key>. -nomodtweak keeps the browser's modifiers intact so the
+# 3-key combos survive. Trade-off: -nomodtweak disables -skip_keycodes (xkb-only),
+# so the parenleft/parenright phantom-keycode problem (Xvfb maps them to dead
+# keycodes 187/188 that xfreerdp3 can't scancode) is handled BROWSER-side instead:
+# the plugin sends the plain 9/0 keysym, and the held Shift that -nomodtweak
+# preserves makes keycode 18/19 produce "(" / ")" (see remapKeysym in guac-rdp.js).
+# All verified with x11vnc -debug_keyboard.
 x11vnc -display ":$disp" -localhost -rfbport "$vncport" -rfbportv6 "$vncport" \
-  -skip_keycodes 187,188 \
+  -nomodtweak \
   -passwdfile "$pwfile" -forever -shared -noxdamage -o /dev/null >/dev/null 2>&1 &
 vnc_pid=$!
 for i in $(seq 1 25); do ss -tlnH 2>/dev/null | grep -q "127.0.0.1:$vncport " && break; sleep 0.2; done

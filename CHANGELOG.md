@@ -1,3 +1,27 @@
+## 1.2.14.20260917 - 2026-09-17
+
+Keyboard fidelity: the Windows key, 3-key modifier combos, and a soft ⊞ Win button.
+
+- **Windows/Super key now works.** Guacamole maps the physical Win key (keyCode
+  91/92) to `Meta_L`/`Meta_R`, which the guest sees as an Alt-ish key — so neither
+  GNOME's Activities overview nor a Windows host's Start menu fired. The plugin now
+  remaps `Meta_L/R → Super_L/R` (`remapKeysym` in `guac-rdp.js`), so it arrives as
+  the real Super/LWin key.
+- **Ctrl+Shift+[key] / Alt+Shift+[key] and other 3-key combos work.** x11vnc's
+  default modtweak was *releasing a held Shift* before injecting a key that
+  "doesn't need" it (turning Ctrl+Shift+Tab into Ctrl+Tab, Shift+Arrow into Arrow,
+  etc.). The bridge now runs x11vnc with **`-nomodtweak`**, trusting the modifier
+  keysyms Guacamole already sends (`bridge/edy-rdp-bridge-start.sh`).
+- **Parentheses moved browser-side.** `-nomodtweak` disables `-skip_keycodes`
+  (xkb-only), so the v1.2.12 paren fix moves into the plugin: `remapKeysym` sends
+  the plain `9`/`0` keysym for `(`/`)`, and the held Shift that `-nomodtweak`
+  preserves makes keycode 18/19 produce the parens. Same result, mode-compatible.
+- **New "⊞ Win" soft button** in the pop-out/monitor windows sends the Super key
+  explicitly (for combos, or where the local OS won't release the physical key).
+- All verified with `x11vnc -debug_keyboard`. Takes effect on the next connection
+  (the bridge is per-connection); no service restart. NOTE: `-nomodtweak` changes
+  how the numpad/lock keys inject — worth a numpad spot-check.
+
 ## 1.2.13.20260917 - 2026-09-17
 
 Pop-out windows: a "Special keys" toggle to redirect system shortcuts to the session.
