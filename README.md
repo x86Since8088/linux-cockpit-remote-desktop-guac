@@ -14,6 +14,12 @@ it in the browser via guacamole-common-js. Four scenarios:
 - **Console** — a mirror of the physical screen (Cockpit-admin only).
 - **Remote host** — RDP into another host on the network (fail-closed, admin allow-listed).
 
+It also has a **Desktop UI** tab that can enable / disable / start / stop the host's
+graphical desktop (the display manager + default systemd target) — for hosts you
+administer remotely. It is off unless the host opts in, admin-gated, and Stop/Disable
+require typing the host's name to confirm. See
+[docs/DESKTOP-UI-CONTROL.md](docs/DESKTOP-UI-CONTROL.md).
+
 Traffic rides Cockpit's own HTTPS; guacd is reached only through a local relay over an
 AF_UNIX socket. See [docs/SCENARIOS.md](docs/SCENARIOS.md) for screenshots and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data path.

@@ -140,6 +140,125 @@ class UnlockOp(unittest.TestCase):
         self.assertIn("no active, locked", r["detail"])
 
 
+class FakeDeskUI:
+    """Stand-in for the relay's DesktopUI: records control() calls and returns a
+    canned status, so handle_control's POLICY (admin/opt-in/confirm/force) is tested
+    with no systemctl I/O -- the same injection contract as unlock."""
+
+    def __init__(self, write_enabled=True, hostname="testhost", sessions=0):
+        self.write_enabled = write_enabled
+        self.hostname = hostname
+        self._sessions = sessions
+        self.calls = []          # [(action, force), ...]
+        self.status_calls = 0
+
+    def status(self):
+        self.status_calls += 1
+        return {"default_target": "graphical.target", "boot_to_desktop": True,
+                "display_manager": "gdm.service", "dm_active": True,
+                "dm_enabled": "enabled", "desktop_installed": True,
+                "active_graphical_sessions": self._sessions}
+
+    def control(self, action, force):
+        self.calls.append((action, force))
+        return (True, "%s completed" % action)
+
+
+class DeskUiStatusOp(unittest.TestCase):
+    def test_status_reports_state_and_flags(self):
+        d = FakeDeskUI(write_enabled=True, hostname="h1", sessions=2)
+        r = C.handle_control({"op": "deskui-status"}, 1000, None, None,
+                             is_admin=False, deskui=d)
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["admin"])
+        self.assertTrue(r["write_enabled"])
+        self.assertEqual(r["hostname"], "h1")
+        self.assertEqual(r["active_graphical_sessions"], 2)
+        self.assertEqual(r["display_manager"], "gdm.service")
+
+    def test_status_unavailable_without_controller(self):
+        r = C.handle_control({"op": "deskui-status"}, 1000, None, None, False, None, None, None)
+        self.assertFalse(r["ok"])
+        self.assertIn("not available", r["error"])
+
+
+class DeskUiControlOp(unittest.TestCase):
+    def _ctl(self, req, admin, deskui):
+        return C.handle_control(req, 1000, None, None, admin, None, None, deskui)
+
+    def test_unavailable_without_controller(self):
+        r = self._ctl({"op": "deskui", "action": "enable"}, True, None)
+        self.assertFalse(r["ok"]); self.assertIn("not available", r["error"])
+
+    def test_unknown_action_refused(self):
+        d = FakeDeskUI()
+        r = self._ctl({"op": "deskui", "action": "reboot"}, True, d)
+        self.assertFalse(r["ok"]); self.assertEqual(d.calls, [])
+
+    def test_write_needs_admin(self):
+        d = FakeDeskUI()
+        r = self._ctl({"op": "deskui", "action": "enable"}, False, d)
+        self.assertFalse(r["ok"])
+        self.assertIn("administrative access", r["error"])
+        self.assertEqual(d.calls, [], "must not act when the admin gate refuses")
+
+    def test_write_refused_when_host_not_opted_in(self):
+        d = FakeDeskUI(write_enabled=False)
+        r = self._ctl({"op": "deskui", "action": "start"}, True, d)
+        self.assertFalse(r["ok"])
+        self.assertIn("disabled on this host", r["error"])
+        self.assertEqual(d.calls, [])
+
+    def test_enable_is_constructive_no_confirm(self):
+        d = FakeDeskUI()
+        r = self._ctl({"op": "deskui", "action": "enable"}, True, d)
+        self.assertTrue(r["ok"]); self.assertEqual(d.calls, [("enable", False)])
+
+    def test_start_is_constructive_no_confirm(self):
+        d = FakeDeskUI()
+        r = self._ctl({"op": "deskui", "action": "start"}, True, d)
+        self.assertTrue(r["ok"]); self.assertEqual(d.calls, [("start", False)])
+
+    def test_stop_requires_confirmation(self):
+        d = FakeDeskUI(hostname="testhost", sessions=0)
+        r = self._ctl({"op": "deskui", "action": "stop"}, True, d)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["need_confirm"])
+        self.assertEqual(r["hostname"], "testhost")
+        self.assertEqual(d.calls, [], "must not stop before the host name is typed")
+
+    def test_stop_wrong_confirmation_refused(self):
+        d = FakeDeskUI(hostname="testhost", sessions=1)
+        r = self._ctl({"op": "deskui", "action": "stop", "confirm": "nope"}, True, d)
+        self.assertFalse(r["ok"]); self.assertTrue(r["need_confirm"])
+        self.assertEqual(d.calls, [])
+
+    def test_stop_confirmed_with_live_session_forces(self):
+        d = FakeDeskUI(hostname="testhost", sessions=1)
+        r = self._ctl({"op": "deskui", "action": "stop", "confirm": "testhost"}, True, d)
+        self.assertTrue(r["ok"]); self.assertTrue(r["forced"])
+        self.assertEqual(d.calls, [("stop", True)])
+
+    def test_stop_confirmed_without_live_session_is_not_forced(self):
+        d = FakeDeskUI(hostname="testhost", sessions=0)
+        r = self._ctl({"op": "deskui", "action": "stop", "confirm": "testhost"}, True, d)
+        self.assertTrue(r["ok"]); self.assertFalse(r["forced"])
+        self.assertEqual(d.calls, [("stop", False)])
+
+    def test_disable_requires_confirmation(self):
+        d = FakeDeskUI(hostname="testhost")
+        r = self._ctl({"op": "deskui", "action": "disable"}, True, d)
+        self.assertFalse(r["ok"]); self.assertTrue(r["need_confirm"])
+        self.assertEqual(d.calls, [])
+
+    def test_disable_confirmed_never_forces(self):
+        # disable changes the boot default; it does not cut off a live session, so it
+        # never escalates to the forced verb even when a desktop is in use.
+        d = FakeDeskUI(hostname="testhost", sessions=3)
+        r = self._ctl({"op": "deskui", "action": "disable", "confirm": "testhost"}, True, d)
+        self.assertTrue(r["ok"]); self.assertFalse(r["forced"])
+        self.assertEqual(d.calls, [("disable", False)])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

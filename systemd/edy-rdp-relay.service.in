@@ -27,6 +27,11 @@ Environment="EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127
 # migrated .env predates these vars.
 Environment=EDY_RDP_REMOTE_ALLOW=
 Environment=EDY_RDP_REMOTE_ADMIN_ONLY=0
+# Desktop-UI control WRITE actions (enable/disable/start/stop the graphical
+# desktop) are OFF unless the host opts in. Empty/0 = status is still readable but
+# no write verb runs (fail closed). NEVER set this on an operator's own
+# workstation: a Stop there would kill the local session.
+Environment=EDY_RDP_DESKUI_ENABLE=0
 # NOT optional (no leading '-'): a relay running on built-in defaults it was
 # never configured with is worse than a relay that did not start. install.sh
 # guarantees this file exists and sets every required key before it renders
@@ -41,6 +46,7 @@ ExecStart=@LIBEXEC@/edy_rdp_relay.py \
     $EDY_RDP_ALLOW_ARGS \
     --remote-allow ${EDY_RDP_REMOTE_ALLOW} \
     --remote-admin-only ${EDY_RDP_REMOTE_ADMIN_ONLY} \
+    --deskui-write ${EDY_RDP_DESKUI_ENABLE} \
     --log-level ${EDY_RDP_LOG_LEVEL}
 NoNewPrivileges=yes
 ProtectSystem=strict

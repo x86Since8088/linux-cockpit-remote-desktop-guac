@@ -398,6 +398,159 @@ def unlock_seat_session(uid):
     return (True, "physical session unlocked")
 
 
+# ---------------------------------------------------------------------------
+# Desktop-UI control (enable/disable/start/stop the host's graphical desktop).
+#
+# READS are done here, unprivileged, as the relay uid: get-default, is-active,
+# is-enabled, readlink of the DM alias and loginctl are all read-only. WRITES go
+# through the edy-rdp-deskui@<action> oneshot unit, which is the only thing that
+# holds privilege (polkit lets edy-relay start that unit family and nothing else).
+# The verb the relay is allowed to invoke is one of a fixed enum; the helper
+# re-validates it. This keeps the read/write split the rest of the plugin uses.
+# ---------------------------------------------------------------------------
+
+_DESKUI_WRITE_TIMEOUT = 95   # a little over the unit's TimeoutStartSec=90
+
+
+class DesktopUI:
+    """Controller for the host graphical desktop. handle_control() calls this
+    through the injection point so its policy stays pure; the systemctl I/O lives
+    here."""
+
+    #: display-manager unit names to probe when the alias symlink is absent
+    _KNOWN_DMS = ("gdm.service", "gdm3.service", "lightdm.service", "sddm.service",
+                  "lxdm.service", "xdm.service", "nodm.service", "ly.service",
+                  "greetd.service")
+
+    def __init__(self, write_enabled=False):
+        self.write_enabled = bool(write_enabled)
+        try:
+            self.hostname = socket.gethostname() or os.uname().nodename
+        except OSError:
+            self.hostname = "this-host"
+
+    @staticmethod
+    def _run(argv, timeout=8):
+        """Run a read-only command; return (rc, stdout_stripped). Never raises."""
+        try:
+            p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               timeout=timeout)
+            return p.returncode, p.stdout.decode("utf-8", "replace").strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return 1, ""
+
+    def _detect_dm(self):
+        """The DM unit the host actually uses, or None. Trust systemd's own
+        display-manager.service alias symlink first, then probe known names."""
+        try:
+            target = os.path.realpath("/etc/systemd/system/display-manager.service")
+            base = os.path.basename(target)
+            # Trust the alias only when it resolves to a real unit that is not the
+            # alias name itself (a removed alias makes realpath return the path
+            # unchanged -> the bogus "display-manager.service").
+            if (base.endswith(".service") and base != "display-manager.service"
+                    and os.path.isfile(target)):
+                return base
+        except OSError:
+            pass
+        for dm in self._KNOWN_DMS:
+            rc, _ = self._run(["systemctl", "cat", dm])
+            if rc == 0:
+                return dm
+        return None
+
+    def _active_graphical_sessions(self):
+        """How many active, graphical, SEATED user sessions exist right now — the
+        desktops that a Stop would cut off. Greeters and seatless sessions do not
+        count."""
+        rc, out = self._run(["loginctl", "list-sessions", "--no-legend"])
+        if rc != 0 or not out:
+            return 0
+        n = 0
+        for line in out.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            sid = parts[0]
+            rc2, props = self._run(["loginctl", "show-session", sid,
+                                    "-p", "Type", "-p", "Active", "-p", "Seat",
+                                    "-p", "Class"])
+            if rc2 != 0:
+                continue
+            d = {}
+            for pline in props.splitlines():
+                if "=" in pline:
+                    k, v = pline.split("=", 1)
+                    d[k] = v
+            if not d.get("Seat"):
+                continue
+            if d.get("Active") != "yes":
+                continue
+            if d.get("Class") == "greeter":
+                continue
+            if d.get("Type") in ("wayland", "x11"):
+                n += 1
+        return n
+
+    def status(self):
+        """Current desktop state as a JSON-serialisable dict."""
+        _, default_target = self._run(["systemctl", "get-default"])
+        dm = self._detect_dm()
+        dm_active = None
+        dm_enabled = None
+        if dm:
+            rc_a, _ = self._run(["systemctl", "is-active", "--quiet", dm])
+            dm_active = (rc_a == 0)
+            _, en = self._run(["systemctl", "is-enabled", dm])
+            dm_enabled = en  # enabled|disabled|static|masked|alias|... (string is informative)
+        # "installed" = there is a DM, or graphical.target has something wanting it.
+        desktop_installed = bool(dm)
+        if not desktop_installed:
+            rc_g, _ = self._run(["systemctl", "list-dependencies", "--plain",
+                                 "graphical.target"])
+            desktop_installed = (default_target == "graphical.target") or (rc_g == 0 and bool(dm))
+        return {
+            "default_target": default_target or None,
+            "boot_to_desktop": (default_target == "graphical.target"),
+            "display_manager": dm,
+            "dm_active": dm_active,
+            "dm_enabled": dm_enabled,
+            "desktop_installed": desktop_installed,
+            "active_graphical_sessions": self._active_graphical_sessions(),
+        }
+
+    def control(self, action, force):
+        """Run a write verb through the privileged oneshot unit. (ok, detail)."""
+        if action not in ("enable", "disable", "start", "stop"):
+            return (False, "unknown action")
+        instance = "stop-force" if (action == "stop" and force) else action
+        unit = "edy-rdp-deskui@%s.service" % instance
+        try:
+            subprocess.run(["systemctl", "start", unit], check=True,
+                           timeout=_DESKUI_WRITE_TIMEOUT,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as exc:
+            # systemctl only says the job failed; the helper's [deskui] reason is in
+            # the journal. Map its exit code (ExecMainStatus) to something actionable.
+            detail = (exc.stderr or b"").decode("utf-8", "replace").strip()[:200]
+            _, code = self._run(["systemctl", "show", "-p", "ExecMainStatus",
+                                 "--value", unit])
+            reason = {"2": "internal error (bad action)",
+                      "3": "a desktop is in use (a session would be cut off)",
+                      "4": "desktop UI control is disabled on this host"}.get(code)
+            if reason:
+                detail = reason
+            return (False, detail or ("the %s helper failed (journal: %s)" % (action, unit)))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return (False, "desktop-ui helper failed: %s" % exc)
+        return (True, "%s completed" % action)
+
+
+#: module-level singleton, mirrored on SESSION_TOKENS; write_enabled is set in main()
+#: from the --deskui-write flag so the control server's closure can reach it.
+DESKTOP_UI = DesktopUI()
+
+
 def ensure_waylandvnc_session(uid):
     """Start (idempotently) the caller's per-user headless WAYLAND session and
     return {'HOST','PORT'}.
@@ -1231,7 +1384,7 @@ def control_server(srv, table, live, admin_group, path_label=""):
                 resp = {"ok": False, "error": "invalid JSON"}
             else:
                 resp = handle_control(req, uid, table, live, admin, SESSION_TOKENS,
-                                      unlock=unlock_seat_session)
+                                      unlock=unlock_seat_session, deskui=DESKTOP_UI)
             conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
         except OSError:
             pass
@@ -1327,6 +1480,10 @@ def main(argv=None):
                          "(fail closed); 'any' = allow all; default port 3389, ':*' = any port.")
     ap.add_argument("--remote-admin-only", default="0",
                     help="1/true/yes/on => require proven Cockpit admin for the 'remote' scenario")
+    ap.add_argument("--deskui-write", default="0",
+                    help="1/true/yes/on => allow the desktop-UI control WRITE actions "
+                         "(enable/disable/start/stop the graphical desktop) on this host. "
+                         "Empty/0 = read-only status; the host has not opted in (fail closed).")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
@@ -1338,6 +1495,10 @@ def main(argv=None):
     ALLOW_TARGETS = set(args.allow_target) or None
     REMOTE_ALLOW = parse_remote_allow(args.remote_allow)
     REMOTE_ADMIN_ONLY = str(args.remote_admin_only).strip().lower() in ("1", "true", "yes", "on")
+    DESKTOP_UI.write_enabled = str(args.deskui_write).strip().lower() in ("1", "true", "yes", "on")
+    log.info("desktop-UI control: %s (status always readable)",
+             "WRITE ENABLED" if DESKTOP_UI.write_enabled
+             else "read-only (EDY_RDP_DESKUI_ENABLE not set)")
     if REMOTE_ALLOW:
         log.info("remote scenario ENABLED: %d allow-list entr%s, admin_only=%s",
                  len(REMOTE_ALLOW), "y" if len(REMOTE_ALLOW) == 1 else "ies",
