@@ -863,12 +863,16 @@
             reader.ontext = function (t) { text += t; };
             reader.onend = function () {
                 lastRemoteClip = text;   // always captured, so "Receive clipboard" can hand it over
-                // Auto-sync to the OS clipboard only while the Clipboard toggle is on;
-                // a gesture-less writeText is often blocked, so the buttons are the
-                // reliable path and this is best-effort.
-                if (!clipboardOn) return;
-                try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text); }
-                catch (e) { /* clipboard-write blocked */ }
+                // Auto-sync to the OS clipboard only while the toggle is on AND this
+                // document is focused -- writeText() REJECTS (async) when the window is
+                // not focused, so guard on hasFocus() and swallow the promise rejection
+                // (a try/catch does not catch an async reject). When unfocused the text
+                // still sits in lastRemoteClip for the "Receive clip" button.
+                if (!clipboardOn || !document.hasFocus()) return;
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText)
+                        navigator.clipboard.writeText(text).catch(function () { /* blocked */ });
+                } catch (e) { /* no Clipboard API */ }
             };
         };
         // Sound is negotiated (enable-audio); start it gated to the toggle's state.
