@@ -1,3 +1,15 @@
+## 1.3.2.20260918 - 2026-09-18
+
+Fix: clipboard auto-sync threw an uncaught promise rejection when unfocused.
+
+- `client.onclipboard` auto-synced the session's clipboard to the OS with
+  `navigator.clipboard.writeText()`, which **rejects asynchronously when the
+  document is not focused** -- and the surrounding `try/catch` cannot catch an async
+  reject, so it surfaced as `Uncaught (in promise) NotAllowedError` in the console.
+  Now it only auto-writes while `document.hasFocus()` and `.catch()`es the reject;
+  when unfocused the text still sits in `lastRemoteClip` for the "Receive clip"
+  button (`guac-rdp.js`).
+
 ## 1.3.1.20260918 - 2026-09-18
 
 Pop-out gets Add Monitor and a standalone Fullscreen button.
