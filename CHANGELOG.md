@@ -1,3 +1,20 @@
+## 1.2.15.20260917 - 2026-09-17
+
+Follow-ups from an opus self-audit of the v1.2.13–v1.2.14 keyboard work.
+
+- **The ⊞ Win soft button now actually renders.** v1.2.14 defined it but never
+  called it, so the button the changelog advertised didn't appear;
+  `addWinKeyButton(bar)` is now wired into both pop-out modes (`guac-rdp.js`).
+- **Mac Option/Alt fixed (same class as the Win key).** On a Mac the browser
+  reports Option/Alt as `ISO_Level3_Shift`, which reaches the guest as AltGr — a Mac
+  client could never send a plain Left Alt, breaking Alt-combos. `remapKeysym` now
+  maps `ISO_Level3_Shift → Alt_L` **on Mac only** (genuine AltGr from non-Mac
+  international keyboards is left alone).
+- Known/accepted, unchanged: under `-nomodtweak` the numpad **digit** keys (KP_0–9)
+  depend on the guest's NumLock being latched (fine when it is / lock-sync is on) —
+  spot-check the numpad; numpad Enter is delivered as Return; the paren remap
+  assumes a US client layout.
+
 ## 1.2.14.20260917 - 2026-09-17
 
 Keyboard fidelity: the Windows key, 3-key modifier combos, and a soft ⊞ Win button.
