@@ -88,6 +88,7 @@
 
     // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
     var clipboardOn = true, soundOn = false, clipReadHandler = null;
+    var lastRemoteClip = null;   // newest text the session put on its clipboard (for the "Receive clipboard" button)
     function syncPassthroughFlags() {
         clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
         soundOn = !!($("opt-audio") && $("opt-audio").checked);
@@ -108,6 +109,57 @@
     function discardTextStream(stream) {
         try { var r = new Guacamole.StringReader(stream); r.ontext = function () {}; r.onend = function () {}; }
         catch (e) { /* ignore */ }
+    }
+    // ---- explicit clipboard transfer -----------------------------------------
+    // The Send/Receive buttons are the RELIABLE clipboard path: they run on a
+    // click, so navigator.clipboard read/write rides the browser's transient user
+    // activation (the checkbox's gesture-less auto-sync is often blocked). "Send"
+    // pushes the local clipboard into the session; "Receive" pulls the session's
+    // last clipboard into the browser.
+    function sendClipboardToSession() {
+        if (!client || !currentUuid) { setStatus("Connect a session first, then Send clipboard.", "err"); return; }
+        if (!(navigator.clipboard && navigator.clipboard.readText)) {
+            setStatus("This browser will not let the page read the clipboard.", "err"); return;
+        }
+        navigator.clipboard.readText().then(function (text) {
+            if (!client) return;
+            if (!text) { setStatus("Your clipboard is empty."); return; }
+            try {
+                var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
+                w.sendText(text); w.sendEnd();
+                setStatus("Sent " + text.length + " characters to the session clipboard — paste inside the session.");
+            } catch (e) { setStatus("Could not reach the session clipboard.", "err"); }
+        }).catch(function () {
+            setStatus("Clipboard read was blocked — click inside the page, then press Send clipboard again.", "err");
+        });
+    }
+    function receiveClipboardFromSession() {
+        if (lastRemoteClip == null) {
+            setStatus("Nothing captured yet — copy something INSIDE the session first, then Receive clipboard.", "err"); return;
+        }
+        if (!(navigator.clipboard && navigator.clipboard.writeText)) {
+            setStatus("This browser will not let the page write the clipboard.", "err"); return;
+        }
+        navigator.clipboard.writeText(lastRemoteClip).then(function () {
+            setStatus("Copied " + lastRemoteClip.length + " characters from the session — paste locally.");
+        }).catch(function () {
+            setStatus("Clipboard write was blocked by the browser.", "err");
+        });
+    }
+    // Append the "Send clipboard" / "Receive clipboard" buttons to a bar (the main
+    // connect bar and each pop-out's control strip). Pop-outs are separate windows/
+    // documents, so the ids never collide across them.
+    function addClipboardButtons(bar) {
+        if (!bar) return;
+        var mk = function (id, label, title, fn) {
+            var b = document.createElement("button");
+            b.id = id; b.type = "button"; b.className = "sec";
+            b.textContent = label; b.title = title;
+            b.addEventListener("click", fn);
+            bar.appendChild(b);
+        };
+        mk("clip-send", "Send clip", "Send YOUR clipboard to the session (then paste inside the session).", sendClipboardToSession);
+        mk("clip-recv", "Receive clip", "Copy the SESSION's clipboard into your browser (then paste locally).", receiveClipboardFromSession);
     }
 
     // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
@@ -259,6 +311,8 @@
         moveField(bar, "opt-audio");
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
+        addClipboardButtons(bar);
+        bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
         $("target").value = "virtual";
         refreshUi();
         connect("virtual");
@@ -321,6 +375,8 @@
         moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
+        addClipboardButtons(bar);
+        bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
         $("target").value = "console";
         refreshUi();
         connect("console");
@@ -771,10 +827,14 @@
         // sync", never an error, and the OS clipboard is only written while ON.
         syncPassthroughFlags();
         client.onclipboard = function (stream, mimetype) {
-            if (!clipboardOn || !/^text\//.test(mimetype || "text/plain")) { discardTextStream(stream); return; }
+            if (!/^text\//.test(mimetype || "text/plain")) { discardTextStream(stream); return; }
             var reader = new Guacamole.StringReader(stream), text = "";
             reader.ontext = function (t) { text += t; };
             reader.onend = function () {
+                lastRemoteClip = text;   // always captured, so "Receive clipboard" can hand it over
+                // Auto-sync to the OS clipboard only while the Clipboard toggle is on;
+                // a gesture-less writeText is often blocked, so the buttons are the
+                // reliable path and this is best-effort.
                 if (!clipboardOn) return;
                 try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text); }
                 catch (e) { /* clipboard-write blocked */ }
@@ -1419,5 +1479,6 @@
         // #seat = the physical-seat mirror with a monitor picker (disconnect only).
         if (MONITOR_MODE) enterMonitorMode();
         else if (SEAT_MODE) enterSeatMode();
+        else addClipboardButtons(document.querySelector("#panel-connect .bar"));
     });
 })();

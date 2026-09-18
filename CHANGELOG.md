@@ -1,3 +1,22 @@
+## 1.2.16.20260917 - 2026-09-17
+
+Clipboard Send/Receive buttons, and NumLock reachable from the pop-out.
+
+- **Explicit clipboard buttons.** New "Send clip" (browser → session) and "Receive
+  clip" (session → browser) buttons in the main bar and in every pop-out/monitor
+  window. They are the reliable clipboard path: running on a click gives them the
+  browser's transient user activation, so `navigator.clipboard` read/write is
+  permitted where the checkbox's gesture-less auto-sync gets blocked. The session's
+  latest clipboard is now always captured (`lastRemoteClip`) so "Receive" has
+  something to hand over; the Clipboard checkbox still drives best-effort auto-sync
+  (`guac-rdp.js`). This restores clipboard in the pop-out, which had no clipboard
+  control at all.
+- **NumLock in the pop-out.** The `#numlock` button (which flips the *remote*
+  NumLock — for when the guest and your local NumLock drift out of sync) is now
+  surfaced in the pop-out/monitor control strip, not just the main window.
+- Seatbar now scrolls horizontally instead of clipping, with compact buttons, so
+  the extra controls all stay reachable (`guac-rdp.css`).
+
 ## 1.2.15.20260917 - 2026-09-17
 
 Follow-ups from an opus self-audit of the v1.2.13–v1.2.14 keyboard work.

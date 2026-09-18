@@ -44,13 +44,14 @@ html.monitor .status.err { display:block; position:fixed; left:0; right:0; botto
    it (the #display margin-top above) so the pointer can reach the guest's top row. */
 #seatbar { display:none; }
 html.monitor { --seatbar-h: 2rem; }
-html.monitor #seatbar { display:flex; gap:.7rem; align-items:center;
+html.monitor #seatbar { display:flex; gap:.45rem; align-items:center;
   position:fixed; top:0; left:0; right:0; z-index:20;
-  height:var(--seatbar-h); box-sizing:border-box; overflow:hidden;
+  height:var(--seatbar-h); box-sizing:border-box; overflow-x:auto; overflow-y:hidden;
   background:rgba(0,0,0,.6); color:#fff; padding:.1rem .6rem; font-size:.8rem; }
 html.monitor #seatbar .f { flex-direction:row; gap:.3rem; align-items:center; margin:0; }
 html.monitor #seatbar label { color:#fff; font-weight:400; font-size:.8rem; }
 html.monitor #seatbar select, html.monitor #seatbar input { font:inherit; padding:.05rem .3rem; }
+html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-space:nowrap; }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }
