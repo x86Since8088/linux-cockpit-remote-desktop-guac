@@ -218,12 +218,19 @@
     //     9/0 keysym instead; the browser's held Shift (preserved by -nomodtweak)
     //     makes keycode 18/19 produce "(" / ")" in the guest. (Under -nomodtweak the
     //     bridge's -skip_keycodes no longer applies, so this moves here.)
+    //   * Mac Option/Alt: the Guacamole bundle rewrites a Mac's Alt to
+    //     ISO_Level3_Shift (0xFE03), which reaches the guest as AltGr -- so a Mac
+    //     client can never send a plain Left Alt and Alt-combos break. On a Mac ONLY,
+    //     send Alt_L instead. Genuine AltGr from a non-Mac international keyboard
+    //     arrives by a different path and must keep flowing, so this is Mac-gated.
+    var IS_MAC = /mac/i.test((typeof navigator !== "undefined" && (navigator.platform || navigator.userAgent)) || "");
     function remapKeysym(ks) {
         switch (ks) {
-            case 0xFFE7: return 0xFFEB;   // Meta_L     -> Super_L
-            case 0xFFE8: return 0xFFEC;   // Meta_R     -> Super_R
-            case 0x28:   return 0x39;     // parenleft  -> 9  (held Shift makes it "(")
-            case 0x29:   return 0x30;     // parenright -> 0  (held Shift makes it ")")
+            case 0xFFE7: return 0xFFEB;                 // Meta_L     -> Super_L
+            case 0xFFE8: return 0xFFEC;                 // Meta_R     -> Super_R
+            case 0x28:   return 0x39;                   // parenleft  -> 9 (held Shift = "(")
+            case 0x29:   return 0x30;                   // parenright -> 0 (held Shift = ")")
+            case 0xFE03: return IS_MAC ? 0xFFE9 : ks;   // Mac Option: ISO_Level3_Shift -> Alt_L
             default:     return ks;
         }
     }
@@ -251,6 +258,7 @@
         moveField(bar, "resolution");
         moveField(bar, "opt-audio");
         addSpecialKeysToggle(bar);
+        addWinKeyButton(bar);
         $("target").value = "virtual";
         refreshUi();
         connect("virtual");
@@ -312,6 +320,7 @@
         populateSeatMonitors(sel);
         moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
         addSpecialKeysToggle(bar);
+        addWinKeyButton(bar);
         $("target").value = "console";
         refreshUi();
         connect("console");
