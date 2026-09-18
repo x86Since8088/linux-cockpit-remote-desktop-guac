@@ -1,3 +1,18 @@
+## 1.3.1.20260918 - 2026-09-18
+
+Pop-out gets Add Monitor and a standalone Fullscreen button.
+
+- **Add Monitor in the pop-out.** The existing "Add Monitor" button (opens a fresh
+  virtual monitor in its own window) is now in the pop-out/monitor control strip,
+  not just the main window.
+- **Fullscreen split into its own button.** A plain "Fullscreen" toggle fills the
+  screen WITHOUT grabbing the keyboard, for when you just want the bigger picture
+  and keep your local shortcuts. "Special keys" still goes fullscreen on its own,
+  because capturing OS-reserved system keys (Alt+Tab, Super, Esc, F11) genuinely
+  requires fullscreen -- a Keyboard Lock API rule, not our choice; without
+  fullscreen those keys still go to the local OS. Both buttons track fullscreen
+  state via `fullscreenchange` (`guac-rdp.js`).
+
 ## 1.3.0.20260918 - 2026-09-18
 
 Desktop UI control: enable / disable / start / stop the host's graphical desktop

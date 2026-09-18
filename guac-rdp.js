@@ -247,6 +247,33 @@
         });
         return b;
     }
+    // A plain Fullscreen toggle -- fill the screen WITHOUT grabbing the keyboard.
+    // (System-key capture genuinely needs fullscreen, so "Special keys" still goes
+    // fullscreen on its own; this is for people who just want the bigger picture and
+    // keep their local shortcuts.) State is driven by fullscreenchange, so it also
+    // lights up when Special keys takes the window fullscreen.
+    function addFullscreenButton(bar) {
+        var b = document.createElement("button");
+        b.id = "fullscreen"; b.type = "button"; b.className = "sec toggle";
+        b.textContent = "Fullscreen"; b.setAttribute("aria-pressed", "false");
+        b.title = "Fill the screen (does NOT grab keys). 'Special keys' also goes fullscreen "
+                + "because capturing system keys like Alt+Tab / Super requires it.";
+        b.addEventListener("click", function () {
+            if (!document.fullscreenElement) {
+                try { var p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+                      if (p && p.catch) p.catch(function () {}); } catch (e) { /* ignore */ }
+            } else {
+                try { if (document.exitFullscreen) document.exitFullscreen(); } catch (e) { /* ignore */ }
+            }
+            try { $("display").focus(); } catch (e) { /* keep keys landing in the session */ }
+        });
+        bar.appendChild(b);
+        document.addEventListener("fullscreenchange", function () {
+            var fs = !!document.fullscreenElement;
+            b.setAttribute("aria-pressed", fs ? "true" : "false"); b.classList.toggle("on", fs);
+        });
+        return b;
+    }
     // A one-shot key TAP into the session (press then release), for keys the local
     // OS refuses to hand the browser -- above all the Windows/Super key, which
     // GNOME/Wayland (mutter) and Windows both reserve at the compositor/OS level
@@ -309,10 +336,12 @@
         document.body.appendChild(bar);
         moveField(bar, "resolution");
         moveField(bar, "opt-audio");
+        addFullscreenButton(bar);
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
         addClipboardButtons(bar);
         bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
+        bar.appendChild($("addmon"));     // open another virtual monitor window
         $("target").value = "virtual";
         refreshUi();
         connect("virtual");
@@ -373,10 +402,12 @@
         });
         populateSeatMonitors(sel);
         moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
+        addFullscreenButton(bar);
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
         addClipboardButtons(bar);
         bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
+        bar.appendChild($("addmon"));     // open another virtual monitor window
         $("target").value = "console";
         refreshUi();
         connect("console");
