@@ -60,6 +60,23 @@ EDY_RDP_REMOTE_ALLOW=
 # 1 = the remote scenario additionally requires Cockpit administrative access.
 EDY_RDP_REMOTE_ADMIN_ONLY=0
 
+# --- desktop-UI control (enable/disable/start/stop the graphical desktop) ----
+#
+# The "Desktop UI" panel can read this host's desktop state on any host (default
+# target, display manager, sessions in use). WRITING that state -- turning the
+# graphical desktop on or off, now or at boot -- is a SEPARATE, FAIL-CLOSED opt-in.
+#
+#   EDY_RDP_DESKUI_ENABLE=          (empty/0) status is readable, NO write verb runs
+#   EDY_RDP_DESKUI_ENABLE=1         admins may enable/disable/start/stop the desktop
+#
+# DO NOT set this to 1 on a workstation whose graphical console you use: a "Stop"
+# tears down the display manager and ends the local session. It is meant for hosts
+# you administer remotely (servers, headless VMs) where the desktop is a managed
+# service. Even when enabled, Stop and Disable require an administrator to type the
+# host's name to confirm, and Stop refuses while a desktop session is in use unless
+# that confirmation is given.
+EDY_RDP_DESKUI_ENABLE=
+
 # --- guacd ------------------------------------------------------------------
 
 # Pinned guacd container image. edy-rdp-guacd.service runs this; deploy.sh

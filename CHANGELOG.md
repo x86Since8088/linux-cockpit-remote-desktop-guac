@@ -1,3 +1,44 @@
+## 1.3.0.20260918 - 2026-09-18
+
+Desktop UI control: enable / disable / start / stop the host's graphical desktop
+from a new **Desktop UI** tab.
+
+- **The four verbs, mapped to the graphical stack.** Enable = `set-default
+  graphical.target` + enable the display manager; Disable = `set-default
+  multi-user.target` + disable it; Start/Stop = start/stop the display manager
+  (falling back to `isolate graphical.target` / `multi-user.target` on a host with
+  no DM). The **display manager is detected** from systemd's
+  `display-manager.service` alias (then a probe of gdm/gdm3/lightdm/sddm/…), never
+  assumed. The tab also shows a read-only state on any host: boot target, DM
+  running/enabled, and how many desktop sessions are in use right now. See
+  [docs/DESKTOP-UI-CONTROL.md](docs/DESKTOP-UI-CONTROL.md).
+- **Off by default, fail closed.** Writes refuse unless the host sets
+  `EDY_RDP_DESKUI_ENABLE=1` (`.envdefault`); status stays readable. **Never set
+  this on a workstation whose console you use** — a Stop there ends the local
+  session. Enforced at the relay *and* re-checked in the privileged helper.
+- **Guarded, admin-only, confirmed.** Every write needs a Cockpit administrator
+  (`SO_PEERCRED` + admin group). Stop and Disable refuse unless the operator types
+  the host's name; Stop additionally refuses while a graphical seat session is in
+  use unless that confirmation is given (`stop-force`). All gates are server-side.
+- **Same read/write pattern as the rest of the plugin.** Reads run unprivileged in
+  the relay; writes go through a new `edy-rdp-deskui@<action>` oneshot unit that a
+  polkit rule lets `edy-relay` start (that unit family only), backed by
+  `deskui/edy-rdp-deskui.sh` which validates the action against a **fixed enum** —
+  no arbitrary systemctl. New control ops `deskui-status` / `deskui`
+  (`relay/control.py`, `relay/edy_rdp_relay.py`), 14 new unit tests
+  (`relay/test_control.py`), UI in `index.html` / `guac-rdp.js` / `guac-rdp.css`.
+- **Packaging fix (found by this feature).** `edy-rdp-unlock@.service` and
+  `edy-rdp-waylandvnc@.service` — template units the relay starts on demand — were
+  never in the installer's `UNITS` list, so a **clean install never placed them**
+  (they only ever worked on the dev host, where they had been hand-placed). Added
+  them alongside the new `edy-rdp-deskui@.service`. Standing checks in
+  `run_tests.sh` now assert all three are placed, that the helper keeps its enum +
+  opt-in gates, and that polkit grants the unit family.
+- Corrected a pre-existing false positive in the deploy-contract audit: a `@WORD@`
+  token inside a `#` comment (the `@DEFAULT_MONITOR@` pulse note in the guacd unit)
+  was flagged as an unrendered placeholder by `run_tests.sh` and `install.sh
+  --verify`; the scan now skips comment lines.
+
 ## 1.2.16.20260917 - 2026-09-17
 
 Clipboard Send/Receive buttons, and NumLock reachable from the pop-out.

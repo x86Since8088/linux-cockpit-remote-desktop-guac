@@ -1,0 +1,16 @@
+[Unit]
+Description=edy-rdp desktop-UI control (%i) — enable/disable/start/stop the graphical desktop
+# %i is the action: one of enable, disable, start, stop, stop-force. The relay
+# (edy-relay) is allowed by polkit to start ONLY this unit family; the helper
+# validates %i against that fixed enum and runs no caller-supplied command.
+
+[Service]
+Type=oneshot
+# The opt-in flag is read from the SAME host .env the relay uses, so there is one
+# copy of the setting on the host. Environment= is the fail-closed default (0);
+# EnvironmentFile= comes AFTER it, so a host that set the flag wins, and '-' keeps
+# the unit startable on a host with no .env (the helper then refuses — fail closed).
+Environment=EDY_RDP_DESKUI_ENABLE=0
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@LIBEXEC@/edy-rdp-deskui %i
+TimeoutStartSec=90

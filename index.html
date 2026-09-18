@@ -15,6 +15,7 @@
   <div class="tabs">
     <button class="tab active" id="tab-connect" data-panel="panel-connect">Connect</button>
     <button class="tab" id="tab-sessions" data-panel="panel-sessions">Active Sessions</button>
+    <button class="tab" id="tab-deskui" data-panel="panel-deskui">Desktop UI</button>
     <button class="tab" id="tab-selftests" data-panel="panel-selftests">Self Tests</button>
   </div>
 
@@ -114,6 +115,33 @@
     </table>
   </section>
 
+  <section id="panel-deskui" class="panel" hidden>
+    <div class="bar">
+      <button id="deskui-refresh">Refresh state</button>
+      <span class="hint" id="deskui-note"></span>
+    </div>
+    <table class="sessions" id="deskui-state-table">
+      <tbody id="deskui-state-body"><tr><td colspan="2" class="muted">Loading…</td></tr></tbody>
+    </table>
+    <div class="bar" id="deskui-actions">
+      <button id="deskui-enable" class="sec" disabled
+              title="Boot to the graphical desktop and enable the display manager">Enable at boot</button>
+      <button id="deskui-start" class="sec" disabled
+              title="Start the display manager now (bring the desktop up)">Start now</button>
+      <button id="deskui-disable" class="sec" disabled
+              title="Boot to console (multi-user) and disable the display manager">Disable at boot</button>
+      <button id="deskui-stop" class="sec danger" disabled
+              title="Stop the display manager now (take the desktop down)">Stop now</button>
+    </div>
+    <div class="f" id="deskui-confirm-wrap" hidden>
+      <label for="deskui-confirm">To Stop or Disable, type this host's name (<span id="deskui-hostname" class="mono"></span>)</label>
+      <input id="deskui-confirm" type="text" name="deskui-confirm-host"
+             autocomplete="off" autocapitalize="off" spellcheck="false" size="24"
+             placeholder="host name">
+    </div>
+    <div class="status" id="deskui-status">Read-only view of this host's desktop state.</div>
+  </section>
+
   <section id="panel-selftests" class="panel" hidden>
     <div class="bar">
       <button id="run-tests">Run self tests</button>
@@ -130,6 +158,6 @@
     </table>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.2.16.20260917</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.3.0.20260918</span></footer>
 </body>
 </html>

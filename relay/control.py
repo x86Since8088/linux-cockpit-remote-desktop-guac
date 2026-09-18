@@ -55,7 +55,7 @@ class LiveConnections:
 
 
 def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
-                   unlock=None):
+                   unlock=None, deskui=None):
     """Dispatch one control request. Returns a JSON-serialisable dict.
 
     request: parsed dict with "op" in {"list","terminate","ping","register","elevate"}.
@@ -67,6 +67,14 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
     unlock: optional callable(uid) -> (ok, detail). Injected rather than called
         directly so this function stays pure and testable; the relay supplies the
         implementation that starts the privileged unit.
+    deskui: optional desktop-UI controller (duck-typed). Injected the same way as
+        unlock so the policy here (admin gate, opt-in gate, typed confirmation,
+        force decision) stays pure and unit-testable while the systemctl I/O lives
+        in the relay. Must expose:
+          .write_enabled -> bool   host opted in to write actions
+          .hostname      -> str    this host's name (the confirmation phrase)
+          .status()      -> dict   current desktop/DM/session state
+          .control(action, force) -> (ok, detail)   run the privileged verb
     """
     if not isinstance(request, dict):
         return {"ok": False, "error": "malformed request"}
@@ -110,6 +118,67 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
             return {"ok": False, "error": "unlock is not available on this server"}
         ok, detail = unlock(peer_uid)
         return {"ok": bool(ok), "detail": detail}
+
+    # -- desktop-UI control: read current state -------------------------------
+    #
+    # Read-only, so any authenticated caller may run it (SO_PEERCRED identifies
+    # them regardless). It reports the boot default target, the display manager
+    # and whether it is running/enabled, and how many graphical seat sessions are
+    # in use right now -- the number the UI shows before offering a Stop.
+    if op == "deskui-status":
+        if deskui is None:
+            return {"ok": False, "error": "desktop UI control is not available on this server"}
+        out = {"ok": True, "admin": bool(is_admin),
+               "write_enabled": bool(deskui.write_enabled),
+               "hostname": deskui.hostname}
+        try:
+            out.update(deskui.status())
+        except Exception as exc:                       # never let a probe error 500 the panel
+            out["ok"] = False
+            out["error"] = "could not read desktop state: %s" % exc
+        return out
+
+    # -- desktop-UI control: enable / disable / start / stop ------------------
+    #
+    # Gated in three independent layers, every one server-side (a client check is
+    # cosmetic):
+    #   * admin        -- same gate as unlock; SO_PEERCRED + admin group.
+    #   * opt-in       -- write_enabled reflects EDY_RDP_DESKUI_ENABLE; a host that
+    #                     did not opt in (an operator's own workstation) refuses
+    #                     every write here, so the feature is inert unless asked for.
+    #   * confirmation -- 'stop' and 'disable' require the caller to have typed this
+    #                     host's name. Without it they are refused with need_confirm,
+    #                     so the UI can prompt. Stopping while a desktop is in use
+    #                     additionally escalates to the forced verb -- only reachable
+    #                     through this confirmed path.
+    if op == "deskui":
+        if deskui is None:
+            return {"ok": False, "error": "desktop UI control is not available on this server"}
+        action = request.get("action")
+        if action not in ("enable", "disable", "start", "stop"):
+            return {"ok": False, "error": "unknown desktop-ui action: %r" % (action,)}
+        if not is_admin:
+            return {"ok": False, "error": "changing the desktop UI needs administrative access"}
+        if not deskui.write_enabled:
+            return {"ok": False, "error": "desktop UI control is disabled on this host "
+                    "(an administrator must set EDY_RDP_DESKUI_ENABLE=1 to opt in)"}
+        force = False
+        if action in ("stop", "disable"):
+            try:
+                live_n = int((deskui.status() or {}).get("active_graphical_sessions") or 0)
+            except Exception:
+                live_n = 0
+            if request.get("confirm") != deskui.hostname:
+                return {"ok": False, "error": "confirmation required",
+                        "need_confirm": True, "hostname": deskui.hostname,
+                        "active_graphical_sessions": live_n,
+                        "detail": "type this host's name (%s) to confirm" % deskui.hostname}
+            # Confirmed. Only 'stop' with a desktop in use needs the forced verb;
+            # 'disable' changes the boot default and never kills a live session.
+            if action == "stop" and live_n > 0:
+                force = True
+        ok, detail = deskui.control(action, force)
+        return {"ok": bool(ok), "action": action, "forced": bool(force), "detail": detail}
 
     if op == "list":
         sessions = []

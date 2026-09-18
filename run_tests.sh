@@ -41,12 +41,12 @@ echo "== DEPLOY-CONTRACT standing greps (section 4.4) =="
 g=0
 # 1. no shipped file names a source .env
 if grep -RIn --exclude-dir=.git -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
-     -- relay/ bridge/ headless/ rotate/ extensions/ ./*.js ./*.sh 2>/dev/null; then
+     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ ./*.js ./*.sh 2>/dev/null; then
   echo "  FAIL a shipped file names a source .env"; g=1; fi
 # 2. nothing resolves .env relative to itself
 if grep -RIn --exclude-dir=.git \
      -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
-     -- relay/ bridge/ headless/ rotate/ extensions/ 2>/dev/null; then
+     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ 2>/dev/null; then
   echo "  FAIL something resolves .env relative to itself"; g=1; fi
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -62,7 +62,7 @@ DEV_ROOT="/srv/smb/share/sc/${_ao}-group/${_ao}-storage/projects"
 RETIRED_ROOT="/opt/sc/${_retired}"
 if grep -RIn --exclude-dir=.git -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
      -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
-        headless/ rotate/ extensions/ 2>/dev/null; then
+        headless/ rotate/ deskui/ extensions/ 2>/dev/null; then
   echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
 # PAGE_DIRS must be installed as REAL directories of per-file links. cockpit-ws
 # serves a symlinked file but returns 404 for anything requested through a
@@ -76,13 +76,30 @@ if grep -qE 'for f in "\$\{PAGE\[@\]\}" "\$\{PAGE_DIRS\[@\]\}"; do link_one' ins
   echo "  FAIL install.sh symlinks PAGE_DIRS as if they were files"; g=1; fi
 if ! grep -q 'is a directory symlink' install.sh; then
   echo "  FAIL install.sh lost its post-install directory-symlink assertion"; g=1; fi
-# every unit template renders with no placeholder left over
+# every unit template renders with no placeholder left over. A '@WORD@' inside a
+# '#' comment (e.g. the @DEFAULT_MONITOR@ pulse token a note names) is documentation,
+# not a placeholder the renderer consumes, so scan only the directive lines.
 for u in systemd/*.in; do
   [ -e "$u" ] || continue
   if sed -e 's|@PAYLOAD@|/x|g' -e 's|@INSTALL_PATH@|/x|g' -e 's|@ENV_FILE@|/x/.env|g' \
          -e 's|@LIBEXEC@|/usr/libexec/edy-rdp|g' -e 's|@SBIN@|/usr/local/sbin|g' "$u" \
-     | grep -q '@[A-Z_]\+@'; then
+     | grep -v '^[[:space:]]*#' | grep -q '@[A-Z_]\+@'; then
     echo "  FAIL $u has a placeholder no renderer substitutes"; g=1; fi
+done
+# desktop-UI control invariants. The helper is privileged, so these guard the two
+# properties that keep it safe: it runs only a FIXED action enum (never an arbitrary
+# systemctl), and every WRITE is fail-closed behind the EDY_RDP_DESKUI_ENABLE opt-in.
+if ! grep -qE 'enable\|disable\|start\|stop\)' deskui/edy-rdp-deskui.sh; then
+  echo "  FAIL edy-rdp-deskui lost its fixed action-enum validation"; g=1; fi
+if ! grep -q 'EDY_RDP_DESKUI_ENABLE' deskui/edy-rdp-deskui.sh; then
+  echo "  FAIL edy-rdp-deskui lost its EDY_RDP_DESKUI_ENABLE opt-in gate"; g=1; fi
+# the relay may only START the deskui unit family if polkit grants it
+if ! grep -q 'edy-rdp-deskui@' hardening/edy-rdp-headless.rules; then
+  echo "  FAIL polkit rule does not grant edy-relay the edy-rdp-deskui@ unit family"; g=1; fi
+# the template units the relay starts on demand must be placed by a clean install
+for u in edy-rdp-deskui@.service edy-rdp-unlock@.service edy-rdp-waylandvnc@.service; do
+  if ! grep -q "$u" install.sh; then
+    echo "  FAIL install.sh does not place $u (relay starts it; clean installs would 'Unit not found')"; g=1; fi
 done
 # install.sh's own pre-flight, which IS the completeness gate. Only the
 # pre-flight half gates the tests: the "installed state" half describes the host

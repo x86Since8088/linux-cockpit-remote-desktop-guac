@@ -54,12 +54,19 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          waylandvnc/edy-rdp-waylandvnc-start.sh:edy-rdp-waylandvnc-start
          waylandvnc/edy-rdp-waylandvnc-stop.sh:edy-rdp-waylandvnc-stop
          unlock/edy-rdp-unlock.sh:edy-rdp-unlock
+         deskui/edy-rdp-deskui.sh:edy-rdp-deskui
          rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin)
 LIBS=()
 UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        edy-rdp-relay.service edy-rdp-reaper.service edy-rdp-reaper.timer
        edy-rdp-headless@.service edy-rdp-firewall.service
-       edy-rdp-rotate-rdplogin.service edy-rdp-rotate-rdplogin.timer)
+       edy-rdp-rotate-rdplogin.service edy-rdp-rotate-rdplogin.timer
+       # Template units the relay starts on demand (edy-relay is polkit-granted to
+       # start these families). They MUST be placed by a clean install; they render
+       # from their .in and their ExecStart resolves to a shipped LIBEXEC helper.
+       # unlock@/waylandvnc@ were previously omitted here and only ever worked on
+       # the dev host, where the units had been hand-placed (see docs/KNOWN_ISSUES).
+       edy-rdp-unlock@.service edy-rdp-waylandvnc@.service edy-rdp-deskui@.service)
 # System files that are COPIED (rendered where they carry a placeholder), because
 # the software that reads them - systemd-tmpfiles, dbus, polkit, nft - does not
 # follow a symlink out of its own configuration directory in every distro's
@@ -349,8 +356,12 @@ PY
     local out p
     for f in "${UNITS[@]}"; do
         out="$(render_unit_to_stdout "$f")" || exit 1
-        grep -q '@[A-Z_]\+@' <<<"$out" \
-            && die "unrendered placeholder in $f: $(grep -o '@[A-Z_]*@' <<<"$out" | sort -u | tr '\n' ' ')"
+        # A '@WORD@' inside a '#' comment (e.g. the @DEFAULT_MONITOR@ pulse token a
+        # note names) is documentation, not a placeholder the renderer consumes;
+        # scan only the non-comment directive lines for leftovers.
+        local leftover
+        leftover="$(grep -v '^[[:space:]]*#' <<<"$out" | grep -o '@[A-Z_]\+@' | sort -u | tr '\n' ' ')"
+        [[ -n "$leftover" ]] && die "unrendered placeholder in $f: $leftover"
         while read -r p; do
             [[ -z "$p" ]] && continue
             case "$p" in

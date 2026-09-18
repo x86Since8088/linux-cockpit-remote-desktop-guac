@@ -20,6 +20,14 @@ button.sec { background:var(--panel); color:var(--ink); border-color:#8a8d90; }
 /* A toggle button (e.g. Num Lock) shows its ON state with the accent fill. */
 button.toggle.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 button:disabled { opacity:.5; cursor:default; }
+/* A destructive action (Stop / Disable the desktop). Reads as danger only when it
+   is actually armed; a disabled danger button falls back to the neutral look. */
+button.danger:not(:disabled) { background:var(--err); color:#fff; border-color:var(--err); }
+.mono { font-family:ui-monospace,"RedHatMono",monospace; }
+/* Desktop-UI state table: a plain two-column key/value read-out. */
+#deskui-state-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
+#deskui-state-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
+#deskui-state-table td.warn { color:var(--err); font-weight:600; }
 
 /* "Add Monitor" pop-up (index.html opened with #monitor): chromeless — no tabs,
    toolbar or app bar — with the virtual monitor filling the whole window. Only a

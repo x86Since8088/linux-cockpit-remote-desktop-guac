@@ -1044,6 +1044,117 @@
         return SCENARIO_LABELS[key] || key;
     }
 
+    // ---- Desktop UI control panel --------------------------------------------
+    // Reads this host's desktop state (default target, display manager, sessions in
+    // use) and, for an administrator on a host that has opted in, offers
+    // enable/disable/start/stop. The relay is authoritative on every gate; this only
+    // reflects it. Stop/Disable stay disabled until the operator types the host name
+    // -- the client half of the "don't kill your own desktop" guard.
+    var deskuiState = null;   // last status payload, for the button logic
+
+    function deskuiRow(label, value, warn) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td"); k.textContent = label;
+        var v = document.createElement("td"); v.textContent = value;
+        if (warn) v.className = "warn";
+        tr.appendChild(k); tr.appendChild(v);
+        return tr;
+    }
+
+    // Enable the destructive buttons only while the typed host name matches, and
+    // only when the host has opted in and the caller is an administrator.
+    function deskuiSyncButtons() {
+        var st = deskuiState || {};
+        var canWrite = !!st.write_enabled && !!st.admin;
+        var installed = st.desktop_installed !== false;
+        var confirmEl = $("deskui-confirm");
+        var confirmOk = canWrite && confirmEl && confirmEl.value === st.hostname && !!st.hostname;
+        // constructive actions: available whenever the host opted in + caller is admin
+        $("deskui-enable").disabled = !canWrite;
+        $("deskui-start").disabled = !canWrite;
+        // destructive actions: require the typed-host-name confirmation
+        $("deskui-disable").disabled = !confirmOk;
+        $("deskui-stop").disabled = !(confirmOk && installed);
+        $("deskui-confirm-wrap").hidden = !canWrite;
+    }
+
+    function renderDeskUi() {
+        var body = $("deskui-state-body");
+        body.innerHTML = '<tr><td colspan="2" class="muted">Loading…</td></tr>';
+        $("deskui-hostname").textContent = "";
+        controlRequest({ op: "deskui-status" }).then(function (r) {
+            deskuiState = r || {};
+            if (!r || !r.ok) {
+                body.innerHTML = '<tr><td colspan="2" class="muted">'
+                    + ((r && r.error) || "Desktop UI control is not available on this host.")
+                    + '</td></tr>';
+                ["enable", "start", "disable", "stop"].forEach(function (a) { $("deskui-" + a).disabled = true; });
+                $("deskui-confirm-wrap").hidden = true;
+                return;
+            }
+            $("deskui-hostname").textContent = r.hostname || "";
+            var live = r.active_graphical_sessions || 0;
+            body.innerHTML = "";
+            body.appendChild(deskuiRow("Boots to",
+                r.boot_to_desktop ? "graphical desktop" : "console (" + (r.default_target || "multi-user.target") + ")"));
+            body.appendChild(deskuiRow("Display manager", r.display_manager || "none detected",
+                !r.display_manager));
+            if (r.display_manager) {
+                body.appendChild(deskuiRow("Running now", r.dm_active ? "yes" : "no"));
+                body.appendChild(deskuiRow("Enabled at boot",
+                    (r.dm_enabled === null || r.dm_enabled === undefined) ? "unknown" : String(r.dm_enabled)));
+            }
+            body.appendChild(deskuiRow("Desktop sessions in use", String(live), live > 0));
+            body.appendChild(deskuiRow("Control on this host",
+                r.write_enabled ? (r.admin ? "enabled (you are an administrator)" : "enabled (needs administrative access)")
+                                : "read-only (not opted in on this host)"));
+            $("deskui-note").textContent = r.write_enabled
+                ? "Stop and Disable ask you to type the host name to confirm."
+                : "Set EDY_RDP_DESKUI_ENABLE=1 in this host's .env to allow changes.";
+            var s = $("deskui-status");
+            if (live > 0) {
+                s.textContent = live + " desktop session(s) are in use. Stopping the desktop now will end them.";
+                s.className = "status err";
+            } else {
+                s.textContent = "Read-only view unless this host has opted in and you are an administrator.";
+                s.className = "status";
+            }
+            deskuiSyncButtons();
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="2" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    // Run one write verb. For stop/disable, pass the typed confirmation; the relay
+    // re-checks it (and the admin + opt-in gates) server-side regardless.
+    function deskuiAction(action) {
+        var st = deskuiState || {};
+        var confirm = $("deskui-confirm") ? $("deskui-confirm").value : "";
+        var destructive = (action === "stop" || action === "disable");
+        var verb = { enable: "Enable at boot", disable: "Disable at boot",
+                     start: "Start", stop: "Stop" }[action] || action;
+        var s = $("deskui-status");
+        s.textContent = verb + "…"; s.className = "status";
+        ["enable", "start", "disable", "stop"].forEach(function (a) { $("deskui-" + a).disabled = true; });
+        var req = { op: "deskui", action: action };
+        if (destructive) req.confirm = confirm;
+        controlRequest(req).then(function (r) {
+            if (r && r.ok) {
+                s.textContent = verb + " completed" + (r.forced ? " (forced — sessions were ended)" : "") + ".";
+                s.className = "status ok";
+                if ($("deskui-confirm")) $("deskui-confirm").value = "";
+            } else {
+                var why = (r && (r.detail || r.error)) || "refused";
+                if (r && r.need_confirm) why = "type the host name (" + (r.hostname || st.hostname || "") + ") to confirm";
+                s.textContent = verb + " failed: " + why; s.className = "status err";
+            }
+            renderDeskUi();
+        }).catch(function (e) {
+            s.textContent = verb + " error: " + e; s.className = "status err";
+            renderDeskUi();
+        });
+    }
+
     function renderSessions() {
         var body = $("sessions-body");
         body.innerHTML = '<tr><td colspan="7" class="muted">Loading…</td></tr>';
@@ -1305,12 +1416,14 @@
     }
 
     function selectTab(id) {
-        ["connect", "sessions", "selftests"].forEach(function (n) {
+        ["connect", "sessions", "deskui", "selftests"].forEach(function (n) {
             var t = $("tab-" + n), pan = $("panel-" + n);
+            if (!t || !pan) return;
             var on = ("tab-" + n) === id;
             t.classList.toggle("active", on); pan.hidden = !on;
         });
         if (id === "tab-sessions") renderSessions();
+        if (id === "tab-deskui") renderDeskUi();
     }
 
     // ---- toggle/selector persistence -----------------------------------------
@@ -1401,9 +1514,17 @@
     document.addEventListener("DOMContentLoaded", function () {
         $("tab-connect").addEventListener("click", function () { selectTab("tab-connect"); });
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
+        $("tab-deskui").addEventListener("click", function () { selectTab("tab-deskui"); });
         $("tab-selftests").addEventListener("click", function () { selectTab("tab-selftests"); });
         $("run-tests").addEventListener("click", runSelfTests);
         $("refresh").addEventListener("click", renderSessions);
+        // Desktop UI panel
+        $("deskui-refresh").addEventListener("click", renderDeskUi);
+        $("deskui-confirm").addEventListener("input", deskuiSyncButtons);
+        $("deskui-enable").addEventListener("click", function () { deskuiAction("enable"); });
+        $("deskui-start").addEventListener("click", function () { deskuiAction("start"); });
+        $("deskui-disable").addEventListener("click", function () { deskuiAction("disable"); });
+        $("deskui-stop").addEventListener("click", function () { deskuiAction("stop"); });
         var perm = cockpit.permission({ admin: true });
         perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); });
         isAdmin = !!perm.allowed;
