@@ -1,0 +1,13 @@
+# cockpit-guac-rdp requirements.txt - pip requirements for the RELAY (edy_rdp_relay.py,
+# edy_rdp_reaper.py and the modules they import). EMPTY ON PURPOSE: the relay is
+# standard-library Python and must stay that way unless there is a reason worth a venv.
+#
+# The moment a line is added here:
+#   - deploy.sh vendors the wheels into payload/wheels/ (pip download; a host without
+#     index access gets them via ./deploy.sh --wheels <dir>),
+#   - edy-rdp-bootstrap (ExecStartPre of the relay) builds [install path]/venv OFFLINE
+#     from those wheels, rebuilds it when this file's sha256 changes, and writes
+#     [install path]/venv.env so the units run the venv's python3,
+#   - and the host needs python3-venv.
+# With no requirement the units run /usr/bin/python3 and no venv exists.
+# One requirement per line, pinned:  name==x.y.z

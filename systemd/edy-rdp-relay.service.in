@@ -13,10 +13,24 @@ User=edy-relay
 Group=edy-rdp
 # Runs as the dedicated edy-relay uid so the nftables owner-match on 127.0.0.1:4822
 # admits THIS process and drops every other local uid.
+#
+# The bootstrap runs FIRST and as ROOT: '+' means full privileges - exempt from the
+# User=, NoNewPrivileges= and ProtectSystem= lines below (systemd.service(5)), which
+# is what lets it write @INSTALL_PATH@/venv and venv.env. It validates the .env
+# (fail closed: a relay on defaults it was never configured with is worse than one
+# that did not start), verifies the OS prerequisites from requires.txt, and builds or
+# refreshes the venv OFFLINE from the vendored wheels. It never installs a package:
+# that changes host state and belongs to deploy.sh --with-deps.
+ExecStartPre=+@LIBEXEC@/edy-rdp-bootstrap
 # Config comes from the .env named below; these Environment= lines are the
 # documented built-in fallbacks for anything that file does not set.
 # The payload is immutable: no bytecode cache is written into it.
 Environment=PYTHONDONTWRITEBYTECODE=1
+# The interpreter. /usr/bin/python3 is the documented fallback; venv.env (written by
+# the bootstrap, read last below so it wins) points at @INSTALL_PATH@/venv/bin/python3
+# once requirements.txt names a dependency. systemd will not take a variable as the
+# program itself ("the first argument may not be a variable"), so /usr/bin/env execs it.
+Environment=EDY_RDP_PYTHON=/usr/bin/python3
 Environment=EDY_RDP_GUACD=127.0.0.1:4822
 Environment=EDY_RDP_ADMIN_GROUP=sudo
 Environment=EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
@@ -34,13 +48,17 @@ Environment=EDY_RDP_REMOTE_ADMIN_ONLY=0
 Environment=EDY_RDP_DESKUI_ENABLE=0
 # NOT optional (no leading '-'): a relay running on built-in defaults it was
 # never configured with is worse than a relay that did not start. install.sh
-# guarantees this file exists and sets every required key before it renders
-# this unit. The Environment= lines above remain the documented fallbacks.
+# places this file from .envdefault, reconciles it on upgrade and validates it
+# before it renders this unit; the bootstrap above validates it again at every
+# start. The Environment= lines above remain the documented fallbacks.
 EnvironmentFile=@ENV_FILE@
+# Optional ('-'): absent until the bootstrap has run once. Read AFTER the .env so
+# the interpreter the bootstrap chose wins over the fallback above.
+EnvironmentFile=-@INSTALL_PATH@/venv.env
 # ${VAR} expands to one argument; $EDY_RDP_ALLOW_ARGS (no braces) is word-split into
 # the repeated --allow-target flags. ${EDY_RDP_REMOTE_ALLOW} MUST be braced (one arg):
 # it is a comma-list, not word-split flags.
-ExecStart=@LIBEXEC@/edy_rdp_relay.py \
+ExecStart=/usr/bin/env ${EDY_RDP_PYTHON} @LIBEXEC@/edy_rdp_relay.py \
     --guacd ${EDY_RDP_GUACD} --admin-group ${EDY_RDP_ADMIN_GROUP} \
     --state-file ${EDY_RDP_STATE_FILE} \
     $EDY_RDP_ALLOW_ARGS \

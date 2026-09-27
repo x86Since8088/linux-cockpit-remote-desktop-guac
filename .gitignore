@@ -29,10 +29,17 @@ cloud-init*.iso
 .idea/
 .vscode/
 
-# A .env is a DEPLOYED file: it belongs at [install path]/.env, seeded from the
-# committed .envdefault by deploy.sh, missing-only. One in the source tree exists
-# ONLY for running tests during development and must never be what a deployed
-# plugin reads -- so it is never committed, at any depth. (.envdefault IS
-# committed: it is the seed, not the configuration.)
+# A .env is a DEPLOYED file: it belongs at [install path]/.env, placed from the
+# committed .envdefault by install.sh when missing, reconciled (new keys appended,
+# values never changed) and validated on every install. A KIND=dev install places
+# it in the checkout, and one may exist here for running tests, but it must never
+# be what a deployed plugin reads -- so it is never committed, at any depth.
+# (.envdefault IS committed: it is the seed, not the configuration.)
 .env
 **/.env
+
+# Written by edy-rdp-bootstrap at relay start (a KIND=dev install puts them in the
+# checkout); vendored by deploy.sh into a payload, never into the tree.
+/venv/
+/venv.env
+/wheels/

@@ -9,7 +9,13 @@ Wants=edy-rdp-control.socket
 
 [Service]
 Type=oneshot
-ExecStart=@LIBEXEC@/edy_rdp_reaper.py --control /run/edy-rdp/control.sock --greeter-ttl 60 --ephemeral-ttl 15
+# The interpreter: /usr/bin/python3 unless venv.env (written by the relay's
+# bootstrap; optional here, hence '-') names the venv. Why /usr/bin/env and why
+# the fallback: see edy-rdp-relay.service. No ExecStartPre of its own - if the
+# bootstrap never ran there is no venv.env and the fallback python runs.
+Environment=EDY_RDP_PYTHON=/usr/bin/python3
+EnvironmentFile=-@INSTALL_PATH@/venv.env
+ExecStart=/usr/bin/env ${EDY_RDP_PYTHON} @LIBEXEC@/edy_rdp_reaper.py --control /run/edy-rdp/control.sock --greeter-ttl 60 --ephemeral-ttl 15
 # The payload is immutable: no bytecode cache is written into it.
 Environment=PYTHONDONTWRITEBYTECODE=1
 User=root
