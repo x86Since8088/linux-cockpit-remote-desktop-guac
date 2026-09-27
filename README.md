@@ -1,6 +1,6 @@
 # cockpit-guac-rdp
 
-**Version 1.1.1.20260903** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
+**Version 1.4.0.20260927** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
 
 Browser-based RDP into this host's GNOME desktop, from inside Cockpit, with guacd
 **never exposed on a port** and **no session hijacking**.
@@ -59,9 +59,9 @@ own bundled FreeRDP2 cannot negotiate to grd, which is why the FreeRDP3 bridge e
 Two processes, and they are not the same thing.
 
 ```bash
-sudo ./deploy.sh --all            # THE DEPLOYMENT: OS prerequisites, users, guacd
-                                  # image, copy -> /opt/cockpit-guac-rdp, seed .env,
-                                  # run the installed install.sh, enable the units
+sudo ./deploy.sh --all            # THE DEPLOYMENT: OS prerequisites, users, copy ->
+                                  # /opt/cockpit-guac-rdp, run the installed install.sh
+                                  # (place/validate .env), guacd image, enable the units
 sudo ./deploy.sh                  # the safe default: copy + configure + place units,
                                   # enable NOTHING
 sudo ./deploy.sh --with-units     # ...and bring the units up
@@ -90,6 +90,47 @@ fighting over one socket and one nftables table. `install.sh` *verifies* those
 prerequisites and refuses with the command that fixes them. Neither script ever
 touches `cockpit.socket`.
 
+**Configuration is placed, reconciled and validated by `install.sh`.** When
+`[install path]/.env` is missing it is derived from `.envdefault` (the comments come
+along — they are the operator's documentation). When it exists, every key the new
+version ships and the file lacks is appended with the `.envdefault` value under a dated
+`# added by install.sh <version>` comment, and **a value you set is never changed**.
+The placed file is then validated per key — grammar, every required key present,
+nothing secret-shaped, `EDY_RDP_GUACD` is host:port, paths absolute, the log level one
+of four, the admin group exists, 0/1 flags — and a bad value refuses the install
+naming the key and the reason, before a single link is made (fail closed).
+`./install.sh --verify` validates and writes nothing. The grammar lives once, in
+`lib/edy-rdp-env.sh`, so `install.sh`, `deploy.sh` and the start-time bootstrap agree.
+
+**Prerequisites have one source: `requires.txt`.** It ships in the payload and
+`lib/edy-rdp-requires.sh` reads it — name, `>=` minimum version, the pinned
+`guacd-image` — and checks presence *and* version. `deploy.sh --with-deps` installs
+from it, `install.sh` reports against it (check 8b, never fatal for a dev install),
+and the relay's bootstrap refuses to start without it. There is no second list to
+disagree with.
+
+**The relay's interpreter.** `requirements.txt` is the relay's pip file and is empty
+today (the relay is stdlib-only, on purpose). While it is empty the units run
+`/usr/bin/python3`. The moment it names something, `edy-rdp-bootstrap` — the relay's
+`ExecStartPre=+`, run as root at every start — builds `[install path]/venv` OFFLINE
+from wheels `deploy.sh` vendored into `payload/wheels/` (`pip download` on the target,
+or `./deploy.sh --wheels <dir>` for a host without index access), rebuilds it when the
+file's sha256 changes, and writes `[install path]/venv.env` so the units exec the venv's
+python. The bootstrap also validates `.env` and checks `requires.txt` first, and it
+**never installs a package at service start** — that changes host state and belongs
+to `deploy.sh --with-deps`; it logs the exact fix and refuses instead.
+
+**Desktop audio bind.** guacd records the seat's pulse socket through a bind mount.
+Since 1.4.0 that is a *directory* bind, `/run/edy-rdp-pulse`, made a shared mount by
+`edy-rdp-pulse-bind` and mounted into the container `:ro,rslave` (host → container
+only, and nothing guacd can write into); the seat socket is bound into it as `native`
+by `edy-rdp-pulse-seat@<uid>.path` (an inotify watch on `/run/user/<uid>/pulse`) when
+a seat login creates it, so it propagates into the running container without a
+restart (the one-shot bind of 1.3.x left audio dead after every boot — KNOWN_ISSUES
+I42). The script vets what root is about to mount — no symlinks, a socket owned by
+the seat uid — and refuses otherwise. The uid comes from `EDY_RDP_PULSE_SEAT_UID` in
+`.env`; see [docs/AUDIO.md](docs/AUDIO.md).
+
 After deploying: add users to the `edy-rdp` group (`usermod -aG edy-rdp <user>`).
 Cockpit picks up the plugin on the next page load (Ctrl-Shift-R clears the cached
 manifest).
@@ -110,12 +151,14 @@ ls -l /run/edy-rdp/guacd.sock
 
 ## Configuration
 
-Settings live in **`[install path]/.env`** — normally `/opt/cockpit-guac-rdp/.env`,
-seeded from the committed `.envdefault` by `deploy.sh`, **missing-only**, never
-clobbering an edit. The units read it directly (`EnvironmentFile`), so there is one
-copy of each setting on the host and not two. It sets the guacd endpoint, the admin
-group, the local and remote RDP allow-lists, the log level, the pinned `GUACD_IMAGE`
-and the 3390 door username.
+Settings live in **`[install path]/.env`** — normally `/opt/cockpit-guac-rdp/.env`.
+`install.sh` places it from the committed `.envdefault` when it is missing, appends
+the keys a newer version adds when it exists (dated comment, your values untouched),
+and validates it either way — a bad value refuses the install by key and reason. The
+units read it directly (`EnvironmentFile`), so there is one copy of each setting on
+the host and not two. It sets the guacd endpoint, the admin group, the local and
+remote RDP allow-lists, the log level, the pinned `GUACD_IMAGE` + `GUACD_ENTRYPOINT`,
+the 3390 door username and the seat uid whose pulse socket carries audio.
 
 > **Moved in this version.** These settings used to be `/etc/default/edy-rdp`, seeded
 > from `etcdefaults/edy-rdp`. That file was `.envdefault` wearing the wrong hat: it is
@@ -127,8 +170,9 @@ and the 3390 door username.
 > agree, because two config files where one is silently ignored is how a setting gets
 > changed and never takes effect.
 
-A `.env` carries **locations and settings, never a secret** — `deploy.sh` refuses to
-write one whose value looks like a credential. The 3390 door key in particular lives
+A `.env` carries **locations and settings, never a secret** — `install.sh` and the
+relay's start-time bootstrap refuse a value that looks like a credential (same check,
+same library). The 3390 door key in particular lives
 in gnome-remote-desktop's own credential store, written by
 `edy-rdp-rotate-rdplogin`; only the *username* appears here.
 
@@ -163,16 +207,21 @@ Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are 
 | `bridge/edy-rdp-bridge-start.sh` | the bridge launcher (xfreerdp3 → Xvfb → x11vnc) |
 | `headless/edy-rdp-headless-{start,stop}.sh` | per-user isolated headless-session lifecycle |
 | `rotate/edy-rdp-rotate-rdplogin.sh` | rotates the 3390 door credential |
-| `systemd/*.in` `systemd/*` | unit templates (`@LIBEXEC@`, `@ENV_FILE@`) and the units that need no rendering |
+| `lib/edy-rdp-env.sh` `lib/edy-rdp-requires.sh` | sourced libraries (linked into libexec): the ONE `.env` grammar + validators, the ONE reading of `requires.txt` |
+| `bootstrap/edy-rdp-bootstrap.sh` | the relay's `ExecStartPre=+`: validates `.env`, checks prerequisites, builds/refreshes the venv offline, writes `venv.env` |
+| `pulse/edy-rdp-pulse-bind.sh` | makes `/run/edy-rdp-pulse` a shared mount and binds the seat pulse socket into it (guacd `ExecStartPre` + the per-seat path unit) |
+| `systemd/*.in` `systemd/*` | unit templates (`@LIBEXEC@`, `@ENV_FILE@`, `@INSTALL_PATH@`) and the units that need no rendering |
 | `hardening/*` | nftables owner-match, D-Bus handover policy, polkit rule |
-| `.envdefault` | the settings seed; `deploy.sh` copies it to `[install path]/.env`, missing-only |
-| `requires.txt` `VERSION` | pinned prerequisite manifest; release version |
+| `.envdefault` | the settings seed; `install.sh` places it as `[install path]/.env`, appends new keys on upgrade, validates |
+| `requires.txt` `VERSION` | THE prerequisite list (OS packages with minimum versions + the pinned guacd image), shipped in the payload; release version |
+| `requirements.txt` | pip requirements for the relay — empty (stdlib-only); a non-empty one makes the bootstrap build a venv from vendored wheels |
+| `tests/` | installer / env / requires / bootstrap / pulse-bind tests run by `run_tests.sh` (not shipped) |
 | `pod/` `systemd/DEPRECATED-pod.*` | the superseded pod deployment (kept for reference; the host-loopback path above is current) |
 | `docs/*` | architecture, compatibility, scenarios, known issues, CVE, troubleshooting |
 | `img/*` | working-scenario screenshots referenced by the docs |
 | `install.sh` | the symlink installer + the completeness gate; declares the ONE manifest both scripts read |
 | `deploy.sh` `deploy.ps1` `deploy.bat` | the deployment; the Windows pair explains why there is no Windows deployment |
-| `run_tests.sh` | test runner: relay unit tests, the loopback invariant, the DEPLOY-CONTRACT standing greps |
+| `run_tests.sh` | test runner: relay unit tests, the loopback invariant, the DEPLOY-CONTRACT standing greps, a staged `DESTDIR` install to completion + `--verify` |
 
 ## Docs
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — prerequisites + per-distro matrix
@@ -180,6 +229,7 @@ Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the data path and components
 - [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — platform quirks and the fixes/mitigations
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — health checks and symptom→fix
+- [docs/AUDIO.md](docs/AUDIO.md) — desktop audio: the shared pulse bind and how to verify it
 - [docs/CVE.md](docs/CVE.md) — the guacd/RDP exposure surface this design closes
 - [docs/SPEC-3389-mux.md](docs/SPEC-3389-mux.md) — deferred design for native-client ingress
 
