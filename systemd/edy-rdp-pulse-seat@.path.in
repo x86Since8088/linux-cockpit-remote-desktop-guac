@@ -1,0 +1,30 @@
+[Unit]
+Description=edy-rdp watch the seat pulse directory of uid %i (audio bind)
+# Fires edy-rdp-pulse-rebind@%i.service when /run/user/%i/pulse CHANGES - the
+# socket 'native' appearing at a seat login is such a change - so the socket is
+# bound into the SHARED /run/edy-rdp-pulse and propagates into the running guacd
+# container with no restart (KNOWN_ISSUES I42). deploy.sh --with-units enables
+# the instance named by EDY_RDP_PULSE_SEAT_UID in the .env.
+#
+# PathChanged=, NOT PathExists=. PathExists= is re-evaluated the instant the
+# triggered oneshot exits; while the socket exists that is true again, systemd
+# starts the service again, five starts in ~100 ms hit StartLimitBurst and the
+# PATH UNIT ITSELF fails (systemd.path(5): "protection against busy looping").
+# Enabling it while the seat is logged in - the normal case - killed the watch
+# within a second, and nothing rebound at the next login. PathChanged= is an
+# inotify watch on the directory: it fires once per event, never for a state.
+# systemd watches the nearest existing ancestor while /run/user/%i is absent
+# and re-arms as each component appears at login, so the create of 'native'
+# is always seen. The corollary: a socket that ALREADY exists when this unit
+# starts never fires it - the guacd ExecStartPre covers boot-with-seat-logged-in
+# and deploy.sh starts the rebind service once, explicitly, after enabling this.
+#
+# No placeholder in this file; it is still a .in so it renders and is placed like
+# every other unit (one path through install.sh, one manifest entry).
+
+[Path]
+PathChanged=/run/user/%i/pulse
+Unit=edy-rdp-pulse-rebind@%i.service
+
+[Install]
+WantedBy=multi-user.target

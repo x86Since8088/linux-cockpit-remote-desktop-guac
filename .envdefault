@@ -1,4 +1,4 @@
-# cockpit-guac-rdp .envdefault - seeded to [install path]/.env by deploy.sh, MISSING-ONLY.
+# cockpit-guac-rdp .envdefault - placed to [install path]/.env by install.sh (missing), reconciled on upgrade (new keys appended, your values never changed), then VALIDATED - a bad value refuses the install.
 #
 # THIS FILE REPLACES etcdefaults/edy-rdp. It is the same settings, in the same
 # grammar, at a different destination - because it was `.envdefault` wearing the
@@ -13,9 +13,15 @@
 #   full-line '#' comments only; a trailing '#' is PART OF THE VALUE
 #   no $, no backticks, no interpolation
 #
-# Locations and settings only, NEVER a secret: deploy.sh refuses to write a .env
-# whose value looks like a credential. The 3390 door credential is not here - it
-# lives in grd's own credential store and is rotated by a timer.
+# Locations and settings only, NEVER a secret: install.sh and the relay's
+# start-time bootstrap refuse a value that looks like a credential. The 3390 door
+# credential is not here - it lives in grd's own credential store and is rotated
+# by a timer.
+#
+# Every key below is validated (lib/edy-rdp-env.sh) when install.sh places or
+# reconciles the .env, when --verify runs, and again by edy-rdp-bootstrap at every
+# relay start: a value that does not validate names the key and the reason, and
+# nothing starts on it (fail closed).
 #
 # Apply changes with:  systemctl restart edy-rdp-relay.service
 # The units read this file directly (EnvironmentFile), so there is one copy of
@@ -30,11 +36,12 @@ EDY_RDP_GUACD=127.0.0.1:4822
 
 # Unix group whose members are treated as Cockpit administrators for the
 # server-side console gate. The elevation-proven token is still required; this
-# only decides who may ask.
+# only decides who may ask. Must exist on the host (getent group).
 EDY_RDP_ADMIN_GROUP=sudo
 
 # Where the relay persists its session registry. On tmpfs, so it does not survive
 # a reboot - which is correct, because live guacd and grd sessions do not either.
+# Absolute path.
 EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
 
 # Relay and trace-logger verbosity: DEBUG | INFO | WARNING | ERROR.
@@ -44,6 +51,7 @@ EDY_RDP_LOG_LEVEL=INFO
 
 # LOCAL targets. Space-separated --allow-target flags, word-split into arguments
 # by systemd. These are the grd backend ports on this host and nothing else.
+# At least one --allow-target is required.
 EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391
 
 # REMOTE hosts, for the "Remote host" scenario (jump into another RDP host).
@@ -58,6 +66,7 @@ EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 -
 EDY_RDP_REMOTE_ALLOW=
 
 # 1 = the remote scenario additionally requires Cockpit administrative access.
+# Empty, 0 or 1.
 EDY_RDP_REMOTE_ADMIN_ONLY=0
 
 # --- desktop-UI control (enable/disable/start/stop the graphical desktop) ----
@@ -79,24 +88,33 @@ EDY_RDP_DESKUI_ENABLE=
 
 # --- guacd ------------------------------------------------------------------
 
-# Pinned guacd container image. edy-rdp-guacd.service runs this; deploy.sh
-# pre-pulls it so the first connect is not slow and an air-gapped host finds out
-# now rather than at the first click. requires.txt carries the digest.
-# FreeRDP 3 matters: FreeRDP 2 lacks RDSTLS, which grd's port 3390 handover needs.
-GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
-
+# Pinned guacd container image, by DIGEST. Janua is guacd built against FreeRDP 3.
+# The official docker.io/guacamole/guacd is FreeRDP 2, which lacks RDSTLS - the
+# protocol grd's port 3390 greeter handover and the Remote-host scenario need - so
+# with it the 3390 greeter and remote RDP break (KNOWN_ISSUES I26). requires.txt
+# carries the same ref; deploy.sh --with-image pre-pulls it; install.sh --verify
+# checks the RUNNING container is this image.
+GUACD_IMAGE=ghcr.io/skylark-software/janua@sha256:2279eac000abbe78b89aa87f0a27912c1fa12c59f579a963ccbd4dc3804234e4
 # Path to the guacd binary INSIDE the image above. Differs per image:
-#   official guacamole/guacd -> /opt/guacamole/sbin/guacd
-#   Janua (FreeRDP 3 fork)   -> /usr/local/sbin/guacd
-GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
+#   Janua (FreeRDP 3)        -> /usr/local/sbin/guacd      (default)
+#   official guacamole/guacd -> /opt/guacamole/sbin/guacd  (FreeRDP 2: no 3390 greeter, no remote RDP)
+GUACD_ENTRYPOINT=/usr/local/sbin/guacd
 
 # --- audio streaming (optional, off by default) -----------------------------
 # The Sound toggle streams the desktop's audio to the browser. guacd captures it
 # from the seat's PipeWire/PulseAudio and the unit passes these vars into the
-# container. The unit bind-mounts the seat's pulse SOCKET to a stable host path
-# and hands it in as unix:/run/pulse.sock (a TCP endpoint was tried first but
-# pipewire-pulse does not deliver recording audio over module-native-protocol-tcp).
-# To enable (see docs/AUDIO.md for detail):
+# container. How the socket reaches the container (docs/AUDIO.md, KNOWN_ISSUES I42):
+# the host directory /run/edy-rdp-pulse is a SHARED mount, the seat's pulse socket
+# is bound INTO it as 'native' by edy-rdp-pulse-bind (which refuses symlinks and a
+# socket not owned by the seat uid: root mounts nothing it has not vetted), and the
+# container mounts that directory read-only, as a slave, at /run/pulse - so guacd
+# sees /run/pulse/native and can write nothing back. Because the directory is
+# shared, a bind done at LOGIN (edy-rdp-pulse-seat@<uid>.path watches
+# /run/user/<uid>/pulse and fires when 'native' appears) propagates live into the
+# running container: audio works for the next session, no guacd restart. (A TCP
+# endpoint was tried first but pipewire-pulse does not deliver recording audio
+# over module-native-protocol-tcp.)
+# To enable:
 #   1. Find the monitor of the sink the desktop plays to, as the seat user:
 #        pactl get-default-sink          # e.g. alsa_output.pci-0000_01_00.1.hdmi-stereo
 #      then append ".monitor" for PULSE_SOURCE below.
@@ -106,11 +124,15 @@ GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
 # not resolve on pipewire-pulse and records silence. A sink's ".monitor" is what
 # is PLAYING on the desktop -- never a microphone. Left unset = no audio channel.
 #
-# EDY_RDP_PULSE_SEAT_SOCKET overrides the seat pulse socket the unit bind-mounts;
-# it defaults to /run/user/1000/pulse/native. Set it if the seat user is not uid 1000.
+# Numeric uid of the SEAT user whose pulse socket carries desktop audio. deploy.sh
+# --with-units enables edy-rdp-pulse-seat@<this uid>.path, which binds
+# /run/user/<uid>/pulse/native into the container's /run/pulse the moment it appears.
+EDY_RDP_PULSE_SEAT_UID=1000
+# Full path override of that seat socket (wins over the uid above when set).
 #EDY_RDP_PULSE_SEAT_SOCKET=/run/user/1000/pulse/native
-#PULSE_SERVER=unix:/run/pulse.sock
+#PULSE_SERVER=unix:/run/pulse/native
 #PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor
+# Upgrading from 1.3.x: PULSE_SERVER=unix:/run/pulse.sock is refused as stale - change it to unix:/run/pulse/native.
 
 # --- the 3390 "Remote Login" door -------------------------------------------
 

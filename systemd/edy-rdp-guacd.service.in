@@ -12,36 +12,53 @@ After=network-online.target
 # (incl. the grd redirect) exactly like a host process. It binds LOOPBACK only;
 # access is restricted to the relay's uid by the nftables owner-match rule
 # (edy-rdp-guacd.nft) -- NOT by network isolation. No -p mapping is used.
-# guacd built against FreeRDP 3 (localhost/edy-rdp-guacd-fr3): FreeRDP 2 lacks RDSTLS,
-# which grd port 3390 (Remote Login) requires for its post-greeter handover (KNOWN_ISSUES I26).
-# Pinned guacd image. The Environment= line is the fallback; the real value is
-# GUACD_IMAGE in the .env below, which is where an operator changes it.
-Environment=GUACD_IMAGE=docker.io/guacamole/guacd:1.6.0
+#
+# Pinned guacd image, by DIGEST. Janua is guacd built against FreeRDP 3. The
+# official docker.io/guacamole/guacd is FreeRDP 2, which lacks RDSTLS - the
+# protocol grd's port 3390 greeter handover and the Remote-host scenario need -
+# so with it the 3390 greeter and remote RDP break (KNOWN_ISSUES I26).
+# requires.txt carries the same ref. The Environment= line is the fallback; the
+# real value is GUACD_IMAGE in the .env below, which is where an operator changes
+# it, and install.sh --verify checks the RUNNING container is that image.
+Environment=GUACD_IMAGE=ghcr.io/skylark-software/janua@sha256:2279eac000abbe78b89aa87f0a27912c1fa12c59f579a963ccbd4dc3804234e4
 # The guacd binary's path INSIDE the image. It is not the same across images:
-# the official one ships /opt/guacamole/sbin/guacd, the FreeRDP3 Janua fork
-# /usr/local/sbin/guacd. Hardcoding it made swapping images fail with a bare
-# 127 and no clue which path was wrong.
-Environment=GUACD_ENTRYPOINT=/opt/guacamole/sbin/guacd
+# Janua ships /usr/local/sbin/guacd, the official one /opt/guacamole/sbin/guacd.
+# Hardcoding it made swapping images fail with a bare 127 and no clue which path
+# was wrong.
+Environment=GUACD_ENTRYPOINT=/usr/local/sbin/guacd
 EnvironmentFile=@ENV_FILE@
 # Desktop audio (the Sound toggle): guacd records the seat's PipeWire/PulseAudio.
-# The seat socket lives under the user's XDG_RUNTIME_DIR (0700), which the
-# container cannot traverse, so we bind-mount the SOCKET FILE itself to a stable
-# host path and pass that in as /run/pulse.sock. The seat socket path defaults to
-# uid 1000 and is overridable with EDY_RDP_PULSE_SEAT_SOCKET in the .env. If the
-# seat socket is absent we leave an empty regular file at the target so the -v
-# bind still resolves and guacd just fails to connect audio (graceful: no audio,
-# no crash). The bind is idempotent across restarts (mountpoint guard).
-ExecStartPre=-/bin/sh -c 'S="${EDY_RDP_PULSE_SEAT_SOCKET:-/run/user/1000/pulse/native}"; mountpoint -q /run/edy-rdp-pulse.sock || : > /run/edy-rdp-pulse.sock; if [ -S "$S" ] && ! mountpoint -q /run/edy-rdp-pulse.sock; then mount --bind "$S" /run/edy-rdp-pulse.sock; fi; true'
+# The seat socket lives under the user's XDG_RUNTIME_DIR (0700), which the container
+# cannot traverse. 1.3.x bind-mounted the socket FILE once, at service start, with
+# '-' swallowing the error: after a boot where guacd started before the seat logged
+# in the target stayed a 0-byte regular file and audio was dead until a restart
+# (KNOWN_ISSUES I42). Now: a DIRECTORY /run/edy-rdp-pulse made a SHARED mount, the
+# socket bound INTO it as 'native', and the container mounting that directory as
+# a slave - so a bind done later (edy-rdp-pulse-seat@<uid>.path fires at login)
+# propagates into the RUNNING container. Not '-'-prefixed: an absent seat socket is
+# exit 0 ("no audio until login"); a refused socket (a symlink, or not owned by
+# the seat uid - the script vets what root is about to mount) or a real mount
+# failure stops the unit.
+ExecStartPre=@LIBEXEC@/edy-rdp-pulse-bind
 ExecStartPre=-/usr/bin/podman rm -f edy-rdp-guacd
 # -e PULSE_SERVER/-e PULSE_SOURCE pass those vars from the service env (the .env
 # below) INTO the container so guacd can capture desktop audio for the Sound
-# toggle. PULSE_SERVER points at the bind-mounted socket (unix:/run/pulse.sock);
-# PULSE_SOURCE names the sink monitor to record (an EXPLICIT name -- the
-# @DEFAULT_MONITOR@ alias does not resolve on pipewire-pulse and yields silence).
-# When PULSE_SOURCE is unset the audio channel never connects -- no behaviour
-# change. See .env + docs/AUDIO.md.
+# toggle. PULSE_SERVER points at the socket bound into the shared directory
+# (unix:/run/pulse/native inside the container); PULSE_SOURCE names the sink
+# monitor to record (an EXPLICIT name -- the @DEFAULT_MONITOR@ alias does not
+# resolve on pipewire-pulse and yields silence). When PULSE_SOURCE is unset the
+# audio channel never connects -- no behaviour change. See .env + docs/AUDIO.md.
+# ':ro,rslave' on the -v is the other half of the propagation argument: the 1.3.x
+# default (rprivate) is why a bind done on the host after the container started
+# never reached it. rslave, not rshared: mounts must flow host -> container, and
+# never the other way - guacd is root inside a rootful container whose attack
+# surface is every RDP/VNC server it dials. ro for the same reason: read-write
+# would let a compromised guacd plant a symlink named 'native' in the HOST
+# directory for root's next bind to follow. connect() on a unix socket needs no
+# write permission on the mount (the kernel's read-only check exempts sockets,
+# which is why docker.sock:ro works), so audio loses nothing.
 ExecStart=/usr/bin/podman run --replace --name edy-rdp-guacd --network host --health-cmd none \
-    -v /run/edy-rdp-pulse.sock:/run/pulse.sock -e PULSE_SERVER -e PULSE_SOURCE \
+    -v /run/edy-rdp-pulse:/run/pulse:ro,rslave -e PULSE_SERVER -e PULSE_SOURCE \
     --entrypoint ${GUACD_ENTRYPOINT} \
     ${GUACD_IMAGE} -b 127.0.0.1 -l 4822 -L info -f
 ExecStop=/usr/bin/podman stop -t 5 edy-rdp-guacd

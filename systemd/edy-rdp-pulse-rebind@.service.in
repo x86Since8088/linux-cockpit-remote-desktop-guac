@@ -1,0 +1,15 @@
+[Unit]
+Description=edy-rdp bind the seat pulse socket of uid %i into /run/edy-rdp-pulse
+# Started by edy-rdp-pulse-seat@%i.path on every change in /run/user/%i/pulse
+# (the socket, the pid file, a cli socket - several per login), and once by
+# deploy.sh --with-units for a seat already logged in. The script is idempotent
+# (device:inode compare), so a run that finds nothing to do costs nothing
+# (KNOWN_ISSUES I42). Type=oneshot WITHOUT RemainAfterExit=: the path unit must
+# see this as inactive again to trigger it for the next login.
+
+[Service]
+Type=oneshot
+# EDY_RDP_PULSE_SEAT_SOCKET (if the operator set it) still wins; '-' keeps the unit
+# startable on a host with no .env (the script then uses --seat-uid).
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@LIBEXEC@/edy-rdp-pulse-bind --seat-uid %i
