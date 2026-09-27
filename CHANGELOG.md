@@ -1,3 +1,23 @@
+## 1.4.1.20260927 - 2026-09-27
+
+Docs: the relay defence-layer design, and the CVE register corrected where the
+review proved it wrong. No code change.
+
+- `docs/DEFENSE-LAYER.md` (new): output filtering, sanitisation of RDP/guac
+  secrets that never need to leave the host, and decoy identifiers that trigger
+  security events - three layers on the relay's re-encode choke point, 22
+  controls each stated after an adversarial critic's repair, a zero-false-
+  positive decoy scheme, the event trust contract, an observe-first rollout with
+  a runtime kill-switch, and 16 completeness gaps. Section 4 lists thirteen
+  defects present today independent of guacd's version (connect-parameter
+  passthrough, no `select` pin, `--allow-target` never invoked, `any:*` reaching
+  the password-less qemu VNC consoles, gate/door credentials round-tripping
+  through the browser, group-readable bridge/headless credential files).
+- `docs/CVE.md`: guacd is a VNC client here, so CVE-2023-43826's class is in
+  path (was "not applicable / RDP-only"); the reverse-RDP surface is `xfreerdp3`
+  on the host, not guacd; the live image is Janua 1.0.1 = guacd 1.6.0 +
+  FreeRDP 3.10.3, which closes all five named CVEs by version.
+
 ## 1.4.0.20260927 - 2026-09-27
 
 Installer contract: .env is placed and validated by install.sh, prerequisites have one
