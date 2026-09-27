@@ -20,7 +20,10 @@
 #   that only ever runs on a host being deployed to. install.sh runs in both
 #   roles, and a dev install that enables edy-rdp-relay.service would put two
 #   relays on one host fighting over one socket and one nftables table.
-#   It VERIFIES those prerequisites and refuses with the command that fixes them.
+#   It VERIFIES those prerequisites: the relay user and group it refuses without
+#   (naming the command that creates them); the OS packages it REPORTS against
+#   requires.txt (check 8b) and links anyway - the relay's start-time bootstrap
+#   is what refuses to start until they exist, with the exact fix command.
 #
 #   It never touches cockpit.socket. Cockpit is live on this host and rescans its
 #   package directory when a session starts; a page reload is enough.

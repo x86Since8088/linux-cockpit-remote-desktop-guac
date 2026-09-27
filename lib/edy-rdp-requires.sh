@@ -75,6 +75,14 @@ req_version_ge() {
     local have min=$2 first
     have="$(req_norm "$1")"
     [[ -n "$have" ]] || return 1
+    # Same number of components on both sides first: sort -V ranks '4' BELOW
+    # '4.0', so a tool that reports a major-only version would fail a minimum
+    # it meets, and the bootstrap would keep the relay down over it.
+    local -a hc mc
+    IFS=. read -ra hc <<<"$have"; IFS=. read -ra mc <<<"$min"
+    while (( ${#hc[@]} < ${#mc[@]} )); do hc+=(0); done
+    while (( ${#mc[@]} < ${#hc[@]} )); do mc+=(0); done
+    have="$(IFS=.; printf '%s' "${hc[*]}")"; min="$(IFS=.; printf '%s' "${mc[*]}")"
     first="$(printf '%s\n%s\n' "$min" "$have" | sort -V | sed -n 1p)"
     [[ "$first" == "$min" ]]
 }

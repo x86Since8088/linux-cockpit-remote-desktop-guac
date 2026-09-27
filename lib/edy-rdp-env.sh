@@ -133,7 +133,9 @@ env_check_values() {
         case "$k" in
           EDY_RDP_GUACD)
             port="${v##*:}"
-            if [[ ! "$v" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || (( port < 1 || port > 65535 )); then
+            # 10#: without it bash reads a leading zero as octal, '08' is an
+            # arithmetic ERROR, and an error in the || chain is not a refusal.
+            if [[ ! "$v" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
                 printf '%s: must be host:port\n' "$k"; rc=1; fi ;;
           EDY_RDP_STATE_FILE)
             [[ "$v" == /* ]] || { printf '%s: must be an absolute path\n' "$k"; rc=1; } ;;
@@ -212,11 +214,17 @@ env_place() {
         {
             printf '# %s - placed by install.sh %s on %s from .envdefault. Edit values here;\n' "$file" "$version" "$today"
             printf '#   a re-install appends keys a new version adds and NEVER changes yours.\n'
-            tail -n +2 -- "$defaults"
+            # The header this replaces is a COMMENT line. A DEFAULTS whose first
+            # line is an assignment keeps it - dropping line 1 unconditionally
+            # would silently lose a key.
+            if [[ "$(sed -n 1p -- "$defaults")" == \#* ]]; then tail -n +2 -- "$defaults"; else cat -- "$defaults"; fi
         } > "$file.new" || { rm -f -- "$file.new"; return 1; }
         chmod 0644 -- "$file.new" && mv -f -- "$file.new" "$file" || { rm -f -- "$file.new"; return 1; }
         printf 'placed\n'; return 0
     fi
+    # Append only into the regular file we expect: '>>' follows a symlink, and
+    # this runs as root.
+    [[ -f "$file" && ! -L "$file" ]] || { printf 'file: %s is not a regular file - refusing to append\n' "$file"; return 1; }
     local have k v added=() lines=()
     have="$(env_keys "$file")"
     while IFS=$'\t' read -r k v; do

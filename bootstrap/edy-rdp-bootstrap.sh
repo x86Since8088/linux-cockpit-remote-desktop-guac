@@ -39,6 +39,13 @@ umask 022
 
 # Libs: beside this script's REAL path (the libexec link resolves into the payload),
 # overridable for tests. Do not hardcode /usr/libexec here: a checkout runs this too.
+#
+# Not overridable AS ROOT. The unit's environment is root-owned end to end, but a
+# uid-0 resolver that sources shell code from wherever $EDY_RDP_LIBDIR points is
+# one misplaced EnvironmentFile= away from running someone else's library. The
+# tests run unprivileged and keep both overrides; the unit passes --install-conf
+# style paths as arguments if it ever needs to.
+if (( EUID == 0 )); then unset EDY_RDP_LIBDIR EDY_RDP_INSTALL_CONF; fi
 LIBDIR="${EDY_RDP_LIBDIR:-$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
 . "$LIBDIR/edy-rdp-env.sh"; . "$LIBDIR/edy-rdp-requires.sh"
 
@@ -125,6 +132,12 @@ SHAF="$VENV/.requirements.sha"
 OUT="$INSTALL_PATH/venv.env"
 n="$(req_pip_count "$REQUIREMENTS")"
 want_sha="$(req_sha256 "$REQUIREMENTS")"
+# Offline means offline: an option line (-i/--index-url, -f/--find-links,
+# --extra-index-url) inside requirements.txt sends pip to the network in spite
+# of --no-index. Requirements are names and pins; the wheels dir is the only source.
+if (( n > 0 )) && grep -qE '^[[:space:]]*-' -- "$REQUIREMENTS"; then
+    fail 3 "requirements.txt: option lines (-i, -f, --index-url, ...) are not allowed - the venv is built offline from $WHEELS"
+fi
 would=0   # --check: would we write anything?
 # The install path exists on any deployed or dev host (it holds the payload);
 # a test pointing --install-path at a fresh directory gets it made.
