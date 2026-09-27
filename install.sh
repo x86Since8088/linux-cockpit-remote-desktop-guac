@@ -20,7 +20,10 @@
 #   that only ever runs on a host being deployed to. install.sh runs in both
 #   roles, and a dev install that enables edy-rdp-relay.service would put two
 #   relays on one host fighting over one socket and one nftables table.
-#   It VERIFIES those prerequisites and refuses with the command that fixes them.
+#   It VERIFIES those prerequisites: the relay user and group it refuses without
+#   (naming the command that creates them); the OS packages it REPORTS against
+#   requires.txt (check 8b) and links anyway - the relay's start-time bootstrap
+#   is what refuses to start until they exist, with the exact fix command.
 #
 #   It never touches cockpit.socket. Cockpit is live on this host and rescans its
 #   package directory when a session starts; a page reload is enough.
@@ -55,8 +58,15 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          waylandvnc/edy-rdp-waylandvnc-stop.sh:edy-rdp-waylandvnc-stop
          unlock/edy-rdp-unlock.sh:edy-rdp-unlock
          deskui/edy-rdp-deskui.sh:edy-rdp-deskui
-         rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin)
-LIBS=()
+         rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin
+         bootstrap/edy-rdp-bootstrap.sh:edy-rdp-bootstrap
+         pulse/edy-rdp-pulse-bind.sh:edy-rdp-pulse-bind)
+# Sourced libraries (not entry points): linked into $LIBEXECDIR beside the scripts
+# that source them, so a deployed host has ONE copy of the .env grammar and ONE
+# reading of requires.txt - the same code install.sh, deploy.sh and the start-time
+# bootstrap run.
+LIBS=(lib/edy-rdp-env.sh:edy-rdp-env.sh
+      lib/edy-rdp-requires.sh:edy-rdp-requires.sh)
 UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        edy-rdp-relay.service edy-rdp-reaper.service edy-rdp-reaper.timer
        edy-rdp-headless@.service edy-rdp-firewall.service
@@ -66,7 +76,11 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        # from their .in and their ExecStart resolves to a shipped LIBEXEC helper.
        # unlock@/waylandvnc@ were previously omitted here and only ever worked on
        # the dev host, where the units had been hand-placed (see docs/KNOWN_ISSUES).
-       edy-rdp-unlock@.service edy-rdp-waylandvnc@.service edy-rdp-deskui@.service)
+       edy-rdp-unlock@.service edy-rdp-waylandvnc@.service edy-rdp-deskui@.service
+       # Audio: a path unit per seat uid that binds the seat's pulse socket into the
+       # SHARED /run/edy-rdp-pulse the moment it appears (login), so it propagates into
+       # the running guacd container without a restart (KNOWN_ISSUES I42).
+       edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service)
 # System files that are COPIED (rendered where they carry a placeholder), because
 # the software that reads them - systemd-tmpfiles, dbus, polkit, nft - does not
 # follow a symlink out of its own configuration directory in every distro's
@@ -78,8 +92,13 @@ SYSFILES=(systemd/edy-rdp-tmpfiles.conf:/usr/lib/tmpfiles.d/edy-rdp.conf
           hardening/edy-rdp-headless.nft:/etc/nftables.d/edy-rdp-headless.nft)
 SEEDS=()
 ENVDEFAULT=.envdefault
+REQUIRES=requires.txt          # OS prerequisites + guacd image (parsed by lib/edy-rdp-requires.sh)
+REQUIREMENTS=requirements.txt  # pip requirements for the relay (empty today); non-empty => venv
+# Present AND non-empty in a placed .env, unless .envdefault ships the key empty
+# on purpose (EDY_RDP_REMOTE_ALLOW= is "feature off"; it is not listed here).
 REQUIRED_ENV=(EDY_RDP_GUACD EDY_RDP_ADMIN_GROUP EDY_RDP_STATE_FILE
-              EDY_RDP_LOG_LEVEL EDY_RDP_ALLOW_ARGS GUACD_IMAGE)
+              EDY_RDP_LOG_LEVEL EDY_RDP_ALLOW_ARGS GUACD_IMAGE GUACD_ENTRYPOINT
+              EDY_RDP_PULSE_SEAT_UID)
 UNITDIR=/etc/systemd/system
 LIBEXECDIR=/usr/libexec/edy-rdp
 RELAY_USER=edy-relay
@@ -92,6 +111,12 @@ RELAY_GROUP=edy-rdp
 # resolve its payload relative to the LINK's directory.
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SRC="$(cd -- "$(dirname -- "$SELF")" && pwd)"
+
+# Shared with deploy.sh and the start-time bootstrap: ONE .env grammar, ONE reading
+# of requires.txt. Sourced from the payload beside this file, so the deployed copy
+# and the checkout run the same code.
+. "$SRC/lib/edy-rdp-env.sh"
+. "$SRC/lib/edy-rdp-requires.sh"
 
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -265,6 +290,16 @@ render_sysfile_to_stdout() {
         -e "s|@ENV_FILE@|$ENV_FILE|g" "$src"
 }
 
+# Placeholders left on DIRECTIVE lines only. A '@WORD@' inside a '#' comment (the
+# @DEFAULT_MONITOR@ pulse note in the guacd unit) is documentation. ALWAYS exits 0:
+# under `set -Eeuo pipefail` a `grep -o` that matches nothing - the SUCCESS case -
+# returns 1, and `x="$(... | grep -o ...)"` then aborts the script with no message.
+# That is exactly how every install and --verify died silently after "ok 3b." from
+# 1.3.0 to 1.3.2 (KNOWN_ISSUES I41). `|| true` is load-bearing here.
+leftover_placeholders() {   # $1 = file, or '-' for stdin; prints "@A@ @B@ " or nothing
+    grep -v '^[[:space:]]*#' -- "${1:--}" | grep -o '@[A-Z_]\+@' | sort -u | tr '\n' ' ' || true
+}
+
 libexec_src()  { printf '%s\n' "$SRC/${1%%:*}"; }
 libexec_name() { printf '%s\n' "${1#*:}"; }
 
@@ -278,14 +313,15 @@ preflight() {
     for f in "${PAGE[@]}";      do [[ -f "$SRC/$f" ]] || miss+=("$f"); done
     for f in "${PAGE_DIRS[@]}"; do [[ -d "$SRC/$f" ]] || miss+=("$f/"); done
     for f in "${LIBEXEC[@]}";   do [[ -f "$(libexec_src "$f")" ]] || miss+=("${f%%:*}"); done
+    for f in "${LIBS[@]}";      do [[ -f "$(libexec_src "$f")" ]] || miss+=("${f%%:*}"); done
     for f in "${UNITS[@]}"; do
         [[ -f "$SRC/systemd/$f.in" || -f "$SRC/systemd/$f" ]] || miss+=("systemd/$f")
     done
     for f in "${SYSFILES[@]}";  do [[ -f "$SRC/${f%%:*}" ]] || miss+=("${f%%:*}"); done
-    [[ -f "$SRC/$ENVDEFAULT" ]] || miss+=("$ENVDEFAULT")
+    for f in "$ENVDEFAULT" "$REQUIRES" "$REQUIREMENTS"; do [[ -f "$SRC/$f" ]] || miss+=("$f"); done
     ((${#miss[@]}==0)) || die "declared but missing from $SRC: ${miss[*]}
     Nothing was changed."
-    ok "1. every declared file is present (${#LIBEXEC[@]} libexec, ${#UNITS[@]} units, ${#SYSFILES[@]} system files)"
+    ok "1. every declared file is present (${#LIBEXEC[@]} libexec, ${#LIBS[@]} libs, ${#UNITS[@]} units, ${#SYSFILES[@]} system files)"
 
     # 2. the page asks only for what is shipped. Parsed, not grepped.
     local refs r bad=()
@@ -332,9 +368,10 @@ PY
     #     edy-rdp-rotate-rdplogin was found - shipped in the repo, named by a
     #     unit, and installed by nothing.
     local wanted names
-    names="$(for f in "${LIBEXEC[@]}"; do libexec_name "$f"; done | sort -u)"
+    names="$(for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do libexec_name "$f"; done | sort -u)"
     wanted="$(grep -ohE "$LIBEXECDIR/[A-Za-z0-9_.-]+" \
-                 "$SRC"/systemd/* "$SRC"/relay/*.py "$SRC"/bridge/* "$SRC"/headless/* 2>/dev/null \
+                 "$SRC"/systemd/* "$SRC"/relay/*.py "$SRC"/bridge/* "$SRC"/headless/* \
+                 "$SRC"/bootstrap/* "$SRC"/pulse/* "$SRC"/lib/* 2>/dev/null \
               | sed 's#.*/##' | sort -u || true)"
     # units carry @LIBEXEC@ rather than the literal, so render them too
     for f in "${UNITS[@]}"; do
@@ -356,12 +393,14 @@ PY
     local out p
     for f in "${UNITS[@]}"; do
         out="$(render_unit_to_stdout "$f")" || exit 1
-        # A '@WORD@' inside a '#' comment (e.g. the @DEFAULT_MONITOR@ pulse token a
-        # note names) is documentation, not a placeholder the renderer consumes;
-        # scan only the non-comment directive lines for leftovers.
         local leftover
-        leftover="$(grep -v '^[[:space:]]*#' <<<"$out" | grep -o '@[A-Z_]\+@' | sort -u | tr '\n' ' ')"
-        [[ -n "$leftover" ]] && die "unrendered placeholder in $f: $leftover"
+        leftover="$(leftover_placeholders - <<<"$out")"
+        [[ -z "$leftover" ]] || die "unrendered placeholder in $f: $leftover"
+        # The program is the first word after the Exec*= prefix flags ('+' runs the
+        # bootstrap as root, '-' tolerates failure). systemd will not take a variable
+        # as the program, so the python units exec '/usr/bin/env ${EDY_RDP_PYTHON}
+        # <script>': skip that prefix or the relay and reaper silently drop out of
+        # this check. `|| true`: the no-match case is not an error here either.
         while read -r p; do
             [[ -z "$p" ]] && continue
             case "$p" in
@@ -369,58 +408,52 @@ PY
                  printf '%s\n' "$names" | grep -qxF -- "${p##*/}" \
                    || die "$f: ExecStart=$p is not something LIBEXEC installs" ;;
             esac
-        done < <(grep -oE '^Exec[A-Za-z]*=-?[^ ]+' <<<"$out" | sed 's/^Exec[A-Za-z]*=-\?//')
+        done < <(grep -oE '^Exec[A-Za-z]*=[-+!@:]*(/usr/bin/env +\$\{EDY_RDP_PYTHON\} +)?[^ ]+' <<<"$out" \
+                 | sed -E 's/^Exec[A-Za-z]*=[-+!@:]*//; s#^/usr/bin/env +\$\{EDY_RDP_PYTHON\} +##' || true)
     done
     ok "5. every unit renders clean and every ExecStart resolves to a shipped file"
 
-    # 6. .envdefault parses and defines every REQUIRED_ENV key
-    python3 - "$SRC/$ENVDEFAULT" "${REQUIRED_ENV[@]}" <<'PY' || exit 1
-import re, sys
-path, required = sys.argv[1], sys.argv[2:]
-seen = {}
-for n, raw in enumerate(open(path, encoding="utf-8"), 1):
-    line = raw.strip()
-    if not line or line.startswith("#"):
-        continue
-    if "=" not in line:
-        sys.exit("FATAL %s:%d: not KEY=VALUE" % (path, n))
-    k, v = (x.strip() for x in line.split("=", 1))
-    if not re.match(r"^[A-Z][A-Z0-9_]*$", k):
-        sys.exit("FATAL %s:%d: bad key %r" % (path, n, k))
-    if len(v) >= 2 and v[0] == v[-1] == '"':
-        v = v[1:-1]
-    if "$" in v or "`" in v:
-        sys.exit("FATAL %s:%d: %s contains $ or ` - no interpolation "
-                 "(DEPLOY-CONTRACT 4.1)" % (path, n, k))
-    seen[k] = v
-missing = [k for k in required if k not in seen]
-if missing:
-    sys.exit("FATAL %s does not define: %s" % (path, " ".join(missing)))
-PY
-    ok "6. $ENVDEFAULT parses and defines every REQUIRED_ENV key"
+    # 6. .envdefault - the seed every placed .env derives from - must itself pass
+    #    the whole gate (grammar, every REQUIRED_ENV key, no secret shape, every
+    #    per-key rule), or place_env would ship a file it then refuses. Same lib
+    #    the bootstrap runs at every relay start. --staged: the seed's
+    #    EDY_RDP_ADMIN_GROUP describes a deploy host, not this one.
+    local problems
+    if ! problems="$(env_validate "$SRC/$ENVDEFAULT" "$SRC/$ENVDEFAULT" --staged "${REQUIRED_ENV[@]}")"; then
+        die "$SRC/$ENVDEFAULT does not validate:
+$(sed 's/^/    /' <<<"$problems")
+    The seed must pass what a placed .env must pass."
+    fi
+    ok "6. $ENVDEFAULT parses, validates and defines every REQUIRED_ENV key"
 
-    # 7. on install: .env exists and sets every REQUIRED_ENV key
-    if [[ "$ACTION" == install ]]; then
-        [[ -f "$ENV_FILE" ]] || die "$ENV_FILE does not exist.
-    Run deploy.sh first, or create it from $SRC/$ENVDEFAULT. install.sh never
-    writes .env - seeding is deploy.sh's job, and missing-only."
-        local k v missing_k=()
-        for k in "${REQUIRED_ENV[@]}"; do
-            v="$(sed -n "s/^${k}=//p" "$ENV_FILE" | tail -1 | sed 's/^"//; s/"$//')"
-            [[ -n "$v" ]] || missing_k+=("$k")
-        done
-        ((${#missing_k[@]}==0)) || die "$ENV_FILE does not set: ${missing_k[*]}
-    Copy them from $SRC/$ENVDEFAULT. deploy.sh seeds missing-only and cannot add
-    a key to a file you already own."
-        ok "7. $ENV_FILE sets every REQUIRED_ENV key"
-
+    # 7. the host's .env, read-only here. Absent on install is fine: place_env
+    #    derives it from .envdefault before anything is linked. Present: the keys
+    #    it HAS must be well-formed; required-ness is not asked yet because
+    #    reconcile is about to append whatever a new version adds - the Sep-18
+    #    deploy died right here, refusing two missing keys it could have added.
+    local staged=""
+    [[ -n "$D" ]] && staged=--staged
+    if [[ ! -f "$ENV_FILE" ]]; then
+        if [[ "$ACTION" == install ]]; then ok "7. $ENV_FILE absent - will be placed from $ENVDEFAULT"
+        else fail "$ENV_FILE is missing"; fi
+    else
+        # shellcheck disable=SC2086
+        if problems="$(env_validate "$ENV_FILE" "$SRC/$ENVDEFAULT" $staged --present-only)"; then
+            ok "7. $ENV_FILE validates (present keys)"
+        elif [[ "$ACTION" == install ]]; then
+            die ".env does not validate:
+$(sed 's/^/    /' <<<"$problems")
+  Nothing was changed. Fix $ENV_FILE and re-run."
+        else
+            while IFS= read -r p; do [[ -n "$p" ]] && fail ".env: $p"; done <<<"$problems"
+        fi
+    fi
+    if [[ "$ACTION" == install && -e "$LEGACY_DEFAULT" ]]; then
         # The migration this version performs, stated where it is noticed.
-        if [[ -e "$LEGACY_DEFAULT" ]]; then
-            warn "$LEGACY_DEFAULT still exists and is NO LONGER READ.
+        warn "$LEGACY_DEFAULT still exists and is NO LONGER READ.
        Its settings now live in $ENV_FILE. Nothing here deletes it - it is your
        file - but two config files where one is ignored is how an operator
        changes a setting that never takes effect. Compare them, then remove it."
-        fi
     fi
 
     # 8. prerequisites this installer verifies but does not create
@@ -435,13 +468,27 @@ PY
         groupadd --system $RELAY_GROUP
         useradd --system --no-create-home --shell /usr/sbin/nologin -g $RELAY_GROUP $RELAY_USER"
         ok "8. $RELAY_USER:$RELAY_GROUP exist (uid $(id -u "$RELAY_USER"))"
+
+        # 8b. the OS prerequisites, from the one list (requires.txt), presence and
+        #     minimum version. REPORT ONLY, never die: a dev install on a box that
+        #     lacks x11vnc must still link, and the relay's bootstrap is where a
+        #     missing prerequisite actually stops something.
+        req_load "$SRC/$REQUIRES" || die "cannot parse $REQUIRES"
+        if req_check; then
+            ok "8b. $REQUIRES: all ${#REQ_NAMES[@]} prerequisites present at or above minimum"
+        else
+            warn "prerequisites missing or below minimum (above). The relay's bootstrap refuses to
+       start until they exist. Fix: $(req_fix_command "${REQ_MISSING[@]}" "${REQ_OUTDATED[@]}")
+       (or: sudo ./deploy.sh --with-deps)"
+        fi
     fi
 
     # 9. no retired path, and no dev root, in anything being shipped.
     # $SELF is scanned too. It carries no full dev-root literal: DEV_ROOT is
     # assembled from parts precisely so this audit can include its own scanner.
-    local shipped=("${PAGE[@]/#/$SRC/}" "$SRC/$ENVDEFAULT" "$SRC"/systemd/* "$SRC"/hardening/* "$SELF")
-    for f in "${LIBEXEC[@]}"; do shipped+=("$(libexec_src "$f")"); done
+    local shipped=("${PAGE[@]/#/$SRC/}" "$SRC/$ENVDEFAULT" "$SRC/$REQUIRES" "$SRC/$REQUIREMENTS"
+                   "$SRC"/systemd/* "$SRC"/hardening/* "$SELF")
+    for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do shipped+=("$(libexec_src "$f")"); done
     if grep -RIn -e "$RETIRED_ROOT" -e "$DEV_ROOT" -- "${shipped[@]}" 2>/dev/null; then
         die "a shipped file hardcodes a retired or development path (above).
     It belongs in .env."
@@ -451,6 +498,14 @@ PY
 
 # ---------------------------------------------------------------------------
 dev_install_notice() {
+    # A regular file where a link belongs is not ours at all - a hand copy
+    # (edt1 had one, plus ~45 .bak files: KNOWN_ISSUES I43). readlink -f on it
+    # returns its own path, and the layout test below then called it "a checkout
+    # at /usr/share/cockpit/guac-rdp". Say what it is instead.
+    if [[ -e "$CPKGDIR/index.html" && ! -L "$CPKGDIR/index.html" ]]; then
+        printf '\n  NOTE: %s/index.html is NOT a symlink (hand-copied?). This installer only ever\n        links; a regular file here is not ours and blocks owned_by_us. See docs/KNOWN_ISSUES.md I43.\n\n' "$CPKGDIR"
+        return 0
+    fi
     # Ask the LINK TARGET's layout, not this script's: an operator may be
     # running the deployed installer to tear down links a dev install made.
     local t
@@ -482,23 +537,136 @@ do_verify() {
         elif [[ ! -d "$CPKGDIR/$f" ]]; then fail "$CPKGDIR/$f is not a directory"
         else ok "$CPKGDIR/$f is a real directory of $(find "$CPKGDIR/$f" -mindepth 1 -maxdepth 1 | wc -l) link(s)"; fi
     done
-    for f in "${LIBEXEC[@]}"; do
+    for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do
         n="$(libexec_name "$f")"
         [[ -L "$LIBEXECDIR_D/$n" ]] && ok "$LIBEXECDIR_D/$n -> $(readlink -f -- "$LIBEXECDIR_D/$n")" \
                                     || fail "$LIBEXECDIR_D/$n is not a symlink"
     done
     for f in "${UNITS[@]}"; do
-        [[ -f "$UNITDIR_D/$f" ]] && ok "$UNITDIR_D/$f present" || fail "$UNITDIR_D/$f is missing"
-        grep -q '@[A-Z_]\+@' "$UNITDIR_D/$f" 2>/dev/null && fail "$UNITDIR_D/$f has an unsubstituted placeholder"
+        [[ -f "$UNITDIR_D/$f" ]] && ok "$UNITDIR_D/$f present" || { fail "$UNITDIR_D/$f is missing"; continue; }
+        [[ -z "$(leftover_placeholders "$UNITDIR_D/$f")" ]] || fail "$UNITDIR_D/$f has an unsubstituted placeholder"
     done
     for f in "${SYSFILES[@]}"; do
         [[ -f "$D${f#*:}" ]] && ok "$D${f#*:} present" || fail "$D${f#*:} is missing"
     done
     [[ -f "$INSTALL_CONF" ]] && ok "$INSTALL_CONF present" || fail "$INSTALL_CONF is missing"
     [[ -f "$ENV_FILE" ]] && ok "$ENV_FILE present" || fail "$ENV_FILE is missing"
+    verify_host_state
     dev_install_notice
     [[ $RC -eq 0 ]] && printf 'verify: PASS\n' || printf 'verify: FAIL\n'
     return $RC
+}
+
+# The checks that ask the HOST, not the tree: does what is RUNNING match what is
+# CONFIGURED. Each says 'skipped' with the reason when it cannot know (staged,
+# not root, unit not active) rather than reporting a FAIL it did not observe -
+# a --verify run unprivileged must stay honest and stay green.
+verify_host_state() {
+    printf 'host state\n'
+    local problems p want running seat uid sock n ve py sha
+    # 1. the .env, the whole gate this time (check 7 asked only about present keys)
+    if [[ -f "$ENV_FILE" ]]; then
+        # shellcheck disable=SC2086
+        if problems="$(env_validate "$ENV_FILE" "$SRC/$ENVDEFAULT" ${D:+--staged} "${REQUIRED_ENV[@]}")"; then
+            ok ".env validates with every REQUIRED_ENV key"
+        else
+            while IFS= read -r p; do [[ -n "$p" ]] && fail ".env: $p"; done <<<"$problems"
+        fi
+    fi
+    # 2. the running guacd image is the configured one (a hand-switched .env with
+    #    a container started before the switch is exactly the drift this catches)
+    if   [[ -n "$D" ]];      then say skipped "running guacd image (staged)"
+    elif [[ $EUID -ne 0 ]];  then say skipped "running guacd image (needs root)"
+    elif ! systemctl is-active -q edy-rdp-guacd.service 2>/dev/null; then
+         say skipped "running guacd image (edy-rdp-guacd.service not active)"
+    else
+        running="$(podman inspect edy-rdp-guacd --format '{{.ImageName}}' 2>/dev/null || true)"
+        want="$(env_get "$ENV_FILE" GUACD_IMAGE 2>/dev/null || true)"
+        if [[ -n "$want" && "$running" == "$want" ]]; then ok "running guacd image matches GUACD_IMAGE ($want)"
+        else fail "running guacd image is '$running', GUACD_IMAGE is '$want' (systemctl restart edy-rdp-guacd.service)"; fi
+    fi
+    # 3. the patched gnome-remote-desktop must survive apt (patches/README.md):
+    #    held, and different from the stock backup the patch procedure leaves.
+    if [[ -z "$D" ]]; then
+        if ! command -v apt-mark >/dev/null 2>&1; then
+            say skipped "gnome-remote-desktop hold (no apt-mark on this host)"
+        elif apt-mark showhold 2>/dev/null | grep -qx gnome-remote-desktop; then
+            ok "gnome-remote-desktop is apt-mark held"
+        else
+            fail "gnome-remote-desktop is NOT apt-mark held - an upgrade will clobber the patched daemon (see patches/README.md)"
+        fi
+        local daemon=/usr/libexec/gnome-remote-desktop-daemon
+        if [[ ! -e "$daemon.orig-edt1" ]]; then
+            say skipped "gnome-remote-desktop patch state (no .orig-edt1 stock backup on this host)"
+        elif cmp -s "$daemon" "$daemon.orig-edt1"; then
+            fail "gnome-remote-desktop daemon is STOCK - 3390 greeter will fail; see patches/README.md"
+        else
+            ok "gnome-remote-desktop daemon is patched (differs from .orig-edt1 stock backup)"
+        fi
+    fi
+    # 4. the audio bind: once the seat socket exists it must be bound into the
+    #    SHARED dir the container mounts, or audio is dead until a restart (I42)
+    if [[ -z "$D" ]]; then
+        uid="$(env_get "$ENV_FILE" EDY_RDP_PULSE_SEAT_UID 2>/dev/null || true)"
+        sock="$(env_get "$ENV_FILE" EDY_RDP_PULSE_SEAT_SOCKET 2>/dev/null || true)"
+        seat="${EDY_RDP_PULSE_SEAT_SOCKET:-${sock:-/run/user/${uid:-1000}/pulse/native}}"
+        if [[ ! -S "$seat" ]]; then
+            say skipped "pulse bind (seat socket $seat absent - no seat login)"
+        elif ! findmnt -no PROPAGATION /run/edy-rdp-pulse 2>/dev/null | grep -q shared; then
+            fail "/run/edy-rdp-pulse is not a SHARED mountpoint (a later bind cannot reach the container; run edy-rdp-pulse-bind)"
+        elif mountpoint -q /run/edy-rdp-pulse/native 2>/dev/null; then
+            ok "/run/edy-rdp-pulse/native is a mountpoint (seat socket bound)"
+        else
+            fail "/run/edy-rdp-pulse/native is not a mountpoint while the seat socket exists (run /usr/libexec/edy-rdp/edy-rdp-pulse-bind, or check edy-rdp-pulse-seat@<uid>.path)"
+        fi
+    fi
+    # 5. venv.env agrees with requirements.txt (the bootstrap rewrites it at
+    #    every relay start; a mismatch here means the relay has not restarted
+    #    since requirements.txt changed, or the bootstrap failed - see the journal)
+    if [[ -n "$D" ]]; then
+        say skipped "venv.env (staged)"
+    else
+        n="$(req_pip_count "$SRC/$REQUIREMENTS")"; ve="$ROOT/venv.env"
+        sha="$(req_sha256 "$SRC/$REQUIREMENTS")"
+        if [[ ! -f "$ve" ]]; then
+            # "the relay is running" only means something when the running relay
+            # is THIS install: a checkout verified beside a deployed host must not
+            # report the deployed relay's venv.env as its own missing file.
+            local ip; ip="$(env_get "$INSTALL_CONF" INSTALL_PATH 2>/dev/null || true)"
+            if [[ -n "$ip" && "$ip" != "$ROOT" ]]; then
+                say skipped "venv.env (the running relay is another install, at $ip)"
+            elif systemctl is-active -q edy-rdp-relay.service 2>/dev/null; then
+                fail "$ve is missing although the relay is running (edy-rdp-bootstrap should have written it)"
+            else
+                say skipped "venv.env (edy-rdp-bootstrap has not run yet; it runs at relay start)"
+            fi
+        else
+            py="$(env_get "$ve" EDY_RDP_PYTHON 2>/dev/null || true)"
+            if (( n == 0 )); then
+                [[ "$py" == /usr/bin/python3 ]] && ok "venv.env: EDY_RDP_PYTHON=/usr/bin/python3 ($REQUIREMENTS is empty)" \
+                    || fail "venv.env points at $py but $REQUIREMENTS is empty (stale; the bootstrap rewrites it at relay start)"
+            elif [[ "$py" == "$ROOT/venv/bin/python3" && -x "$py" \
+                    && "$(cat "$ROOT/venv/.requirements.sha" 2>/dev/null)" == "$sha" ]]; then
+                ok "venv.env: venv current (requirements sha ${sha:0:8})"
+            else
+                fail "venv.env/venv is stale for $REQUIREMENTS (sha ${sha:0:8}); the bootstrap rebuilds it at relay start"
+            fi
+        fi
+    fi
+    # 6. the OS prerequisites, from the one list: presence AND minimum version,
+    #    one line per tool. Check 8b does this on a live install; --verify is
+    #    "the per-host report" (docs/COMPATIBILITY.md) and until 1.4.0 it said
+    #    nothing about them at all. Needs no root. Staged: a DESTDIR describes
+    #    some other machine, so its host is not asked.
+    if [[ -n "$D" ]]; then
+        say skipped "prerequisites (staged)"
+    elif ! req_load "$SRC/$REQUIRES"; then
+        fail "cannot parse $REQUIRES (above)"
+    elif req_check; then
+        ok "$REQUIRES: all ${#REQ_NAMES[@]} prerequisites present at or above minimum"
+    else
+        fail "prerequisites missing or below minimum: ${REQ_MISSING[*]} ${REQ_OUTDATED[*]} - the relay's bootstrap refuses to start. Fix: $(req_fix_command "${REQ_MISSING[@]}" "${REQ_OUTDATED[@]}")"
+    fi
 }
 
 do_uninstall() {
@@ -508,6 +676,8 @@ do_uninstall() {
         # Sockets before their service, or systemd starts the service again on
         # the next connection. Template units need their INSTANCES stopped.
         systemctl stop 'edy-rdp-headless@*' 2>/dev/null || true
+        systemctl stop 'edy-rdp-pulse-seat@*' 2>/dev/null || true
+        systemctl stop 'edy-rdp-pulse-rebind@*' 2>/dev/null || true
         for f in edy-rdp-relay.socket edy-rdp-control.socket "${UNITS[@]}"; do
             systemctl stop    "$f" 2>/dev/null || true
             systemctl disable "$f" 2>/dev/null || true
@@ -519,7 +689,7 @@ do_uninstall() {
         systemctl reset-failed 2>/dev/null || true   # else a removed unit lingers as failed
     fi
     for f in "${SYSFILES[@]}"; do remove_file "$D${f#*:}"; done
-    for f in "${LIBEXEC[@]}"; do n="$(libexec_name "$f")"; remove_link "$LIBEXECDIR_D/$n"; done
+    for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do n="$(libexec_name "$f")"; remove_link "$LIBEXECDIR_D/$n"; done
     # A __pycache__ left by a version that ran before PYTHONDONTWRITEBYTECODE.
     # Swept file by file and then rmdir'd - NOT `rm -r`, which is banned under
     # every one of these trees, and which here would be one typo away from
@@ -552,6 +722,8 @@ do_uninstall() {
     the $RELAY_GROUP group and the $RELAY_USER user  (uids outlive packages; a
       reused uid is a permission that silently belongs to somebody else)
     /run/edy-rdp                             (tmpfs; gone at reboot)
+    /run/edy-rdp-pulse                       (tmpfs; a seat socket bind, gone at reboot)
+    $ROOT/venv and $ROOT/venv.env            (the bootstrap's; only it removes them)
     the payload at $SRC
   cockpit.socket was NOT touched.
 
@@ -561,8 +733,30 @@ do_uninstall() {
 EOF
 }
 
+# The configuration, BEFORE anything is linked: a missing .env is derived from
+# .envdefault; a present one gains only the keys this version ships and it
+# lacks, values untouched; then the whole gate runs and a bad value refuses
+# the install naming the key. deploy.sh used to byte-copy the seed missing-only
+# and could not add a key to an operator's file - so an upgrade that added a key
+# died in check 7 until someone edited by hand (the Sep-18 deploy). --verify
+# never comes through here: it validates and writes nothing.
+place_env() {
+    printf '\nconfiguration\n'
+    local r problems
+    r="$(env_place "$SRC/$ENVDEFAULT" "$ENV_FILE" "$VERSION")" || die "could not place $ENV_FILE"
+    say "$( [[ $r == placed* ]] && echo placed || echo reconciled )" "$ENV_FILE ($r)"
+    # shellcheck disable=SC2086
+    if ! problems="$(env_validate "$ENV_FILE" "$SRC/$ENVDEFAULT" ${D:+--staged} "${REQUIRED_ENV[@]}")"; then
+        die "$ENV_FILE does not validate (fail closed; nothing was linked):
+$(sed 's/^/    /' <<<"$problems")
+    Fix the named key(s) in $ENV_FILE and re-run."
+    fi
+    ok "$ENV_FILE validates ($(env_keys "$ENV_FILE" | wc -l) keys)"
+}
+
 do_install() {
     preflight
+    place_env
     printf '\ninstall (%s)\n' "$KIND"
 
     install -d -m 0755 -- "$CPKGDIR"
@@ -583,7 +777,9 @@ do_install() {
     # resolves a symlinked script for sys.path[0], so edy_rdp_relay.py linked
     # here still imports session_registry/control/bridge out of the payload.
     install -d -m 0755 -- "$LIBEXECDIR_D"
-    for f in "${LIBEXEC[@]}"; do
+    # LIBS ride along: the scripts source them by the SAME directory, so a
+    # deployed host and a checkout resolve `$LIBEXECDIR/edy-rdp-env.sh` alike.
+    for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do
         n="$(libexec_name "$f")"
         link_one "$(libexec_src "$f")" "$LIBEXECDIR_D/$n"
     done
@@ -595,7 +791,7 @@ do_install() {
         local dst="$D${f#*:}"
         install -d -m 0755 -- "$(dirname -- "$dst")"
         render_sysfile_to_stdout "$SRC/${f%%:*}" > "$dst.new"
-        if grep -q '@[A-Z_]\+@' "$dst.new"; then
+        if [[ -n "$(leftover_placeholders "$dst.new")" ]]; then
             if [[ -n "$D" ]]; then
                 say staged "$dst (placeholders left: no live $RELAY_USER while staging)"
             else
@@ -612,7 +808,7 @@ do_install() {
         install -d -m 0755 -- "$UNITDIR_D"
         for f in "${UNITS[@]}"; do
             render_unit_to_stdout "$f" > "$UNITDIR_D/$f.new"
-            grep -q '@[A-Z_]\+@' "$UNITDIR_D/$f.new" && { rm -f "$UNITDIR_D/$f.new"
+            [[ -z "$(leftover_placeholders "$UNITDIR_D/$f.new")" ]] || { rm -f "$UNITDIR_D/$f.new"
                 die "unrendered placeholder in $f"; }
             chmod 0644 "$UNITDIR_D/$f.new"
             mv -f -- "$UNITDIR_D/$f.new" "$UNITDIR_D/$f"; say rendered "$UNITDIR_D/$f"
@@ -629,6 +825,11 @@ PAYLOAD=$SRC
 ENV_FILE=$ENV_FILE
 UNITDIR=$UNITDIR
 LIBEXECDIR=$LIBEXECDIR
+REQUIRED_ENV=${REQUIRED_ENV[*]}
+ENVDEFAULT=$SRC/$ENVDEFAULT
+REQUIRES=$SRC/$REQUIRES
+REQUIREMENTS=$SRC/$REQUIREMENTS
+WHEELS=$SRC/wheels
 VERSION=$VERSION
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 INSTALLED_BY=install.sh
@@ -665,6 +866,11 @@ EOF
         esac
     done
     ok "every libexec link resolves, and every entry point is executable"
+    for f in "${LIBS[@]}"; do
+        n="$(libexec_name "$f")"; t="$(readlink -f -- "$LIBEXECDIR_D/$n")"
+        [[ -e "$t" ]] || die "post-install: $LIBEXECDIR_D/$n dangles"
+    done
+    ok "every lib link resolves (sourced, not executed: no exec bit asked)"
     [[ "$(sed -n 's/^PAYLOAD=//p' "$INSTALL_CONF")" == "$SRC" ]] \
         || die "post-install: install.conf PAYLOAD does not match $SRC"
     ok "install.conf PAYLOAD resolves to the payload we linked"

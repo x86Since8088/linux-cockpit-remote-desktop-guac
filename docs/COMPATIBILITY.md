@@ -1,26 +1,39 @@
 # Compatibility & prerequisites
 
-`install.sh` auto-installs the OS prerequisites on a vanilla system using the host's
-package manager (`apt`/`dnf`/`pacman`/`zypper`). This page documents what it installs,
-the per-distro package names, and which distros are known-good.
+The OS prerequisites have **one source**, [../requires.txt](../requires.txt): a name, a
+`>=` minimum version and the pinned guacd image, one per line. `deploy.sh --with-deps`
+installs from it using the host's package manager (`apt`/`dnf`/`pacman`/`zypper`),
+`install.sh` reports against it (check 8b on a live install — a warning, never fatal, so
+a dev install on a box lacking x11vnc still links; and under `--verify`, one `ok`/`FAIL`
+line per tool with the detected version, a `FAIL` when anything is missing or below its
+minimum), and the relay's start-time bootstrap (`edy-rdp-bootstrap`) refuses to start
+the relay without them — it never installs a package at service start, it prints the
+exact fix and exits. All three read the file through `lib/edy-rdp-requires.sh`, which
+also holds the per-distro package-name mapping below. This page documents what that
+list is, the package names, and which distros are known-good.
 
 ```bash
-sudo ./install.sh              # installs prerequisites, then the plugin + relay + units
-sudo ./install.sh --deps-only  # only the prerequisites, then stop
-sudo ./install.sh --skip-deps  # assume prerequisites are already present
+sudo ./deploy.sh --with-deps   # install the prerequisites from requires.txt, then deploy
+sudo ./deploy.sh               # deploy assuming they are present (reports what is missing)
+./install.sh --verify          # the per-host report: one line per prerequisite with its
+                               # detected version (no root needed; "skipped (staged)" under DESTDIR)
 ```
 
-Detection is by **binary presence**, so re-running is idempotent (nothing already
-installed is touched). If no supported package manager is found, the installer prints
-the exact package list and stops.
+Detection is by **presence AND minimum version** from `requires.txt`: each tool is
+probed by its own version flag (`cockpit-bridge --version`, `podman --version`,
+`xfreerdp3 /version`, `x11vnc -version`, `nft --version`, ...). Xvfb has no version flag
+at all, so its version comes from the package manager (`dpkg-query`/`rpm`/`pacman`);
+a version that cannot be detected counts as present, not as a failure. Re-running is
+idempotent (nothing already installed is touched). If no supported package manager is
+found, the fix command names the packages to install by hand and stops.
 
 ## Prerequisites
 
 | Prereq | Proves-present binary | Why it's needed |
 |---|---|---|
 | Cockpit | `cockpit-bridge` + shell | hosts the plugin page, the TLS/websocket channel, and the navigation shell (needs `cockpit-system`, not just bridge+ws) |
-| podman | `podman` | runs the `guacamole/guacd` container (host-loopback, nftables-gated) |
-| Python 3 | `python3` | the privileged relay + reaper (stdlib only, no pip) |
+| podman | `podman` | runs the guacd container (host-loopback, nftables-gated) |
+| Python 3 | `python3` | the privileged relay + reaper (stdlib only; `requirements.txt` is empty — a non-empty one makes the bootstrap build a venv, which then needs `python3-venv`) |
 | FreeRDP 3 client | `xfreerdp3` / `xfreerdp` | the per-connection bridge that speaks NLA/RDSTLS to gnome-remote-desktop |
 | Xvfb | `Xvfb` | headless X server the bridge draws into |
 | x11vnc | `x11vnc` | exposes the bridge's Xvfb as a loopback VNC endpoint for guacd |
@@ -28,11 +41,16 @@ the exact package list and stops.
 | gnome-remote-desktop | `grdctl` | the RDP backend (console mirror, virtual monitor, per-user headless desktop) |
 | D-Bus tools | `dbus-send` | reload the handover policy drop-in; talk to the session bus |
 
-**guacd itself needs no native package** — it runs from the pinned
-`docker.io/guacamole/guacd:1.6.0` container image, which the installer pre-pulls via podman.
+**guacd itself needs no native package** — it runs from a container image pinned **by
+digest**: `ghcr.io/skylark-software/janua@sha256:2279eac0…` (Janua = guacd built against
+FreeRDP 3), with `GUACD_ENTRYPOINT=/usr/local/sbin/guacd`. The official
+`docker.io/guacamole/guacd:1.6.0` is FreeRDP 2, which lacks RDSTLS — the 3390 greeter
+handover and the Remote-host scenario break on it ([KNOWN_ISSUES](KNOWN_ISSUES.md) I26) —
+so it is kept only as a documented alternative. `deploy.sh --with-image` pre-pulls the
+pinned image and `install.sh --verify` checks the RUNNING container is that image.
 
-The exact pinned versions (and the guacd image digest) are recorded in
-[../requires.txt](../requires.txt).
+The minimum versions and the guacd image ref + digest are recorded in
+[../requires.txt](../requires.txt); the tested versions are in the matrix below.
 
 ## Per-distro package names
 
@@ -55,9 +73,11 @@ the project moved off guacd's bundled FreeRDP2; see [KNOWN_ISSUES](KNOWN_ISSUES.
 
 - The client binary is **`xfreerdp3`** on Debian/Ubuntu but **`xfreerdp`** (when it is v3)
   on Fedora/Arch/openSUSE. The bridge launcher calls `xfreerdp3` by name, so on those
-  distros the installer symlinks `/usr/local/bin/xfreerdp3 → xfreerdp`.
-- The installer verifies `xfreerdp /version` reports `3.x` and **refuses to proceed** on a
-  FreeRDP-2-only host rather than installing a stack that cannot connect.
+  distros `deploy.sh --with-deps` symlinks `/usr/local/bin/xfreerdp3 → xfreerdp`.
+- `requires.txt` says `freerdp >=3.0`; the lib's probe takes `xfreerdp3`, else `xfreerdp`
+  only when `xfreerdp /version` reports `version 3.`, so a FreeRDP-2-only host is reported
+  as **missing** and `deploy.sh --with-deps` **refuses to proceed** rather than deploying a
+  stack that cannot connect.
 
 ## Distro compatibility matrix
 

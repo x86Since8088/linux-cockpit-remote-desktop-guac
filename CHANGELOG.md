@@ -1,3 +1,76 @@
+## 1.4.0.20260927 - 2026-09-27
+
+Installer contract: .env is placed and validated by install.sh, prerequisites have one
+source, the relay bootstraps its interpreter at start, and the audio bind survives boot.
+
+- **The silent abort (I41).** Since 1.3.0 no install, deploy or `--verify` completed:
+  pre-flight check 5 built `leftover="$(... | grep -o ...)"` under `set -Eeuo pipefail`,
+  and a unit that renders CLEAN is the no-match case, so the assignment returned 1 and
+  `set -e` exited after "ok 3b." with no message. A second, comment-blind placeholder
+  grep would then have died on the `@DEFAULT_MONITOR@` note in the guacd unit. One
+  helper (`leftover_placeholders`, comment lines skipped, `|| true` load-bearing) now
+  serves check 5, unit placement and `--verify`; `run_tests.sh` runs a staged
+  `DESTDIR=... ./install.sh` to completion and requires "ok 9." (`install.sh`,
+  `run_tests.sh`, `tests/installer_tests.sh`).
+- **`.env` is placed, reconciled and validated by `install.sh`** — no longer byte-copied
+  by `deploy.sh`. Missing: derived from `.envdefault`. Present: every key a new version
+  ships and the file lacks is appended with the `.envdefault` value under a dated
+  `# added by install.sh <version>` comment; an existing value is never changed (this is
+  what blocked the Sep-18 deploy: `EDY_RDP_DESKUI_ENABLE`/`EDY_RDP_DOOR_USER` missing).
+  Then it is validated, fail closed, naming the key and reason: grammar, required keys,
+  secret-shaped values, and per-key rules (`EDY_RDP_GUACD` host:port, log level enum,
+  absolute paths, `EDY_RDP_ADMIN_GROUP` must exist, 0/1 flags, a stale 1.3.x
+  `PULSE_SERVER`). `--verify` validates and writes nothing. The grammar and the
+  secret check live once, in `lib/edy-rdp-env.sh`, shared by `install.sh`, `deploy.sh`
+  and the bootstrap. The `/etc/default/edy-rdp` migration stays in `deploy.sh`.
+- **`requires.txt` is the one prerequisite list.** It now ships in the payload and
+  `lib/edy-rdp-requires.sh` parses it (name, `>=` minimum, the `guacd-image` line) and
+  checks presence AND version; `deploy.sh --with-deps`, `install.sh` (check 8b) and the
+  bootstrap all read it. `deploy.sh`'s hardcoded `PREREQS` list is gone; the distro
+  package-name mapping moved into the lib so the bootstrap can print the exact fix.
+- **Start-time bootstrap + venv.** `edy-rdp-bootstrap` runs as `ExecStartPre=+` of the
+  relay (root, exempt from `NoNewPrivileges`/`ProtectSystem`): validates `.env`, verifies
+  prerequisites (never installs at service start), and — only when `requirements.txt`
+  names something — builds `[install path]/venv` OFFLINE from wheels `deploy.sh` vendors
+  into `payload/wheels/` (`--wheels <dir>` for hosts without index access), rebuilds it
+  when the file's sha256 changes, and writes `venv.env`. Units run
+  `/usr/bin/env ${EDY_RDP_PYTHON} ...` (systemd will not take a variable as the program)
+  with `/usr/bin/python3` as the documented fallback. `requirements.txt` is empty today:
+  the relay is stdlib-only.
+- **Audio bind that survives boot (I42).** guacd's one-shot `ExecStartPre=-` bind of the
+  seat pulse socket left a 0-byte file when guacd started before login and never
+  retried; the rprivate `-v` meant a later bind could not reach the container. Now
+  `edy-rdp-pulse-bind` makes `/run/edy-rdp-pulse` a SHARED mount, binds the socket in as
+  `native`, the container mounts it `:ro,rslave` (host → container only; guacd cannot
+  write into the host directory), and `edy-rdp-pulse-seat@<uid>.path` — `PathChanged=`
+  on `/run/user/<uid>/pulse`, because `PathExists=` on the socket busy-loops a oneshot
+  into `StartLimitBurst` and fails the path unit itself — rebinds at every login;
+  `deploy.sh --with-units` enables it from the new `EDY_RDP_PULSE_SEAT_UID` and starts
+  the rebind once for a seat already logged in. Audio for the next session with no
+  restart. The script vets what root mounts: `lstat` only, no symlink on any
+  user-owned component or on the target, a socket owned by the seat uid, the mount
+  re-read and undone if it is not the vetted socket. `PULSE_SERVER` becomes
+  `unix:/run/pulse/native`. Live verification on edt1 pending.
+- **`deploy.sh` refuses a stale `.env` BEFORE it changes the host.** Its pre-flight runs
+  the same present-keys validation as `install.sh` check 7 on the live `.env` (or the
+  legacy `/etc/default/edy-rdp` about to be migrated) and dies `DEPLOY FAILED
+  (pre-flight)` with the key and the fix — instead of copying, swapping the alias and
+  then dying from the installed `install.sh`, which is the half-deployed state I43.
+  `tests/installer_tests.sh` now runs `deploy.sh` itself staged end to end (`DEPLOY OK`,
+  then `DEPLOY VERIFY OK`) and proves the pre-swap refusal leaves no payload behind.
+- **Janua is the default guacd.** `GUACD_IMAGE` pins
+  `ghcr.io/skylark-software/janua@sha256:2279eac0…` with `GUACD_ENTRYPOINT=/usr/local/sbin/guacd`;
+  the official image is FreeRDP 2 (no RDSTLS: 3390 greeter and remote RDP break).
+- **`--verify` now also checks:** `.env` validity; running container image ==
+  `GUACD_IMAGE`; `gnome-remote-desktop` apt hold and patched daemon (vs `.orig-edt1`);
+  the pulse socket mountpoint; `venv.env` vs `requirements.txt`; every `requires.txt`
+  prerequisite with its detected version (one line each, no root needed; "skipped
+  (staged)" under DESTDIR); and reports "NOT a symlink (hand-copied?)" instead of
+  claiming a dev checkout. `deploy.sh` ends with an
+  unmistakable `DEPLOY OK <version>` / `DEPLOY FAILED (<step>)`.
+- Docs: KNOWN_ISSUES I41–I44 (silent abort; audio bind; edt1 half-deployed reclaim;
+  stale pipewire TCP listener), README, COMPATIBILITY, TROUBLESHOOTING, AUDIO.
+
 ## 1.3.2.20260918 - 2026-09-18
 
 Fix: clipboard auto-sync threw an uncaught promise rejection when unfocused.

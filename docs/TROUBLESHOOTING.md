@@ -17,6 +17,11 @@ HTTPS channel.
 | Relay socket present | `ls -l /run/edy-rdp/guacd.sock` | mode `0660`, group `edy-rdp` |
 | Reaper timer | `systemctl status edy-rdp-reaper.timer` | `active (waiting)` |
 | Credential rotation | `systemctl list-timers edy-rdp-rotate-rdplogin.timer` | next run shown |
+| Start-time bootstrap | `journalctl -u edy-rdp-relay -g bootstrap` | `[bootstrap] env OK`, `prereqs OK`, `venv.env: unchanged` (or `wrote`) at the last start; never a `FAIL` line |
+| Interpreter in use | `cat /opt/cockpit-guac-rdp/venv.env` | `EDY_RDP_PYTHON=/usr/bin/python3` while `requirements.txt` is empty; the venv's python3 once it is not |
+| Pulse bind (audio) | `mountpoint /run/edy-rdp-pulse/native` + `findmnt -o TARGET,PROPAGATION /run/edy-rdp-pulse` | `is a mountpoint` after a seat login; propagation `shared` |
+| Pulse rebind trigger | `systemctl status edy-rdp-pulse-seat@1000.path` | `active (waiting)` (uid from `EDY_RDP_PULSE_SEAT_UID`) |
+| Whole-host gate | `sudo ./deploy.sh --verify` | ends `DEPLOY VERIFY OK`; the `install.sh --verify` block inside ends `verify: PASS` |
 
 ## Live logs (never contain secrets — the trace redacts them)
 
@@ -32,6 +37,36 @@ session tokens are always `<redacted:LEN>` — the token is only ever logged as
 `session token OK admin=True|False`.
 
 ## Symptom → cause → fix
+
+**Relay does not start; the journal shows `[bootstrap] FAIL env: KEY: reason`.** The
+relay's `ExecStartPre` (`edy-rdp-bootstrap`) validated `[install path]/.env` and refused
+— on purpose: a relay started on built-in defaults it was never configured with is worse
+than one that did not start. Fix the named key in `.env` (the reason says what shape it
+must have — `host:port`, an absolute path, one of `DEBUG INFO WARNING ERROR`, `0`/`1`, a
+group that exists, no `$`, nothing that looks like a secret) and
+`systemctl restart edy-rdp-relay.service`. `./install.sh --verify` reports the same
+problems without starting anything. A `FAIL prereq <name> ...` line instead means an OS
+prerequisite from `requires.txt` is missing or too old: the next line is the exact install
+command (`deploy.sh --with-deps` runs it for you; the bootstrap never installs at service
+start). A `FAIL venv: ...` line names a venv that could not be built offline — the wheels
+for every `requirements.txt` line must be in the payload's `wheels/` (`deploy.sh --wheels`).
+
+**Sound toggle produces nothing; `podman logs edy-rdp-guacd` says `PulseAudio connection
+failed`.** The seat's pulse socket is not bound into `/run/edy-rdp-pulse/native`. Check
+`journalctl -t edy-rdp-pulse-bind` for the last outcome (`bound ...`, `seat socket absent`
+or a real mount error), that `edy-rdp-pulse-seat@<uid>.path` is active for the seat uid in
+`.env`, and run `/usr/libexec/edy-rdp/edy-rdp-pulse-bind --check` for the plan. A 1.3.x
+`.env` still saying `PULSE_SERVER=unix:/run/pulse.sock` is refused as stale — it is
+`unix:/run/pulse/native` now. Details and the live-verification steps: [AUDIO.md](AUDIO.md),
+[KNOWN_ISSUES](KNOWN_ISSUES.md) I42.
+
+**`deploy.sh` printed `DEPLOY FAILED (<step>)`.** The step name says which phase died; the
+lines above it are the reason (`install.sh` prints `FATAL ...` with the fix).
+`(pre-flight)` means nothing on the host was touched — most often the live `.env` carries
+a value the new version refuses (the key and reason are named; a 1.3.x `PULSE_SERVER` is
+the usual one): fix it and re-run. A deploy that
+ends any other way than `DEPLOY OK <version>` did not complete — before 1.4.0 the installer
+could stop silently after `ok 3b.` and leave a half-linked host (I41, I43).
 
 **Plugin menu entry missing / stale.** Cockpit caches the package manifest. Hard-reload
 (`Ctrl-Shift-R`). A stale copy under `~/.local/share/cockpit/guac-rdp` shadows the system

@@ -2,9 +2,15 @@
 # run_tests.sh - phase-4 custom_validator for cockpit-guac-rdp.
 # Non-zero exit fails the orchestrator's Test Execution phase. Runs where the
 # repo sits; the Playwright portion is skipped (with a clear notice) if Cockpit
-# or the test deps are unavailable, but the security/unit checks always run.
+# or the test deps are unavailable, but the security/unit checks always run,
+# and so does tests/installer_tests.sh: a staged (DESTDIR) install of a temp
+# copy of this tree, run to completion, then --verify, .env placement and
+# validation, requires.txt parsing, the bootstrap's venv decision and the
+# pulse-bind plan. All non-root, nothing on the host touched.
 set -Eeuo pipefail
 SRC="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# The greps below name paths relative to the repo root; run from anywhere.
+cd -- "$SRC"
 fail=0
 
 echo "== py_compile relay =="
@@ -39,14 +45,19 @@ echo "== DEPLOY-CONTRACT standing greps (section 4.4) =="
 # Each must print nothing. These are cheap and they are the checks that catch a
 # payload quietly growing a path back into a checkout.
 g=0
+# The verdict is "did grep PRINT anything", not grep's exit status: a listed
+# path that does not exist (a directory a version has not grown yet) makes grep
+# return 2 even when it also found a hit, and `if grep ...` would then read
+# that hit as a pass. Output is the fact; the rc is not.
+hits() { local h; h="$(grep -RIn --exclude-dir=.git "$@" 2>/dev/null || true)"
+         [[ -z "$h" ]] || { printf '%s\n' "$h"; return 0; }; return 1; }
 # 1. no shipped file names a source .env
-if grep -RIn --exclude-dir=.git -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
-     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ ./*.js ./*.sh 2>/dev/null; then
+if hits -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
+     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ ./*.js ./*.sh; then
   echo "  FAIL a shipped file names a source .env"; g=1; fi
 # 2. nothing resolves .env relative to itself
-if grep -RIn --exclude-dir=.git \
-     -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
-     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ 2>/dev/null; then
+if hits -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
+     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ lib/ bootstrap/ pulse/; then
   echo "  FAIL something resolves .env relative to itself"; g=1; fi
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -60,9 +71,10 @@ if grep -RIn --exclude-dir=.git \
 _ao=ai-orchestrator; _retired=git
 DEV_ROOT="/srv/smb/share/sc/${_ao}-group/${_ao}-storage/projects"
 RETIRED_ROOT="/opt/sc/${_retired}"
-if grep -RIn --exclude-dir=.git -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
+if hits -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
      -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
-        headless/ rotate/ deskui/ extensions/ 2>/dev/null; then
+        headless/ rotate/ deskui/ extensions/ lib/ bootstrap/ pulse/ \
+        requires.txt requirements.txt; then
   echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
 # PAGE_DIRS must be installed as REAL directories of per-file links. cockpit-ws
 # serves a symlinked file but returns 404 for anything requested through a
@@ -105,12 +117,28 @@ done
 # pre-flight half gates the tests: the "installed state" half describes the host
 # this happens to run on, and a source tree is not wrong because a machine has
 # not been deployed to yet. A FATAL means the gate refused the SOURCE.
+#
+# And the gate must have RUN TO ITS END. From 1.3.0 to 1.3.2 the pre-flight
+# died after "ok 3b." with rc=1 and no message (check 5's grep pipeline under
+# set -e; KNOWN_ISSUES I41), and this grep for '^FATAL' alone read that silence
+# as a pass. Check 9 is the last pre-flight line, so its ok line is the proof
+# the whole gate ran; its absence is a FAIL whatever else was printed.
 gate_out="$(./install.sh --verify 2>&1 || true)"
 if printf '%s\n' "$gate_out" | grep -q '^FATAL'; then
   printf '%s\n' "$gate_out" | grep -A2 '^FATAL' | sed 's/^/    /'
   echo "  FAIL install.sh's pre-flight refuses this source tree"; g=1
 fi
+if ! printf '%s\n' "$gate_out" | grep -qF 'ok   9.'; then
+  printf '%s\n' "$gate_out" | tail -n 4 | sed 's/^/    /'
+  echo "  FAIL install.sh's pre-flight did not complete (silent abort - I41)"; g=1
+fi
 if ((g)); then echo "  FAIL"; fail=1; else echo "  ok"; fi
+
+echo "== installer / env / requires / bootstrap / pulse-bind =="
+# tests/installer_tests.sh: staged install + --verify roundtrip out of a temp
+# copy (the I41 regression test), .env placement/reconcile/refusal, the requires
+# lib, the bootstrap's venv path with a wheel the test builds, pulse-bind --check.
+bash "$SRC/tests/installer_tests.sh" || { echo "  FAIL"; fail=1; }
 
 echo "== Playwright end-to-end (external harness, if present) =="
 # The browser suite lives in the working-tree harness cockpit-e2e/ (outside this

@@ -2,8 +2,8 @@
 #
 # deploy.sh - the real deployment of cockpit-guac-rdp onto a host.
 #
-#   ./deploy.sh                       copy -> /opt/cockpit-guac-rdp, seed .env,
-#                                     run the installed install.sh. Enables NOTHING.
+#   ./deploy.sh                       copy -> /opt/cockpit-guac-rdp, run the installed
+#                                     install.sh (which places/validates .env). Enables NOTHING.
 #   ./deploy.sh --with-users          also create the edy-rdp group + edy-relay user
 #   ./deploy.sh --with-deps           also install the OS prerequisites
 #   ./deploy.sh --with-image          also pre-pull the pinned guacd image
@@ -15,6 +15,9 @@
 #                                     screen; NOT in --all -- security tradeoff,
 #                                     see docs/LOCKED-REMOTE-DESKTOP.md)
 #   ./deploy.sh --install-to /srv/x   deploy somewhere else (absolute, recorded)
+#   ./deploy.sh --wheels /path/dir    vendor these .whl files instead of `pip download`
+#                                     (a host without index access; only matters once
+#                                     requirements.txt names something)
 #   ./deploy.sh --verify              check a deployed host, write nothing
 #   ./deploy.sh --uninstall           run the installed install.sh --uninstall
 #   ./deploy.sh --remove              ALSO delete the deployed payloads
@@ -41,12 +44,18 @@ SRC="$(cd -- "$(dirname -- "$SELF")" && pwd)"
 eval "$(sed -n '/^# BEGIN-MANIFEST/,/^# END-MANIFEST/p' "$SRC/install.sh")"
 [[ -n "${PROJECT:-}" && ${#PAGE[@]} -gt 0 && ${#UNITS[@]} -gt 0 ]] \
     || { echo "FATAL could not read the manifest out of $SRC/install.sh" >&2; exit 1; }
+# The same two libs install.sh and the start-time bootstrap run: ONE .env
+# grammar (the secret-shape rule used to live only here), ONE reading of
+# requires.txt (the PREREQS array used to live only here).
+. "$SRC/lib/edy-rdp-env.sh"
+. "$SRC/lib/edy-rdp-requires.sh"
 
 VERSION="$( [[ -f "$SRC/VERSION" ]] && cat "$SRC/VERSION" || echo "1.1.1" )"
 ROOT="/opt/$PROJECT"
 ACTION=deploy
 KEEP=1
 WITH_USERS=0; WITH_DEPS=0; WITH_IMAGE=0; WITH_UNITS=0; WITH_ALRD=0; ALRD_USER=""
+WHEELS=""
 
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -69,6 +78,7 @@ die()  { printf 'FATAL %s\n' "$*" >&2; exit 1; }
 while (($#)); do
   case "$1" in
     --install-to) ROOT="${2:-}"; shift 2 ;;
+    --wheels)     WHEELS="${2:?--wheels needs a directory}"; shift 2 ;;
     --with-users) WITH_USERS=1; shift ;;
     --with-deps)  WITH_DEPS=1; shift ;;
     --with-image) WITH_IMAGE=1; shift ;;
@@ -79,11 +89,21 @@ while (($#)); do
     --verify)     ACTION=verify; shift ;;
     --uninstall)  ACTION=uninstall; shift ;;
     --remove)     ACTION=remove; shift ;;
-    -h|--help)    sed -n '2,30p' "$SELF" | sed 's/^# \?//'; exit 0 ;;
+    -h|--help)    sed -n '2,34p' "$SELF" | sed 's/^# \?//'; exit 0 ;;
     *)            die "unknown option: $1" ;;
   esac
 done
 [[ "$ROOT" == /* ]] || die "--install-to must be an absolute path (got: $ROOT)"
+[[ -z "$WHEELS" || "$WHEELS" == /* ]] || die "--wheels must be an absolute path (got: $WHEELS)"
+
+# The outcome, unmistakably. A job wrapper once masked this script's exit
+# status and a deploy that had died half-way read as done (the Sep-18 deploy
+# swapped the payload alias and never linked it). The last line is now either
+# "DEPLOY OK <version>" or "DEPLOY FAILED (<step>)", whatever the wrapper does
+# with the status; the EXIT trap covers die, set -e and a failing command alike.
+STEP=start
+step() { STEP=$1; printf '\n%s\n' "$1"; }
+trap 'rc=$?; if (( rc != 0 )); then printf "\nDEPLOY FAILED (%s) rc=%d\n" "$STEP" "$rc" >&2; fi' EXIT
 
 D="${DESTDIR:-}"
 ROOT_D="$D$ROOT"
@@ -109,91 +129,39 @@ remove_old_payload() {
 }
 
 # ---------------------------------------------------------------------------
-# OS prerequisites (--with-deps). Detection is by BINARY presence, so a re-run
-# installs nothing new.
+# OS prerequisites (--with-deps), from requires.txt through lib/edy-rdp-requires.sh:
+# the names, the minimum versions, the probes and the distro package mapping all
+# live there, shared with install.sh (check 8b) and the relay's bootstrap. This
+# file no longer carries a list of its own to disagree with. A re-run installs
+# nothing that is present at or above its minimum.
 # ---------------------------------------------------------------------------
-PREREQS=(cockpit podman python3 freerdp3 xvfb x11vnc nftables grd dbus)
-
-detect_pm() { local pm; for pm in apt-get dnf yum pacman zypper; do
-    command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return 0; }; done; echo ""; }
-
-pkg_for() { case "$2:$1" in
-    apt-get:cockpit)  echo "cockpit cockpit-system" ;;
-    apt-get:freerdp3) echo "freerdp3-x11" ;;
-    apt-get:xvfb)     echo "xvfb" ;;
-    apt-get:grd)      echo "gnome-remote-desktop" ;;
-    apt-get:dbus)     echo "dbus-bin" ;;
-    apt-get:*)        echo "$1" ;;
-    dnf:cockpit|yum:cockpit)   echo "cockpit cockpit-system" ;;
-    dnf:freerdp3|yum:freerdp3) echo "freerdp" ;;
-    dnf:xvfb|yum:xvfb)         echo "xorg-x11-server-Xvfb" ;;
-    dnf:grd|yum:grd)           echo "gnome-remote-desktop" ;;
-    dnf:dbus|yum:dbus)         echo "dbus-tools" ;;
-    dnf:*|yum:*)               echo "$1" ;;
-    pacman:cockpit)  echo "cockpit" ;;   pacman:freerdp3) echo "freerdp" ;;
-    pacman:xvfb)     echo "xorg-server-xvfb" ;;  pacman:python3) echo "python" ;;
-    pacman:grd)      echo "gnome-remote-desktop" ;;  pacman:dbus) echo "dbus" ;;
-    pacman:*)        echo "$1" ;;
-    zypper:cockpit)  echo "cockpit cockpit-bridge" ;;  zypper:freerdp3) echo "freerdp" ;;
-    zypper:xvfb)     echo "xorg-x11-server-Xvfb" ;;
-    zypper:grd)      echo "gnome-remote-desktop" ;;  zypper:dbus) echo "dbus-1-tools" ;;
-    zypper:*)        echo "$1" ;;
-    *) echo "$1" ;;
-  esac; }
-
-# The FreeRDP3 client is 'xfreerdp3' on Debian/Ubuntu, 'xfreerdp' (v3) elsewhere.
-freerdp3_bin() {
-  command -v xfreerdp3 >/dev/null 2>&1 && { echo xfreerdp3; return 0; }
-  command -v xfreerdp  >/dev/null 2>&1 \
-     && xfreerdp /version 2>/dev/null | grep -qE 'version 3\.' && { echo xfreerdp; return 0; }
-  return 1
-}
-
-have_prereq() { case "$1" in
-    cockpit)  command -v cockpit-bridge >/dev/null 2>&1 && [ -d /usr/share/cockpit/system ] ;;
-    podman|python3|x11vnc) command -v "$1" >/dev/null 2>&1 ;;
-    xvfb)     command -v Xvfb      >/dev/null 2>&1 ;;
-    nftables) command -v nft       >/dev/null 2>&1 ;;
-    grd)      command -v grdctl    >/dev/null 2>&1 ;;
-    dbus)     command -v dbus-send >/dev/null 2>&1 ;;
-    freerdp3) freerdp3_bin >/dev/null 2>&1 ;;
-    *) return 1 ;;
-  esac; }
+MISSING_PREREQS=()
 
 report_prereqs() {   # always runs; only --with-deps installs
-    local p missing=()
-    for p in "${PREREQS[@]}"; do have_prereq "$p" || missing+=("$p"); done
-    if ((${#missing[@]}==0)); then
-        ok "prerequisites: all present (FreeRDP3 client: $(freerdp3_bin))"
+    req_load "$SRC/$REQUIRES" || die "cannot parse $SRC/$REQUIRES"
+    if req_check; then
+        ok "prerequisites: all ${#REQ_NAMES[@]} present at or above minimum (FreeRDP3 client: $(req_freerdp_bin))"
         return 0
     fi
-    printf '%s\n' "  prerequisites MISSING: ${missing[*]}"
-    MISSING_PREREQS=("${missing[@]}")
+    MISSING_PREREQS=("${REQ_MISSING[@]}" "${REQ_OUTDATED[@]}")
+    printf '%s\n' "  prerequisites MISSING or below minimum: ${MISSING_PREREQS[*]}"
     return 1
 }
 
 install_deps() {
-    local pm p pkgs=()
-    report_prereqs && return 0
-    pm="$(detect_pm)"
-    [[ -n "$pm" ]] || die "no supported package manager found; install manually:
-    ${MISSING_PREREQS[*]}  (see docs/COMPATIBILITY.md)"
-    for p in "${MISSING_PREREQS[@]}"; do pkgs+=($(pkg_for "$p" "$pm")); done
     local cmd
-    case "$pm" in
-      apt-get) cmd="apt-get update && apt-get install -y ${pkgs[*]}" ;;
-      dnf|yum) cmd="$pm install -y ${pkgs[*]}" ;;
-      pacman)  cmd="pacman -Sy --noconfirm ${pkgs[*]}" ;;
-      zypper)  cmd="zypper --non-interactive install ${pkgs[*]}" ;;
-    esac
-    say installing "$pm: ${pkgs[*]}"
+    report_prereqs && return 0
+    cmd="$(req_fix_command "${MISSING_PREREQS[@]}")"
+    [[ "$cmd" != "install manually"* ]] || die "no supported package manager found; $cmd
+    (see docs/COMPATIBILITY.md)"
+    say installing "$cmd"
     eval "$cmd" || die "prerequisite install failed (docs/COMPATIBILITY.md has the
     per-distro notes)"
-    freerdp3_bin >/dev/null 2>&1 || die "a FreeRDP >= 3 client is still absent.
+    req_freerdp_bin >/dev/null 2>&1 || die "a FreeRDP >= 3 client is still absent.
     Debian 12 and RHEL 8 ship only FreeRDP 2, which lacks RDSTLS - the protocol
     grd's port 3390 handover requires. See docs/COMPATIBILITY.md."
     # The bridge launcher invokes 'xfreerdp3' by name; alias where it is 'xfreerdp'.
-    if ! command -v xfreerdp3 >/dev/null 2>&1 && [[ "$(freerdp3_bin)" == "xfreerdp" ]]; then
+    if ! command -v xfreerdp3 >/dev/null 2>&1 && [[ "$(req_freerdp_bin)" == "xfreerdp" ]]; then
         ln -sf "$(command -v xfreerdp)" /usr/local/bin/xfreerdp3
         say aliased "xfreerdp3 -> $(command -v xfreerdp)"
     fi
@@ -210,7 +178,7 @@ create_users() {
 
 pull_image() {
     local img
-    img="$(sed -n 's/^GUACD_IMAGE=//p' "$ENVF" | tail -1 | sed 's/^"//; s/"$//')"
+    img="$(env_get "$ENVF" GUACD_IMAGE || true)"
     [[ -n "$img" ]] || die "GUACD_IMAGE is not set in $ENVF"
     command -v podman >/dev/null 2>&1 || die "podman is not installed (--with-deps)"
     say pulling "$img"
@@ -232,6 +200,13 @@ copy_declared_payload_into() {
         install -d -m 0755 -- "$d"
         install -m 0755 "${OWN[@]}" -- "$SRC/${f%%:*}" "$dst/${f%%:*}"
     done
+    # libs are sourced, never executed: 0644, and install.sh links them beside
+    # the scripts under $LIBEXECDIR
+    for f in "${LIBS[@]}"; do
+        d="$dst/$(dirname -- "${f%%:*}")"
+        install -d -m 0755 -- "$d"
+        install -m 0644 "${OWN[@]}" -- "$SRC/${f%%:*}" "$dst/${f%%:*}"
+    done
     install -d -m 0755 -- "$dst/systemd" "$dst/hardening"
     for f in "${UNITS[@]}"; do
         [[ -f "$SRC/systemd/$f.in" ]] && install -m 0644 -- "$SRC/systemd/$f.in" "$dst/systemd/$f.in"
@@ -243,6 +218,30 @@ copy_declared_payload_into() {
         install -m 0644 "${OWN[@]}" -- "$SRC/${f%%:*}" "$dst/${f%%:*}"
     done
     install -m 0644 "${OWN[@]}" -- "$SRC/$ENVDEFAULT" "$dst/$ENVDEFAULT"
+    # requires.txt SHIPS now: the bootstrap verifies the host against it at every
+    # relay start. requirements.txt ships with it; when it names anything, the
+    # wheels the bootstrap installs OFFLINE ride along under wheels/ - a service
+    # start must never reach an index, so the fetch happens HERE, once, on a host
+    # with access (or comes pre-fetched via --wheels on one without).
+    install -m 0644 "${OWN[@]}" -- "$SRC/$REQUIRES"     "$dst/$REQUIRES"
+    install -m 0644 "${OWN[@]}" -- "$SRC/$REQUIREMENTS" "$dst/$REQUIREMENTS"
+    if (( $(req_pip_count "$SRC/$REQUIREMENTS") > 0 )); then
+        install -d -m 0755 -- "$dst/wheels"
+        if [[ -n "$WHEELS" ]]; then
+            local nw=0
+            for f in "$WHEELS"/*.whl; do
+                [[ -f "$f" ]] || continue
+                install -m 0644 "${OWN[@]}" -- "$f" "$dst/wheels/"; nw=$((nw+1))
+            done
+            (( nw > 0 )) || die "--wheels $WHEELS holds no .whl file"
+            say vendored "$nw wheel(s) from $WHEELS"
+        else
+            python3 -m pip download -q -d "$dst/wheels" -r "$SRC/$REQUIREMENTS" \
+                || die "pip download failed. A host without index access needs the wheels supplied:
+    ./deploy.sh --wheels <dir of .whl built with 'pip download -d <dir> -r requirements.txt' on a connected host>"
+            say vendored "wheels for $REQUIREMENTS into $dst/wheels (pip download)"
+        fi
+    fi
     install -m 0755 "${OWN[@]}" -- "$SRC/install.sh"  "$dst/install.sh"
     printf '%s\n' "$VERSION" > "$dst/VERSION"; chmod 0644 "$dst/VERSION"
     [[ -f "$SRC/LICENSE" ]] && install -m 0644 -- "$SRC/LICENSE" "$dst/LICENSE"
@@ -254,8 +253,8 @@ copy_declared_payload_into() {
         find "$SRC/extensions/allowlockedremotedesktop@kamens.us" -maxdepth 1 -type f \
              -exec install -m 0644 -- {} "$dst/extensions/allowlockedremotedesktop@kamens.us/" \;
     fi
-    # NOT shipped: .git/, docs/, img/, patches/, pod/, relay/test_*.py,
-    # run_tests.sh, requires.txt, CHANGELOG.md, README.md, any .env.
+    # NOT shipped: .git/, docs/, img/, patches/, pod/, relay/test_*.py, tests/,
+    # run_tests.sh, deploy.sh itself, CHANGELOG.md, README.md, any .env.
     # README.md in particular must not ship: it quotes the development root, and
     # `grep -rl <dev root> /opt/cockpit-guac-rdp` has to return nothing for the
     # one audit that catches a payload reaching back into a checkout.
@@ -263,57 +262,34 @@ copy_declared_payload_into() {
     return 0
 }
 
-keys_of() { grep -v '^[[:space:]]*#' "$1" | grep '=' | sed 's/=.*//' | sed 's/[[:space:]]//g' | sort -u; }
-
-refuse_secret_shaped_values() {
-    local k v
-    while IFS='=' read -r k v; do
-        k="${k// }"
-        [[ "$k" =~ (PASS|PASSWORD|SECRET|TOKEN|KEY|CREDENTIAL|PASSPHRASE) ]] || continue
-        [[ "$k" =~ _(FILE|PATH|DIR|NAME|ID|USER)$ ]] && continue
-        [[ -z "${v// }" ]] && continue
-        die "$k in $ENVF looks like a secret VALUE. A deployed .env carries locations
-    and settings, never secrets. The 3390 door key in particular belongs in grd's
-    own credential store, which edy-rdp-rotate-rdplogin writes - not here."
-    done < <(grep -v '^[[:space:]]*#' "$ENVF" | grep '=')
-    ok "no secret-shaped value in $ENVF"
-}
-
 # The migration: /etc/default/edy-rdp used to be this project's settings file.
 # It is now [install path]/.env, because it was `.envdefault` wearing the wrong
 # hat (DEPLOY-CONTRACT section 5: behaviour is .envdefault, content is
 # etcdefaults/). An operator's edits move ACROSS; nothing is deleted here.
-seed_env() {
+#
+# ONLY the migration remains. Placing a missing .env from .envdefault, adding the
+# keys a new version ships to a present one, and validating the result are
+# install.sh's place_env now (it runs next, from the installed payload): the
+# byte-copy this function used to do could not add a key to an operator's file,
+# so an upgrade that added one died in install.sh's check 7 until somebody
+# edited by hand - the Sep-18 deploy. The keys a legacy file lacks are appended
+# by that same reconcile, so nothing here has to warn about them.
+migrate_legacy_env() {
     if [[ -e "$ENVF" ]]; then
-        say kept "$ENVF (not overwritten)"
-        local new_keys
-        new_keys="$(comm -23 <(keys_of "$SRC/$ENVDEFAULT") <(keys_of "$ENVF") | tr '\n' ' ')"
-        [[ -z "${new_keys// }" ]] || warn "this version adds keys your .env does not set: $new_keys
-       install.sh refuses until they are set - the known cost of never clobbering
-       an operator's file, paid at the only moment it can be caught safely."
+        say kept "$ENVF (install.sh places or reconciles it next)"
     elif [[ -f "$LEGACY_DEFAULT" ]]; then
         install -m 0644 "${OWN[@]}" -- "$LEGACY_DEFAULT" "$ENVF"
         say migrated "$LEGACY_DEFAULT -> $ENVF (your edits, carried across)"
-        local new_keys
-        new_keys="$(comm -23 <(keys_of "$SRC/$ENVDEFAULT") <(keys_of "$ENVF") | tr '\n' ' ')"
-        [[ -z "${new_keys// }" ]] || warn "keys this version adds, not in your old file: $new_keys
-       Add them to $ENVF from $SRC/$ENVDEFAULT before install.sh runs."
         warn "$LEGACY_DEFAULT is left in place and is NO LONGER READ. Nothing here
        deletes your file - but two config files where one is ignored is how a
        setting gets changed and never takes effect. Remove it once you agree."
-    else
-        install -m 0644 "${OWN[@]}" -- "$SRC/$ENVDEFAULT" "$ENVF"
-        say seeded "$ENVF from $ENVDEFAULT - REVIEW IT BEFORE FIRST USE"
-        warn "EDY_RDP_REMOTE_ALLOW is empty, so the Remote-host scenario is OFF.
-       That is the fail-closed default and it is the right one; read the comment
-       in $ENVF before you widen it."
     fi
-    refuse_secret_shaped_values
 }
 
 preflight() {
     printf 'deploy pre-flight\n'
-    [[ -f "$SRC/install.sh" && -f "$SRC/$ENVDEFAULT" ]] || die "install.sh or $ENVDEFAULT is missing"
+    [[ -f "$SRC/install.sh" && -f "$SRC/$ENVDEFAULT" && -f "$SRC/$REQUIRES" && -f "$SRC/$REQUIREMENTS" ]] \
+        || die "install.sh, $ENVDEFAULT, $REQUIRES or $REQUIREMENTS is missing"
     if [[ -z "$D" ]]; then
         local mp; mp="$(df -P "$(dirname -- "$ROOT")" 2>/dev/null | awk 'NR==2{print $6}')"
         if [[ -n "$mp" ]] && findmnt -no OPTIONS --target "$mp" 2>/dev/null | tr ',' '\n' | grep -qx noexec; then
@@ -322,15 +298,37 @@ preflight() {
         fi
     fi
     ok "install path $ROOT is usable"
+    # The .env this host ALREADY has, vetted BEFORE anything is copied or the
+    # alias swapped. install.sh's check 7 makes this same call - but it runs from
+    # the INSTALLED payload, after the swap, and a refusal there is the Sep-18
+    # half-deployed state all over again (alias new, links old; I43), only louder.
+    # A stale or invalid operator value (a 1.3.x PULSE_SERVER, a LOUD log level)
+    # must stop the deploy while the host is still exactly as it was. Required-
+    # ness is not asked: reconcile appends the keys a new version adds. A legacy
+    # /etc/default/edy-rdp about to be migrated is the same file one step earlier.
+    local envf_now="" problems
+    if   [[ -f "$ENVF" ]];           then envf_now="$ENVF"
+    elif [[ -f "$LEGACY_DEFAULT" ]]; then envf_now="$LEGACY_DEFAULT"; fi
+    if [[ -n "$envf_now" ]]; then
+        # shellcheck disable=SC2086
+        if problems="$(env_validate "$envf_now" "$SRC/$ENVDEFAULT" ${D:+--staged} --present-only)"; then
+            ok "$envf_now validates (present keys)"
+        else
+            die "$envf_now would be refused by install.sh - stopping BEFORE anything is copied or swapped:
+$(sed 's/^/    /' <<<"$problems")
+    Fix the named key(s) and re-run. Nothing was changed."
+        fi
+    fi
     report_prereqs || warn "deploy will copy files, but the relay cannot run until these
        exist. Re-run with --with-deps, or install them yourself."
-    ok "manifest: ${#PAGE[@]} page files, ${#LIBEXEC[@]} libexec, ${#UNITS[@]} units, ${#SYSFILES[@]} system files"
+    ok "manifest: ${#PAGE[@]} page files, ${#LIBEXEC[@]} libexec, ${#LIBS[@]} libs, ${#UNITS[@]} units, ${#SYSFILES[@]} system files"
 }
 
 do_deploy() {
+    STEP=pre-flight
     preflight
-    ((WITH_DEPS)) && { printf '\nOS prerequisites\n'; install_deps; }
-    printf '\ndeploy %s %s -> %s\n' "$PROJECT" "$VERSION" "$ROOT"
+    ((WITH_DEPS)) && { step "OS prerequisites"; install_deps; }
+    step "deploy $PROJECT $VERSION -> $ROOT"
     install -d -m 0755 "${OWN[@]}" -- "$ROOT_D"
 
     rm -rf -- "$NEW.tmp"
@@ -342,19 +340,24 @@ do_deploy() {
     mv -T -- "$ROOT_D/payload.new" "$ROOT_D/payload"
     say swapped "$ROOT_D/payload -> payload-$VERSION"
 
-    seed_env
-    ((WITH_USERS)) && { printf '\nusers\n'; create_users; }
-    ((WITH_IMAGE)) && { printf '\nguacd image\n'; pull_image; }
+    step "configuration"
+    migrate_legacy_env
+    ((WITH_USERS)) && { step "users"; create_users; }
 
+    # install.sh BEFORE the image pull: it places .env, and GUACD_IMAGE is read
+    # from that file. (Users before install.sh: its check 8 wants them.)
+    step "running the INSTALLED install.sh (not this checkout copy)"
+    DESTDIR="$D" "$ROOT_D/payload/install.sh"
+
+    ((WITH_IMAGE)) && { step "guacd image"; pull_image; }
+
+    STEP="pruning old payloads"
     local p keepers
     mapfile -t keepers < <(ls -1d "$ROOT_D"/payload-* 2>/dev/null | grep -v "payload-$VERSION\$" | sort -r)
     for p in "${keepers[@]:$KEEP}"; do [[ -n "$p" ]] && remove_old_payload "$p"; done
 
-    printf '\nrunning the INSTALLED install.sh (not this checkout copy)\n'
-    DESTDIR="$D" "$ROOT_D/payload/install.sh"
-
     if ((WITH_UNITS)) && [[ -z "$D" ]]; then
-        printf '\nenabling units (--with-units)\n'
+        step "enabling units (--with-units)"
         # Order matters: the firewall table first, so 4822 is never briefly
         # world-reachable; then guacd; then the sockets that activate the relay.
         systemd-tmpfiles --create /usr/lib/tmpfiles.d/edy-rdp.conf || true
@@ -366,6 +369,19 @@ do_deploy() {
         systemctl enable --now edy-rdp-relay.socket edy-rdp-control.socket \
                                edy-rdp-reaper.timer && say enabled "relay+control sockets, reaper timer"
         systemctl start edy-rdp-relay.service || true
+        # Audio: the path unit for the seat uid binds the pulse socket into the
+        # shared dir at every login, so it reaches the running container (I42).
+        local uid
+        uid="$(env_get "$ENVF" EDY_RDP_PULSE_SEAT_UID || echo 1000)"
+        systemctl enable --now "edy-rdp-pulse-seat@${uid}.path" \
+            && say enabled "edy-rdp-pulse-seat@${uid}.path (audio bind on seat login)"
+        # PathChanged= fires on the NEXT change in the pulse directory, never for a
+        # socket that already exists when the watch starts (and PathExists= would
+        # busy-loop the path unit to death - see the unit). A seat logged in right
+        # now is bound by this one explicit run; the script is idempotent.
+        systemctl start "edy-rdp-pulse-rebind@${uid}.service" \
+            && say bound "seat ${uid} pulse socket, if logged in (edy-rdp-pulse-rebind@${uid}.service)" \
+            || warn "edy-rdp-pulse-rebind@${uid}.service failed: journalctl -t edy-rdp-pulse-bind"
         warn "edy-rdp-rotate-rdplogin.timer was NOT enabled. It rotates the 3390
        greeter door credential, which only matters once that door is configured
        at all (docs/KNOWN_ISSUES.md I29). Enable it deliberately:
@@ -375,7 +391,7 @@ do_deploy() {
     fi
 
     if ((WITH_ALRD)); then
-        printf '\nlocked-remote-desktop extension (--with-locked-remote-desktop)\n'
+        step "locked-remote-desktop extension (--with-locked-remote-desktop)"
         # Opt-in and security-sensitive: it lets a remote RDP client unlock the
         # locked screen (and, mirroring the physical seat, the console itself).
         # Per-USER: the dconf write needs the target's live session. SUDO_USER is
@@ -405,16 +421,28 @@ deployed. This host no longer depends on the development share.
                  && mv -T $ROOT/payload.new $ROOT/payload && $ROOT/payload/install.sh
   configure:     \$EDITOR $ENVF   then  systemctl restart edy-rdp-relay.service
   cockpit.socket was NOT touched.
+
+DEPLOY OK $VERSION
 EOF
 }
 
 do_verify() {
+    STEP=verify
     printf 'deploy verify\n'
-    local rc=0
+    local rc=0 problems p
     [[ -L "$ROOT_D/payload" ]] && ok "$ROOT_D/payload -> $(readlink -- "$ROOT_D/payload")" \
-                               || { echo "  FAIL $ROOT_D/payload is not a symlink"; return 1; }
-    [[ -f "$ENVF" ]] && ok "$ENVF present" || { echo "  FAIL $ENVF missing"; return 1; }
-    refuse_secret_shaped_values
+                               || { echo "  FAIL $ROOT_D/payload is not a symlink"; printf 'DEPLOY VERIFY FAILED\n'; return 1; }
+    [[ -f "$ENVF" ]] && ok "$ENVF present" || { echo "  FAIL $ENVF missing"; printf 'DEPLOY VERIFY FAILED\n'; return 1; }
+    # the whole .env gate (grammar, required keys, secret shapes, per-key rules) -
+    # the same lib install.sh placed it with and the bootstrap starts the relay with.
+    # --staged under DESTDIR: the admin group named there belongs to another host.
+    # shellcheck disable=SC2086
+    if problems="$(env_validate "$ENVF" "$SRC/$ENVDEFAULT" ${D:+--staged} "${REQUIRED_ENV[@]}")"; then
+        ok "$ENVF validates with every REQUIRED_ENV key"
+    else
+        while IFS= read -r p; do [[ -n "$p" ]] && echo "  FAIL .env: $p"; done <<<"$problems"
+        rc=1
+    fi
     if grep -RIn -e "$DEV_ROOT" -e "$RETIRED_ROOT" -- "$ROOT_D/payload/" "$ENVF" 2>/dev/null; then
         echo "  FAIL a deployed file names the development share or the retired root (above)"
         rc=1
@@ -422,6 +450,7 @@ do_verify() {
         ok "no deployed file names the development share or the retired root"
     fi
     "$ROOT_D/payload/install.sh" --verify || rc=1
+    if (( rc == 0 )); then printf '\nDEPLOY VERIFY OK\n'; else printf '\nDEPLOY VERIFY FAILED\n'; fi
     return $rc
 }
 

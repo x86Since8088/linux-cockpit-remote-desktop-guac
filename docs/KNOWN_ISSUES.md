@@ -606,3 +606,126 @@ per-request `KRB5_CONFIG` listing only the KDCs that answered (`dns_lookup_kdc=f
 one with **no KDC** so Kerberos fails instantly and NLA uses NTLM. Total added latency ~0.5–0.7 s. Every
 probe result + the decision are logged to `<key>.krblog`. Scoped to loopback so a remote host's own realm
 is untouched. This unblocked the greeter (I29) on a host whose AD DCs were down.
+
+## Installer, .env, venv and audio bind (2026-09-27)
+
+Found by a verified audit of edt1 on 2026-09-27 (fixed in 1.4.0.20260927 unless marked OPEN).
+
+### I41 · install.sh aborted SILENTLY after check 3b — no install, deploy or --verify completed since 1.3.0 · Sev C · FIXED
+Every `./install.sh`, every `deploy.sh` (which runs the installed `install.sh`) and every `--verify`
+since 1.3.0 stopped after `ok 3b.` with exit 1 and **no message at all**. **Root cause:** pre-flight
+check 5 rendered each unit and collected leftover placeholders with
+`leftover="$(grep -v ... <<<"$out" | grep -o '@[A-Z_]\+@' | sort -u | tr '\n' ' ')"` under
+`set -Eeuo pipefail`. A unit that renders CLEAN — the success case — is `grep -o`'s no-match case, so
+the pipeline returned 1, the assignment failed, and `set -e` ended the script without a word (`die`
+never ran; nothing was there to print). Proven twice: an isolated repro of that one line (rc=1, no
+output; `|| true` → rc=0), and the deployed 1.3.0 payload's own `--verify` on edt1 (rc=1, last line
+`ok 3b.`). Checks 3 and 3b already carried `|| true`; check 5 did not. With that line fixed the SAME
+tree died a **second** time: `do_install` (and `do_verify`) scanned the rendered unit for `@[A-Z_]\+@`
+without skipping comment lines, and `edy-rdp-guacd.service.in` carries `@DEFAULT_MONITOR@` inside a
+`#` comment about pulse — `FATAL unrendered placeholder in edy-rdp-guacd.service`. (1.3.0's
+CHANGELOG claims the comment-skip; it landed in `run_tests.sh` and check 5 only.) **Consequence on
+edt1:** the Sep-18 deploy copied `payload-1.3.0`, swapped the `payload` alias, ran `install.sh` —
+which died silently — and never linked anything: `/usr/libexec/edy-rdp/*` still resolved into
+`payload-1.1.2` while `install.conf` said otherwise (see I43). The job wrapper masked deploy.sh's
+non-zero exit, so nobody saw it. **Fix:** ONE helper, `leftover_placeholders()` (directive lines
+only — a `@WORD@` in a `#` comment is documentation — and `|| true` on the pipeline, which is
+load-bearing and commented as such), used by check 5, unit and sysfile placement in `do_install`,
+and `do_verify`. Check 5 also understands the new `ExecStart=/usr/bin/env ${EDY_RDP_PYTHON} <path>`
+shape and the `+` prefix, both guarded the same way. `deploy.sh` now ends with an unmistakable
+`DEPLOY OK <version>` or `DEPLOY FAILED (<step>)` (EXIT trap), so a wrapper cannot hide it again.
+**Regression test:** `tests/installer_tests.sh` → `installer_staged_install_completes` runs
+`DESTDIR=<tmp> ./install.sh --with-units` from a temp copy of the tree and requires exit 0, `ok 5.`
+through `ok 9.`, every PAGE/LIBEXEC/LIBS link, every rendered unit with no directive-line placeholder,
+then `installer_staged_verify_passes` requires `--verify` to end `verify: PASS`. `run_tests.sh`'s
+existing gate now demands `ok   9.` in the `--verify` output and names this issue when it is absent.
+
+### I42 · Desktop audio dead after boot: one-shot pulse socket bind at guacd start · Sev M · FIXED (design) · live verification pending
+Since the Sep-22 boot of edt1 the Sound toggle produced nothing: `podman logs edy-rdp-guacd` said
+`PulseAudio connection failed` and `/run/edy-rdp-pulse.sock` on the host was a **0-byte regular
+file**, not a mountpoint — even though the seat socket `/run/user/1000/pulse/native` existed before
+guacd started. **Why:** `edy-rdp-guacd.service` did
+`ExecStartPre=-/bin/sh -c '... mount --bind <seat socket> /run/edy-rdp-pulse.sock'` once, at service
+start. The `-` prefix swallowed the mount error, nothing ever retried, the uid was effectively fixed at
+1000, and because the container is rootful `--network host` with `-v /run/edy-rdp-pulse.sock:/run/pulse.sock`
+(default **rprivate** propagation) a bind done later on the host could never reach the running
+container anyway — only a guacd restart after login "fixed" it, until the next boot. **Fix (D3
+design, 1.4.0):** bind a DIRECTORY, not a file. `pulse/edy-rdp-pulse-bind.sh` (installed
+`edy-rdp-pulse-bind`, the guacd unit's `ExecStartPre` WITHOUT `-`) makes `/run/edy-rdp-pulse` a
+self-bind with `mount --make-rshared`, and — when the seat socket exists — bind-mounts that socket FILE
+onto `/run/edy-rdp-pulse/native` (touching the target first; idempotent by inode; a previous login's
+stale bind is released). The container mounts `-v /run/edy-rdp-pulse:/run/pulse:ro,rslave` and speaks
+to `PULSE_SERVER=unix:/run/pulse/native`. A per-seat path unit, `edy-rdp-pulse-seat@<uid>.path`
+(`PathChanged=/run/user/%i/pulse` → `edy-rdp-pulse-rebind@%i.service` →
+`edy-rdp-pulse-bind --seat-uid %i`), fires at every login; `deploy.sh --with-units` enables the
+instance named by the new `.env` key `EDY_RDP_PULSE_SEAT_UID` (`EDY_RDP_PULSE_SEAT_SOCKET` still
+overrides the path) and then starts `edy-rdp-pulse-rebind@<uid>.service` once, for a seat logged in
+at deploy time. Because the source directory is a SHARED mount, a bind made into it later
+propagates into the RUNNING container: audio for the next session, no restart. Outcomes are one
+journal line each (`bound`, `seat socket absent - no audio until a seat login`, a refusal, or the
+real mount error); an absent socket exits 0, a refusal or a genuine mount failure now STOPS the unit
+(R4: if that proves too strict live, the operator can put the `-` back — but then read the log).
+`install.sh --verify` checks that `/run/edy-rdp-pulse` is shared and that `native` is a mountpoint
+whenever the seat socket exists. The old `/run/edy-rdp-pulse.sock` file is left alone (tmpfs; gone
+at reboot). **Two review findings folded into the design before it shipped:** (1) the first draft
+used `PathExists=/run/user/%i/pulse/native`, which systemd re-evaluates the instant the oneshot
+exits — while the socket exists that is true again, five starts in ~100 ms hit `StartLimitBurst`
+and the **path unit itself fails** (proven on edt1's systemd 259 with `systemd-run
+--path-property=PathExists=<existing file> /bin/true`); enabling it while the seat was logged in
+would have killed the watch within a second and left the unit looking enabled — hence
+`PathChanged=` on the directory (fires once per inotify event, never for a state; it does not fire
+for a socket that already exists, which is what the explicit `systemctl start` after enabling and
+guacd's `ExecStartPre` cover). (2) The script runs as root on paths the seat user owns and `-S`,
+`stat -L` and `mount --bind` all follow symlinks, so a seat user (or, through a read-write
+`rshared` mount, a compromised guacd planting a symlink named `native`) could have had root bind
+any host socket into the container or create a file at an arbitrary host path. Now the source is
+vetted with `lstat` (no symlink on `/run/user/<uid>`, `/run/user/<uid>/pulse` or the socket; a
+socket owned by the seat uid, override included), the target must be absent, a mountpoint or the
+empty root-owned file the script made, the mount is re-read and undone if it is not the vetted
+socket, and the container gets the directory `ro,rslave` (host → container only; no write access —
+`connect()` on a unix socket needs none). `--check` applies the same vetting without root and
+`tests/installer_tests.sh` proves each refusal. **Upgrading:** a 1.3.x `.env` with
+`PULSE_SERVER=unix:/run/pulse.sock` is refused by validation as stale — change it to
+`unix:/run/pulse/native` ([AUDIO.md](AUDIO.md)) BEFORE deploying: `deploy.sh`'s pre-flight validates
+the live `.env`'s present keys and stops with `DEPLOY FAILED (pre-flight)` while the host is
+untouched, instead of after the alias swap (I43). **Live verification is pending** — the propagation
+claim is a design argument until the operator re-tests on edt1: log in → `mountpoint
+/run/edy-rdp-pulse/native` → `podman exec edy-rdp-guacd ls -l /run/pulse/native` shows the socket →
+the Sound toggle streams, all without `systemctl restart edy-rdp-guacd.service`.
+
+### I43 · edt1 half-deployed: payload alias 1.3.0, libexec links 1.1.2, hand-copied files under /usr/share/cockpit/guac-rdp · Sev H · OPEN (reclaim procedure)
+**State found 2026-09-27:** `/opt/cockpit-guac-rdp/payload` → `payload-1.3.0`, but every
+`/usr/libexec/edy-rdp/*` link still resolves into `payload-1.1.2` (the Sep-18 deploy died in
+`install.sh` before linking — I41). Under `/usr/share/cockpit/guac-rdp/` the page is a REGULAR
+`index.html` plus ~45 `*.bak` files, all hand-copied during the repairs that followed the silent
+failures. That directory is therefore not `owned_by_us` (the installer's test that every entry is a
+link it would have made), so `install.sh` **correctly refuses** to take it over rather than delete
+somebody's files — and `--verify` used to misreport the regular `index.html` as "resolves into a
+checkout" (fixed: it now says `NOT a symlink (hand-copied?)`). Nothing here is deleted by any script:
+the removal primitives never `rm -r` under `/usr/share/cockpit`, `/usr/libexec` or `/etc`, by contract.
+**Reclaim procedure (operator, via the root job runner):** (1) **quarantine, never delete** —
+`mv /usr/share/cockpit/guac-rdp /var/backups/guac-rdp.quarantine-$(date +%F)` (one `mv` of the whole
+directory; no `rm -r`); (2) fix the one stale value edt1's live `.env` carries —
+`PULSE_SERVER=unix:/run/pulse.sock` → `unix:/run/pulse/native` in `/opt/cockpit-guac-rdp/.env` — because
+`deploy.sh`'s pre-flight now validates the present keys of the live `.env` and refuses with
+`DEPLOY FAILED (pre-flight)` BEFORE copying or swapping anything (the alternative was dying from the
+installed `install.sh` after the alias swap: this very state, again); then, from a checkout on the fixed
+version, `sudo ./deploy.sh --with-units` (copies `payload-1.4.0.20260927`, swaps the alias,
+places/reconciles `.env`, links everything, enables the units including `edy-rdp-pulse-seat@1000.path`
+and runs the rebind once); (3) `sudo ./deploy.sh --verify` must end
+`DEPLOY VERIFY OK` — and `install.sh --verify` inside it must show every libexec link resolving into
+the new payload and `index.html` as a symlink; (4) hard-reload Cockpit, confirm the page serves, then
+delete the quarantine directory by hand. Leftover `payload-1.1.2`/`payload-1.3.0` are pruned by
+deploy's keeper policy. Until this runs, edt1 serves a mixture of versions.
+
+### I44 · Stale ~/.config/pipewire/pipewire-pulse.conf.d/20-edy-tcp.conf: anonymous loopback TCP listener on 4713 · Sev L · OPEN (remove)
+The 1.2.x audio attempt made pipewire-pulse listen on TCP (`module-native-protocol-tcp` on
+`127.0.0.1:4713`) via a per-user drop-in `~/.config/pipewire/pipewire-pulse.conf.d/20-edy-tcp.conf`
+in the seat user's home. The socket bind design (I42, [AUDIO.md](AUDIO.md)) superseded it and nothing
+reads the TCP port, but the drop-in was never removed: it exposes the seat user's audio server —
+record from any source monitor, play into any sink — to **every local uid** on loopback, with no
+authentication, for no benefit. Not something a system-scope installer should edit in a user's
+`$HOME`, so it stays a manual step: as the seat user, delete the file and
+`systemctl --user restart pipewire-pulse`; confirm with `ss -tln | grep 4713` (nothing) and
+`pactl info` still working over the unix socket. Recorded here so the next audio audit does not
+rediscover it.
