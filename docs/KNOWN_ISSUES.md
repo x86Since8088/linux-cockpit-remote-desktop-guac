@@ -729,3 +729,73 @@ authentication, for no benefit. Not something a system-scope installer should ed
 `systemctl --user restart pipewire-pulse`; confirm with `ss -tln | grep 4713` (nothing) and
 `pactl info` still working over the unix socket. Recorded here so the next audio audit does not
 rediscover it.
+
+### I45 · Typing "<" sent ">" to the guest (Xvfb ISO-compat keycode collides with a held Shift) · Sev M · FIXED (1.4.2.20260928)
+Reproduced live against a throwaway Xvfb with `x11vnc -debug_keyboard`: the bridge runs
+`x11vnc -nomodtweak` (see I39a), so x11vnc never adds or removes an X11 modifier itself — it resolves a
+keysym to an Xvfb keycode the way Xlib's `XKeysymToKeycode` does (lowest shift-level column, tie-broken
+by lowest keycode) and presses that keycode as-is, trusting whatever modifier is already down. The Xvfb
+"us" keymap defines an ISO-only compat key (keycode 94, no physical existence on a real US keyboard) as
+`[less, greater, bar, brokenbar]`; `less`'s lowest-column location is that key's UNSHIFTED level. A US
+client always holds real Shift to type "<", and Shift + that same keycode's level 1 is "greater" — so
+"<" silently arrives at the guest as ">". (`greater` and `bar` were already resolving to their correct,
+unambiguous keycode by the same Xlib rule — only `less`, `parenleft` and `parenright` are genuinely
+mis-resolved keysyms.)
+
+**A first fix attempt (Shift-only, five hardcoded keys) was caught before merge by an independent
+adversarial review agent, plus a live re-check that exposed a follow-on bug in its own bookkeeping —
+recorded here because the reasoning generalizes and the mistake is worth not repeating:**
+- The existing parenleft/parenright fix, and the first pass at this one, assumed Shift is always held
+  when the browser reports these keysyms — true on a US keyboard, not in general. French AZERTY types
+  "(" UNSHIFTED; German types "|" via AltGr, not Shift; and — the finding that actually broke the first
+  attempt — **French AZERTY holds Shift for every digit, and German holds Shift for "."**. A fix that
+  only ever ADDS Shift never handles a client that holds Shift for a key the Xvfb keymap needs
+  UNSHIFTED — the exact same bug, mirrored, and it hits far more characters than the five originally
+  suspected.
+- The first attempt's per-keysym "did I add a synthetic Shift" flag was also unsound against a REAL
+  Shift press/release overlapping a managed key's hold: press "<" with no real Shift held (synthetic
+  Shift added) → user starts holding real Shift for an upcoming ">" → release "<" → the flag says
+  "release the Shift I added", killing the user's now-genuine Shift press.
+
+**Fix (`guac-rdp.js`, `KEYCODE_FIX` + `SHIFT_LEVEL` + `sendGuestKeyEvent`), computed once from a live
+Xvfb "us" keymap dump, not guessed:**
+- `KEYCODE_FIX` — `parenleft`/`parenright`/`less` are genuinely ambiguous keysyms (Xlib's rule picks a
+  keycode xfreerdp3 can't scancode, or one colliding with a held Shift) and get substituted to their one
+  other, unambiguous, always-scancode-able location: digit 9/0, comma. A substitution always relies on
+  the substitute's *shifted* level by construction (Shift+9 is parenleft, not 9's own unshifted
+  meaning) — `needsShift` for a substituted key is hardcoded `true`, never looked up from the
+  substitute's own table entry (that was the bug caught in code review of the second draft, before any
+  of this reached a test run).
+- `SHIFT_LEVEL` — every digit and ASCII punctuation keysym (not letters: unshifted-lower/shifted-upper
+  is universal across every layout, so they need no correction) gets its Shift state forced to match
+  what the Xvfb "us" keymap needs for THAT keysym, regardless of what modifier the client's layout used
+  to produce it — added when missing, or **suppressed** when the client's real Shift doesn't belong
+  there. Only digits/punctuation are managed; Tab/arrows/F-keys/letters/modifiers all pass through
+  untouched, so Ctrl+Shift/Alt+Shift combos — the reason `-nomodtweak` was chosen over x11vnc's own
+  `-modtweak` in the first place (I39a) — are unaffected.
+- The add/remove is undone on keyup checked against the **current** real Shift state, not the state
+  recorded at keydown, so an overlapping real Shift press/release is never fought. State is reset in
+  `teardown()` so a mid-press disconnect can't leak into the next session on the same page.
+
+**Verification:** live end-to-end against a real throwaway Xvfb + `x11vnc -nomodtweak -debug_keyboard`
+for both directions — Shift added for a no-Shift client input (parenleft/parenright/less/greater/bar),
+and Shift suppressed-then-restored for a Shift-holding client input landing on an unshifted target
+(digit "1"): confirmed the actual `XTestFakeKeyEvent` ordering at the X11 level (Shift released before
+the digit keycode is pressed, restored after), not just the JS call sequence.
+**Tests:** `tests/js/keyboard_remap.test.js` (new) loads the actual shipped block (via the
+`TESTHOOK:KEYREMAP` sentinels) into a sandbox and covers both Shift directions, the overlapping-real-
+Shift desync scenario, key-repeat, mid-press client loss and its `teardown()` reset, and the
+pre-existing Meta/Mac-Option remaps; wired into `run_tests.sh`.
+
+### I46 · Numpad decimal key (`KP_Decimal`) resolves to a Brazilian/JIS numpad-comma keycode, not the real numpad `.` · Sev L · OPEN (deferred)
+Found while sweeping the Xvfb "us" keymap for every ambiguous keysym during I45. `KP_Decimal` is bound
+to BOTH `<KPDL>` (keycode 91, the real numpad `.`/Del key, at shift-level column 1) and `<I129>`
+(keycode 129, alias `<KPPT>`, evdev `KEY_KPCOMMA` — a real Brazilian/JIS numpad-comma key — at column
+0 AND column 1). Xlib's `XKeysymToKeycode` rule (lowest column, tie-broken by lowest keycode) resolves
+`KP_Decimal` to keycode 129, not 91. Unlike I45, this is **not a Shift problem** — numpad keys level-
+select on NumLock (a separate XKB modifier axis this file already syncs elsewhere, see the
+NumLock/CapsLock/ScrollLock mirroring near `remoteLocks`), so the I45 fix's machinery doesn't apply
+here, and fixing it needs its own investigation into how NumLock state interacts with x11vnc's keycode
+choice for this specific ambiguity. **Deferred rather than rushed into the I45 fix** — recorded here so
+it isn't lost. Reproduce with `x11vnc -debug_keyboard`: send keysym `0xFFAE` (`KP_Decimal`) and confirm
+which keycode gets XTestFakeKeyEvent'd.
