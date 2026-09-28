@@ -31,6 +31,13 @@ else
   echo "  gjs not present; skipping standalone JS check"
 fi
 
+echo "== JS unit tests (keyboard remap: parenleft/parenright/less/greater/bar, incl. international layouts) =="
+if command -v node >/dev/null 2>&1; then
+  ( cd "$SRC" && node --test tests/js/*.test.js ) || { echo "  FAIL"; fail=1; }
+else
+  echo "  node not present; skipping JS unit tests"
+fi
+
 echo "== INVARIANT: guacd :4822 must be LOOPBACK-only (host-loopback + nft owner-gate design) =="
 # guacd intentionally binds 127.0.0.1:4822 and is protected by the nftables owner-match,
 # NOT by netns isolation. The regression to guard is a NON-loopback bind (0.0.0.0 / a LAN IP).

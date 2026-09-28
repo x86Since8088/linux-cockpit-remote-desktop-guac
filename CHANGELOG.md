@@ -1,3 +1,67 @@
+## 1.4.2.20260928 - 2026-09-28
+
+Fix (I45): typing "<" sent ">" to the guest. The fix generalizes to every
+digit/punctuation key and is international-keyboard-safe -- an independent
+adversarial review caught that a first pass at this fix (Shift-only, five
+hardcoded keys) was itself not layout-safe, and a live check exposed a
+follow-on state-desync bug in that pass's synthetic-Shift bookkeeping; this
+entry describes the corrected version that shipped.
+
+- **Root cause**, reproduced live against a throwaway Xvfb with
+  `x11vnc -debug_keyboard`: the bridge runs `x11vnc -nomodtweak`, which never
+  adds or removes an X11 modifier itself -- it resolves a keysym to a keycode
+  the same way Xlib's `XKeysymToKeycode` does (lowest shift-level column, tied
+  broken by lowest keycode) and presses that keycode as-is, trusting whatever
+  modifier the browser already holds. The Xvfb "us" keymap defines an ISO-only
+  compat key (keycode 94, no physical existence on a real US keyboard) as
+  `[less, greater, bar, brokenbar]`; `less`'s lowest-column location is that
+  key's UNSHIFTED level. A US client always holds real Shift to type "<", and
+  Shift + that same keycode's level 1 is "greater" -- so "<" silently arrived
+  at the guest as ">".
+- **Why the first fix attempt wasn't enough (caught before merge):** an
+  independent review agent pointed out that forcing Shift ON for
+  parenleft/parenright/less/greater/bar (mirroring the existing
+  parenleft/parenright fix) only handles clients that hold Shift for FEWER
+  keys than the Xvfb "us" keymap expects. It doesn't handle the mirror image:
+  a client that holds Shift for a key the Xvfb keymap needs UNSHIFTED --
+  French AZERTY holds Shift for every digit, German holds Shift for ".". That
+  is the exact same bug, reversed, and hits far more characters. The reviewer
+  also found a real desync in the original bookkeeping (an overlapping real
+  Shift press could be incorrectly released on a remapped key's keyup) and a
+  separately-ambiguous numpad-decimal keycode (I46, deferred).
+- **Fix** (`guac-rdp.js`, `KEYCODE_FIX` + `SHIFT_LEVEL` + `sendGuestKeyEvent`):
+  two independent corrections, computed once from the Xvfb "us" keymap
+  (verified against a live dump, not guessed):
+  - `parenleft`/`parenright`/`less` are genuinely ambiguous keysyms (Xlib's
+    rule picks a keycode xfreerdp3 can't scancode, or one that collides with a
+    held Shift) and get substituted to their one other, unambiguous, always-
+    scancode-able location: digit 9/0, comma.
+  - Every digit and ASCII punctuation keysym (not letters -- unshifted-lower /
+    shifted-upper is universal across every layout) gets its Shift state
+    forced to match what the Xvfb keymap needs for THAT keysym, regardless of
+    what modifier the client's layout used to produce it: added when missing,
+    or SUPPRESSED when the client's real Shift doesn't belong there. Only
+    digits/punctuation are managed, so Ctrl+Shift/Alt+Shift combos on letters,
+    Tab, arrows, etc. -- the reason `-nomodtweak` was chosen in the first place
+    -- are completely untouched.
+  - The add/remove is undone on keyup checked against the CURRENT real Shift
+    state, not the state recorded at keydown, so a real Shift press/release
+    that happens to overlap a managed key's hold is never fought or clobbered
+    (this is the desync the reviewer found and it is now closed). State is
+    also reset on `teardown()` so a mid-press disconnect can't leak into the
+    next session on the same page.
+- **Verification:** live end-to-end against a real throwaway Xvfb +
+  `x11vnc -nomodtweak -debug_keyboard` for both directions (Shift added for a
+  no-Shift client input, and Shift suppressed+restored for a Shift-holding
+  client input landing on an unshifted target) -- confirmed the actual
+  `XTestFakeKeyEvent` ordering at the X11 level, not just the JS call
+  sequence.
+- **Tests:** `tests/js/keyboard_remap.test.js` (new, run via `run_tests.sh`)
+  loads the actual shipped remap block (via the `TESTHOOK:KEYREMAP` sentinels
+  in `guac-rdp.js`) into a sandbox and covers both Shift directions, the
+  overlapping-real-Shift desync scenario, key-repeat, mid-press client loss
+  and its `teardown()` reset, and the pre-existing Meta/Mac-Option remaps.
+
 ## 1.4.1.20260927 - 2026-09-27
 
 Docs: the relay defence-layer design, and the CVE register corrected where the

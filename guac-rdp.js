@@ -285,34 +285,135 @@
         try { client.sendKeyEvent(1, keysym); client.sendKeyEvent(0, keysym); } catch (e) { /* ignore */ }
         try { $("display").focus(); } catch (e) { /* keep focus in the session */ }
     }
-    // Keysym fix-ups on the way to the guest. Both are needed because the bridge
+    // Keysym fix-ups on the way to the guest. All are needed because the bridge
     // runs x11vnc in -nomodtweak (which preserves the modifiers the browser sends,
-    // so Ctrl+Shift / Alt+Shift combos are not stripped):
+    // so Ctrl+Shift / Alt+Shift combos are not stripped -- x11vnc itself never adds
+    // or removes a modifier, it just picks an Xvfb keycode for the keysym it's given
+    // and trusts whatever is already held):
     //   * Windows/Super key: Guacamole maps keyCode 91/92 to Meta_L/Meta_R
     //     (0xFFE7/0xFFE8), but remotes want Super_L/R -- GNOME's overview overlay-key
     //     is Super_L and a Windows host's Start menu is LWin (= Super_L's scancode).
     //     Meta_L lands elsewhere (the guest sees an Alt-ish key) and opens neither.
-    //   * Parentheses: "(" / ")" arrive as parenleft/parenright, which x11vnc routes
-    //     to phantom keycodes 187/188 that xfreerdp3 cannot scancode. Send the plain
-    //     9/0 keysym instead; the browser's held Shift (preserved by -nomodtweak)
-    //     makes keycode 18/19 produce "(" / ")" in the guest. (Under -nomodtweak the
-    //     bridge's -skip_keycodes no longer applies, so this moves here.)
     //   * Mac Option/Alt: the Guacamole bundle rewrites a Mac's Alt to
     //     ISO_Level3_Shift (0xFE03), which reaches the guest as AltGr -- so a Mac
     //     client can never send a plain Left Alt and Alt-combos break. On a Mac ONLY,
     //     send Alt_L instead. Genuine AltGr from a non-Mac international keyboard
     //     arrives by a different path and must keep flowing, so this is Mac-gated.
+    // TESTHOOK:KEYREMAP:BEGIN -- tests/js/keyboard_remap.test.js extracts this
+    // exact block (verbatim) and exercises it standalone; keep it self-contained
+    // (only `client`, `keyboard`, `navigator` from the outer scope).
     var IS_MAC = /mac/i.test((typeof navigator !== "undefined" && (navigator.platform || navigator.userAgent)) || "");
     function remapKeysym(ks) {
         switch (ks) {
             case 0xFFE7: return 0xFFEB;                 // Meta_L     -> Super_L
             case 0xFFE8: return 0xFFEC;                 // Meta_R     -> Super_R
-            case 0x28:   return 0x39;                   // parenleft  -> 9 (held Shift = "(")
-            case 0x29:   return 0x30;                   // parenright -> 0 (held Shift = ")")
             case 0xFE03: return IS_MAC ? 0xFFE9 : ks;   // Mac Option: ISO_Level3_Shift -> Alt_L
             default:     return ks;
         }
     }
+    // x11vnc (-nomodtweak) resolves a keysym to an Xvfb keycode the same way
+    // Xlib's XKeysymToKeycode does: the LOWEST shift-level column that carries the
+    // keysym, tie-broken by the LOWEST keycode number -- then presses that keycode
+    // AS-IS, trusting whatever real modifier the browser already has held. That
+    // is correct only when the browser's real modifier state happens to match
+    // what THAT keycode's level needs. Two ways it doesn't:
+    //   * KEYCODE_FIX -- the keysym itself is ambiguous and Xlib's rule picks the
+    //     WRONG keycode outright: parenleft/parenright's lowest-column location is
+    //     a phantom multimedia keycode (187/188) xfreerdp3 cannot scancode --
+    //     dropped silently. less's lowest-column location is an ISO-only compat
+    //     key (keycode 94, "less greater bar brokenbar", no physical key on a real
+    //     US keyboard) at its UNSHIFTED level -- but a US client always holds real
+    //     Shift to type "<", and Shift + that same keycode's level 1 is "greater",
+    //     so "<" silently arrives as ">" (I45). All three have one other,
+    //     unambiguous location (digit row 9/0, the comma key) that IS scancode-able.
+    //   * SHIFT_LEVEL -- the resolved keycode is fine, but its needed Shift state
+    //     doesn't match what produced the keysym on the CLIENT's layout. This cuts
+    //     both ways and affects far more than five keys: a US client always holds
+    //     Shift for "(" and never for ",", but French AZERTY holds Shift for NEITHER
+    //     -- "(" is unshifted there -- and German holds Shift to type "." (it's an
+    //     unshifted key on AZERTY, done via a different key with Shift on German).
+    //     Trusting the client's real modifier is exactly backwards: what matters is
+    //     what the FIXED Xvfb "us" keymap needs for the keysym Guacamole reports,
+    //     which is layout-independent since it depends only on the keysym, not on
+    //     how the client produced it. SHIFT_LEVEL is that lookup, computed once
+    //     from the Xvfb "us" keymap for every digit/punctuation keysym that isn't
+    //     ambiguous (letters are exempt: unshifted-lower/shifted-upper is universal
+    //     across layouts, so they need no correction).
+    // sendGuestKeyEvent applies KEYCODE_FIX first, then makes Shift match
+    // SHIFT_LEVEL[target] -- adding a synthetic Shift when the client didn't hold
+    // one but the keycode needs it, or SUPPRESSING the client's real Shift when the
+    // keycode needs none -- and undoes exactly that adjustment on keyup, rechecked
+    // against the CURRENT real Shift state (not the state at keydown) so a real
+    // Shift press/release that happens to overlap a managed key is never clobbered.
+    // A real Shift (or an unrelated modifier like AltGr) the user is genuinely
+    // holding for something else is never touched. Only digits and ASCII
+    // punctuation are managed -- Tab/arrows/F-keys/letters/modifiers all pass
+    // through untouched, so this cannot reintroduce the Ctrl+Shift+Tab-style
+    // breakage -nomodtweak (see above) was chosen to avoid. Verified with
+    // x11vnc -debug_keyboard for the Shift-holding (US) and no-Shift
+    // (international-layout) input shapes of parenleft/parenright/less/greater/bar.
+    var KEYCODE_FIX = {
+        0x28: 0x39,   // parenleft  -> 9      (ambiguous: phantom keycode 187)
+        0x29: 0x30,   // parenright -> 0      (ambiguous: phantom keycode 188)
+        0x3c: 0x2c    // less       -> comma  (ambiguous: ISO compat keycode 94)
+    };
+    var SHIFT_LEVEL = {   // needsShift, from the Xvfb "us" keymap; digits/punctuation only
+        0x21: true,  0x22: true,  0x23: true,  0x24: true,  0x25: true,  0x26: true,
+        0x27: false, /* apostrophe */          0x2a: true,  0x2b: true, /* *  + */
+        0x2c: false, 0x2d: false, 0x2e: false, 0x2f: false, /* , - . / */
+        0x30: false, 0x31: false, 0x32: false, 0x33: false, 0x34: false,
+        0x35: false, 0x36: false, 0x37: false, 0x38: false, 0x39: false, /* 0-9 */
+        0x3a: true,  0x3b: false, /* : ; */    0x3d: false, /* = */
+        0x3e: true,  0x3f: true,  0x40: true,  /* > ? @ */
+        0x5b: false, 0x5c: false, 0x5d: false, /* [ \ ] */
+        0x5e: true,  0x5f: true,  0x60: false, /* ^ _ ` */
+        0x7b: true,  0x7c: true,  0x7d: true,  0x7e: true  /* { | } ~ */
+    };
+    var GUAC_SHIFT_L = 0xFFE1, GUAC_SHIFT_R = 0xFFE2;
+    var shiftAdjust = {};   // original keysym -> 'add' | 'remove' | null, while its press is active
+    function realShiftDown() {
+        return !!(keyboard && keyboard.pressed &&
+                  (keyboard.pressed[GUAC_SHIFT_L] || keyboard.pressed[GUAC_SHIFT_R]));
+    }
+    function sendGuestKeyEvent(down, ks) {
+        if (!client) return;
+        var target = KEYCODE_FIX[ks];
+        var needsShift;
+        if (target !== undefined) {
+            // A KEYCODE_FIX substitution always relies on the SUBSTITUTE's
+            // shifted level by construction (9's Shift level is parenleft, not
+            // 9's own unshifted meaning) -- this is NOT the substitute's own
+            // natural SHIFT_LEVEL entry.
+            needsShift = true;
+        } else {
+            target = ks;
+            needsShift = SHIFT_LEVEL[ks];
+        }
+        if (needsShift === undefined) { client.sendKeyEvent(down ? 1 : 0, remapKeysym(ks)); return; }
+        if (down) {
+            if (!(ks in shiftAdjust)) {
+                var shiftIsDown = realShiftDown();
+                if (needsShift && !shiftIsDown) {
+                    client.sendKeyEvent(1, GUAC_SHIFT_L); shiftAdjust[ks] = 'add';
+                } else if (!needsShift && shiftIsDown) {
+                    client.sendKeyEvent(0, GUAC_SHIFT_L); shiftAdjust[ks] = 'remove';
+                } else {
+                    shiftAdjust[ks] = null;
+                }
+            }
+            client.sendKeyEvent(1, target);
+        } else {
+            client.sendKeyEvent(0, target);
+            var adj = shiftAdjust[ks]; delete shiftAdjust[ks];
+            // Recheck the REAL state now, not what it was at keydown: if a real
+            // Shift press/release happened to overlap this key's hold, respect it
+            // instead of fighting it.
+            if (adj === 'add' && !realShiftDown()) client.sendKeyEvent(0, GUAC_SHIFT_L);
+            else if (adj === 'remove' && realShiftDown()) client.sendKeyEvent(1, GUAC_SHIFT_L);
+        }
+    }
+    function resetShiftAdjust() { shiftAdjust = {}; }
+    // TESTHOOK:KEYREMAP:END
     function addWinKeyButton(bar) {
         var wrap = document.createElement("div"); wrap.className = "f";
         var b = document.createElement("button");
@@ -666,6 +767,7 @@
         if (disposing) return;
         disposing = true;
         if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
+        resetShiftAdjust();   // a mid-press disconnect must not leak a stale add/remove into the next session
         var lockBox = $("display");
         if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
         if (lockBox && clipReadHandler) lockBox.removeEventListener("focus", clipReadHandler, true);
@@ -981,8 +1083,8 @@
         };
         box.addEventListener("focus", clipReadHandler, true);
         keyboard = new Guacamole.Keyboard(box);
-        keyboard.onkeydown = function (k) { if (client) client.sendKeyEvent(1, remapKeysym(k)); };
-        keyboard.onkeyup = function (k) { if (client) client.sendKeyEvent(0, remapKeysym(k)); };
+        keyboard.onkeydown = function (k) { sendGuestKeyEvent(true, k); };
+        keyboard.onkeyup = function (k) { sendGuestKeyEvent(false, k); };
 
         // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
         // forwards a lock KEY when it is pressed live, but never knew the browser's
