@@ -417,7 +417,7 @@ def write_snapshot(dep_dir, timestamp, data):
     _write_json_atomic(summary_path, data.get("summary") or {})
 
 
-def attributable_transaction_id(pm, current_tx, prev_snapshot, label):
+def attributable_transaction_id(pm, current_tx, before_tx, label):
     """The dnf/yum transaction id to record in THIS snapshot, or None.
     "before" (and unlabeled) snapshots are just a baseline picture -- whatever
     is newest right now is recorded unconditionally, nothing to attribute yet.
@@ -426,16 +426,23 @@ def attributable_transaction_id(pm, current_tx, prev_snapshot, label):
     dnf/yum transaction (run moments before a --with-deps deploy that itself
     changed nothing) get rolled back by mistake: nothing established the
     recorded transaction was ever CAUSED by this run's own install_deps().
-    Comparing against the immediately-preceding snapshot's own transaction id
-    (the "before" picture deploy.sh's do_deploy() takes right before
-    install_deps() runs) tells the difference: unchanged means install_deps()
-    caused no new transaction, and nothing should be recorded to undo."""
+    `before_tx` is THIS SAME deploy.sh run's own "before" snapshot's
+    transaction id, threaded through explicitly via --before-tx (see
+    deploy.sh's run_depsnapshot()) -- deliberately NOT inferred by loading
+    "whatever snapshot happens to be newest on disk", since that can silently
+    resolve to an unrelated earlier run's snapshot when THIS run's own
+    "before" snapshot failed to write (best-effort/non-fatal) or raced with a
+    concurrent deploy. If before_tx is unknown, refuse to attribute rather
+    than guess: an "after" snapshot with no recorded transaction just means
+    rollback has nothing to undo yet (safe); misattributing an unrelated
+    transaction is not."""
     if pm not in ("dnf", "yum") or current_tx is None:
         return None
     if label != "after":
         return current_tx
-    prev_tx = (prev_snapshot or {}).get("dnf_transaction_id")
-    return current_tx if current_tx != prev_tx else None
+    if not before_tx:
+        return None
+    return current_tx if current_tx != before_tx else None
 
 
 def cmd_snapshot(args):
@@ -449,7 +456,8 @@ def cmd_snapshot(args):
         p["tracked"] = p["name"] in tracked_names
     prev = DC.load_snapshot(dep_dir, "latest")
     current_tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
-    dnf_tx = attributable_transaction_id(pm, current_tx, prev, args.label)
+    before_tx = args.before_tx if args.label == "after" else None
+    dnf_tx = attributable_transaction_id(pm, current_tx, before_tx, args.label)
     timestamp = DC.now_timestamp()
     noncompliant = sum(1 for t in tracked.values() if not t["compliant"])
 
@@ -480,6 +488,13 @@ def cmd_snapshot(args):
     log("snapshot %s written: %d packages, %d tracked (%d noncompliant), pkg_mgr=%s%s"
         % (timestamp, len(inv), len(tracked), noncompliant, pm or "none detected",
            " (dnf tx=%s)" % dnf_tx if dnf_tx else ""))
+    if args.label == "before":
+        # Machine-parseable, on its own line: deploy.sh's run_depsnapshot()
+        # captures this and threads it into the matching "after" call via
+        # --before-tx, so attribution never has to guess which on-disk
+        # snapshot was really THIS run's own baseline (see
+        # attributable_transaction_id()).
+        print("DEPSNAPSHOT_BEFORE_TX=%s" % (dnf_tx or ""), flush=True)
     return 0
 
 
@@ -529,6 +544,11 @@ def main(argv=None):
     sp.add_argument("--deploy-version", required=True, help="this project's VERSION being deployed")
     sp.add_argument("--label", default="", choices=["", "before", "after"],
                     help="which half of the deploy.sh run took this snapshot (metadata only)")
+    sp.add_argument("--before-tx", default=None,
+                    help="THIS SAME run's own '--label before' transaction id, as printed "
+                         "by that call's DEPSNAPSHOT_BEFORE_TX= line -- only meaningful "
+                         "with --label after; establishes a positive attribution baseline "
+                         "instead of trusting whatever snapshot happens to be newest on disk")
 
     sub.add_parser("rollback", help="undo the most recent dnf/yum transaction (dnf/yum only)")
 

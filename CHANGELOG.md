@@ -40,6 +40,25 @@ rollback where the host's package manager genuinely supports one.
   inventory (2656 packages, all 9 tracked prerequisites correctly mapped and
   compliant); `dnf`/`yum`/`pacman`/`zypper` paths were code-reviewed and
   unit-tested with mocks, not exercised against a live host of those distros.
+- **Follow-up fixes from two rounds of adversarial review**, before this reaches
+  `main`: the rollback unit's timeout chain (unit/script/relay each disagreed on
+  how long a `dnf history undo` may run); the recorded transaction id was
+  "whatever is newest on the host" rather than verified to have been caused by
+  this run's own `install_deps()`, and — found in a second pass, after the first
+  fix's own `<timestamp>.summary.json` companion file broke `load_snapshot()`'s
+  "latest" lookup — that verification was silently defeated in real execution
+  even though every test passed, because "latest" resolved to the small summary
+  object instead of the full snapshot. Attribution is now threaded explicitly
+  (`deploy.sh` passes the "before" snapshot's own transaction id to the "after"
+  call via `--before-tx`, never inferred from whatever happens to be newest on
+  disk) and refuses to record anything when that baseline is unknown, rather
+  than guessing; a regression test now writes both files together and asserts
+  "latest" returns the full snapshot. Also fixed: the "before" snapshot ran
+  after `install_deps()` had already changed packages; `list_snapshots()` read
+  full package arrays just for a summary; a failed reverse-dependency check
+  rendered identically to a real "nothing depends on this"; and stale comments
+  pointing at files that don't exist on this branch. `run_tests.sh` green
+  throughout (185 relay tests, up from 167).
 
 ## 1.6.2.20260929 - 2026-09-29
 

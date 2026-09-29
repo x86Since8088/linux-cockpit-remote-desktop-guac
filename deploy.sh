@@ -193,11 +193,23 @@ create_users() {
 # not load-bearing) -- warn and continue, matching pull_image()'s own graceful
 # degradation on a pull failure.
 # ---------------------------------------------------------------------------
+# DEPSNAPSHOT_BEFORE_TX carries the "before" call's own dnf/yum transaction id
+# forward to the matching "after" call within THIS SAME deploy.sh process only
+# (never persisted, never read from anywhere else) -- see
+# attributable_transaction_id() in depcheck/edy-rdp-depsnapshot.py for why
+# attribution must be threaded through positively like this rather than by
+# re-reading "whatever snapshot happens to be newest on disk".
+DEPSNAPSHOT_BEFORE_TX=""
+
 run_depsnapshot() {
     local label=$1 script="$ROOT_D/payload/depcheck/edy-rdp-depsnapshot.py" out rc=0
+    local -a extra_args=()
     if [[ ! -x "$script" ]]; then
         warn "dependency snapshot ($label) skipped: $script missing or not executable"
         return 0
+    fi
+    if [[ "$label" == after && -n "$DEPSNAPSHOT_BEFORE_TX" ]]; then
+        extra_args=(--before-tx "$DEPSNAPSHOT_BEFORE_TX")
     fi
     # depcheck/edy-rdp-depsnapshot.py imports its sibling module (relay/depcheck.py)
     # the same sys.path.insert(dirname(__file__)) idiom relay/edy_rdp_reaper.py
@@ -208,9 +220,13 @@ run_depsnapshot() {
     # payload's own relay/ directory instead of relying on that flattening.
     out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" snapshot --root "$ROOT_D" \
                               --requires "$ROOT_D/payload/$REQUIRES" \
-                              --deploy-version "$VERSION" --label "$label" 2>&1)" || rc=$?
+                              --deploy-version "$VERSION" --label "$label" \
+                              "${extra_args[@]}" 2>&1)" || rc=$?
     if (( rc == 0 )); then
         say snapshot "dependency snapshot ($label) recorded"
+        if [[ "$label" == before ]]; then
+            DEPSNAPSHOT_BEFORE_TX="$(sed -n 's/^DEPSNAPSHOT_BEFORE_TX=//p' <<<"$out" | tail -n1)"
+        fi
     else
         warn "dependency snapshot ($label) failed (non-fatal, diagnostic only -- see
        docs/KNOWN_ISSUES.md I51):

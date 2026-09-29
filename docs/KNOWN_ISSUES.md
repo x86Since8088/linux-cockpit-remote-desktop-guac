@@ -1007,3 +1007,25 @@ this dev host's own live `apt-get`/`dpkg` inventory (2656 packages, all 9 tracke
 correctly mapped and compliant, including `freerdp`→`freerdp3-x11` and the `xvfb` Debian-epoch version
 string); `dnf`/`yum`/`pacman`/`zypper` code paths were reviewed against each tool's own command
 reference and unit-tested with mocks, not exercised against a live host of those distros.
+
+**Follow-up (two rounds of adversarial review, pre-`main`):** the first pass fixed 8 findings —
+including that the rollback unit's own timeout was shorter than the `dnf history undo` it runs, and
+that the recorded transaction id was "whatever is newest on the host" rather than verified to have
+been caused by this run's own `install_deps()`. Fixing the second issue (F4: a small
+`<timestamp>.summary.json` companion file, so `list_snapshots()` need not load full package arrays)
+introduced a THIRD bug that a second review pass caught: `load_snapshot(dir, "latest")` globs `*.json`
+without excluding that companion, and `.summary.json` sorts lexically after `.json`, so "latest"
+always resolved to the summary object — silently defeating both the timeout fix (rollback now always
+refused, since the summary object has no `dnf_transaction_id`) and the attribution fix (comparing
+against a summary's always-absent `dnf_transaction_id`), with every one of 91 passing tests still
+green throughout, because none of them wrote the companion file before calling `load_snapshot()`.
+Fixed by excluding `SUMMARY_SUFFIX` files in `load_snapshot()`'s own "latest" branch (mirroring
+`list_snapshots()`'s existing filter), and by making attribution positive rather than inferred:
+`deploy.sh` now threads the "before" snapshot's own transaction id to the "after" call explicitly via
+`--before-tx` (a plain process-local shell variable, never persisted), refusing to record anything if
+that baseline is unknown — a failed/missing "before" snapshot (deliberately non-fatal) no longer risks
+silently comparing against an unrelated earlier deploy's snapshot. A regression test now writes both
+the full snapshot and its companion together and asserts "latest" returns the full one; the
+before/after attribution flow was additionally verified end to end with a scripted two-call simulation
+(both a real-transaction case and a failed-"before" misattribution case), not just isolated
+pure-function unit tests.

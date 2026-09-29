@@ -11,6 +11,7 @@
 # importlib, since its filename is not a valid module name) with every real
 # subprocess call mocked out the same way.
 import importlib.util
+import json
 import os
 import shutil
 import stat
@@ -346,6 +347,23 @@ class SnapshotDirRoundTrip(unittest.TestCase):
     def test_load_unknown_timestamp_is_none(self):
         self._write("20260101T000000Z")
         self.assertIsNone(DC.load_snapshot(self.tmp, "20991231T000000Z"))
+
+    def test_load_latest_skips_the_summary_companion_file(self):
+        # KNOWN_ISSUES I51 F4 regression: write_snapshot() (depcheck/edy-rdp-
+        # depsnapshot.py) writes <ts>.summary.json alongside <ts>.json for
+        # list_snapshots()'s cheap reads. ".summary.json" sorts lexically
+        # AFTER ".json" for the same timestamp, so a naive `sorted(glob(...))
+        # [-1]` picks the summary file instead of the full snapshot -- and
+        # since write_snapshot() always writes both, this is not a rare edge
+        # case, it is what every real "latest" lookup sees.
+        self._write("20260101T000000Z")
+        self._write("20260201T000000Z")
+        with open(os.path.join(self.tmp, "20260201T000000Z.summary.json"), "w") as fh:
+            json.dump({"timestamp": "20260201T000000Z"}, fh)
+        snap = DC.load_snapshot(self.tmp, "latest")
+        self.assertEqual(snap["timestamp"], "20260201T000000Z")
+        self.assertIn("packages", snap)
+        self.assertIn("tracked", snap)
 
     def test_corrupt_file_skipped_not_fatal(self):
         self._write("20260101T000000Z")
@@ -688,26 +706,34 @@ class AttributableTransactionId(unittest.TestCase):
 
     def test_non_after_label_records_whatever_is_newest(self):
         self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", None, "before"), "7")
-        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", {"dnf_transaction_id": "7"}, ""), "7")
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", "6", ""), "7")
 
     def test_after_label_records_only_a_changed_transaction(self):
-        prev = {"dnf_transaction_id": "6"}
-        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", prev, "after"), "7")
+        # before_tx is THIS SAME run's own "before" snapshot's tx, threaded
+        # through explicitly by deploy.sh's --before-tx -- never inferred from
+        # whatever snapshot happens to be newest on disk (KNOWN_ISSUES I51 F2
+        # follow-up: a failed/missing "before" write must never silently fall
+        # back to an unrelated earlier run's snapshot).
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", "6", "after"), "7")
 
     def test_after_label_refuses_to_attribute_an_unchanged_transaction(self):
         # install_deps() caused nothing new -- the newest tx on the host is
         # whatever it already was before this run touched anything, so it must
         # NOT be recorded (that would let a rollback undo an unrelated,
         # pre-existing operator transaction -- see cmd_rollback()'s exit 3).
-        prev = {"dnf_transaction_id": "6"}
-        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "6", prev, "after"))
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "6", "6", "after"))
 
-    def test_after_label_with_no_previous_snapshot_records_current(self):
-        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", None, "after"), "7")
+    def test_after_label_with_no_before_tx_refuses_rather_than_guessing(self):
+        # An unknown baseline (the "before" call failed, raced, or this is an
+        # older depsnapshot.py invoked without --before-tx) must refuse to
+        # attribute rather than fall back to "record whatever is newest" --
+        # that fallback was the original F2 bug.
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", None, "after"))
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", "", "after"))
 
     def test_non_dnf_yum_or_no_current_tx_is_always_none(self):
-        self.assertIsNone(self.mod.attributable_transaction_id("apt-get", "7", None, "after"))
-        self.assertIsNone(self.mod.attributable_transaction_id("dnf", None, None, "after"))
+        self.assertIsNone(self.mod.attributable_transaction_id("apt-get", "7", "6", "after"))
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", None, "6", "after"))
 
     def test_no_attributable_transaction_produces_a_rollback_refusal(self):
         # End-to-end through cmd_rollback()'s own exit-3 path: a snapshot with

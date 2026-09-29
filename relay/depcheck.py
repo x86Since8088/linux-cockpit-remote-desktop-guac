@@ -300,7 +300,10 @@ def load_snapshot(directory, timestamp_or_latest="latest"):
     if not directory or not os.path.isdir(directory):
         return None
     if timestamp_or_latest == "latest":
-        files = sorted(glob.glob(os.path.join(directory, "*.json")))
+        files = sorted(
+            p for p in glob.glob(os.path.join(directory, "*.json"))
+            if not p.endswith(SUMMARY_SUFFIX)
+        )
         if not files:
             return None
         path = files[-1]
