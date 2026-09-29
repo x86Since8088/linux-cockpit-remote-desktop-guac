@@ -16,6 +16,7 @@
     <button class="tab active" id="tab-connect" data-panel="panel-connect">Connect</button>
     <button class="tab" id="tab-sessions" data-panel="panel-sessions">Active Sessions</button>
     <button class="tab" id="tab-deskui" data-panel="panel-deskui">Desktop UI</button>
+    <button class="tab" id="tab-update" data-panel="panel-update">Update<span id="update-badge" class="badge-dot" hidden></span></button>
     <button class="tab" id="tab-selftests" data-panel="panel-selftests">Self Tests</button>
   </div>
 
@@ -140,6 +141,31 @@
              placeholder="host name">
     </div>
     <div class="status" id="deskui-status">Read-only view of this host's desktop state.</div>
+  </section>
+
+  <section id="panel-update" class="panel" hidden>
+    <div class="bar">
+      <button id="update-check" class="sec"
+              title="Force a live check against GitHub for a newer Release (rate-limited to once a minute)">Check now</button>
+      <span class="hint" id="update-note"></span>
+    </div>
+    <table class="sessions" id="update-state-table">
+      <tbody id="update-state-body"><tr><td colspan="2" class="muted">Loading…</td></tr></tbody>
+    </table>
+    <div class="bar" id="update-actions">
+      <button id="update-apply" class="sec danger" disabled
+              title="Fetch and install the latest release, then restart the relay (automatic rollback if it fails its health check)">Update now</button>
+      <button id="update-rollback" class="sec" disabled
+              title="Swap back to the previous version and restart the relay">Roll back</button>
+    </div>
+    <div class="f" id="update-confirm-wrap" hidden>
+      <label for="update-confirm">To update now, type this host's name (<span id="update-hostname" class="mono"></span>)</label>
+      <input id="update-confirm" type="text" name="update-confirm-host"
+             autocomplete="off" autocapitalize="off" spellcheck="false" size="24"
+             placeholder="host name">
+    </div>
+    <div class="status" id="update-last-apply" hidden></div>
+    <div class="status" id="update-status">Read-only view of this host's update state.</div>
   </section>
 
   <section id="panel-selftests" class="panel" hidden>

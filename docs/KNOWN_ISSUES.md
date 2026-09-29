@@ -970,3 +970,29 @@ to something the manifest actually installs. Not live-tested against a real tagg
 this pass (none exists yet, per the note above) — the mechanics were exercised via mocked
 `urllib`/`subprocess`/socket calls only, never a real network call, per this project's existing test
 philosophy.
+
+**Follow-up (same 1.7.0.20260929, frontend half): the "Update" tab.** A new tab (`guac-rdp.js`'s
+`TAB_NAMES`/`selectTab()`, `index.html`'s `#panel-update`) reads and drives the four control ops
+above: `update-status` on tab-open (plus once at page load, for the badge — no new polling timer in
+the browser), `update-check`/`update-apply`/`update-rollback` on their own buttons. "Update now" is
+admin-gated and stays disabled until `update_available` is true, then needs the operator to type this
+host's name to confirm — built as a direct sibling of the Desktop UI tab's Stop/Disable confirmation
+UX (same `-confirm-wrap` pattern, same "type the host name to confirm" copy). "Roll back" is
+admin-gated with no typed confirmation, per the contract's own low-friction-recovery /
+disruptive-needs-confirmation asymmetry. A wrinkle worth recording: `update-status`/`update-check`
+never carry this host's name (unlike `deskui-status`) — only `update-apply`'s `need_confirm` refusal
+does — so the tab borrows `deskui-status`'s `hostname` field (read-only, not admin-gated) as the
+confirmation label rather than adding a new field to the wire contract; both controllers derive it
+identically (`socket.gethostname()`, same relay process) and the relay re-checks its own value
+regardless. An available update (and any recorded `last_apply` outcome) is ongoing host STATE, not a
+one-off event, so it is surfaced two ways that both deliberately avoid `showToast()` (I48's
+auto-dismissing transient notice): a small persistent badge dot on the tab itself
+(`#update-badge`/`.badge-dot`), and `last_apply`'s outcome text (e.g. "...failed its health check and
+was automatically rolled back to...") as its own non-auto-dismissing status line. Verified with a
+scratch jsdom smoke test (same ad hoc, throwaway approach as this entry's own — loads the real
+`index.html`/`guac-rdp.js` with `cockpit`'s channel/permission plumbing stubbed): version/release-link
+rendering, the bootstrap "no releases published yet" wording shown verbatim (this repository's actual
+current state), the badge tracking `update_available`, "Update now" refusing to fire until both
+`update_available` and a matching typed hostname hold, "Roll back" firing with no `confirm` field, a
+non-admin never seeing either button enable, and `last_apply` rendering/hiding correctly. `run_tests.sh`
+re-run green (untouched Python/relay half included).

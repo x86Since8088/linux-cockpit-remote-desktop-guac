@@ -104,6 +104,45 @@ separate piece built against the contract documented below and in `docs/SELFUPDA
   this pass — none exists yet on this repository, per the note above — nor is there a
   Cockpit "Update" tab to click yet; that UI half lands as a follow-up to this same
   entry, against the contract documented in `docs/SELFUPDATE.md`.
+- **Frontend follow-up (same entry): the "Update" tab.** A new tab, alongside Connect/
+  Active Sessions/Desktop UI/Self Tests, reads exactly against the control-op contract
+  above (`update-status` on tab-open, `update-check`/`update-apply`/`update-rollback` on
+  their buttons — no new polling timer in the browser). Shows current/latest version,
+  the release name and a release-notes link when present, when the host was last
+  checked, and — read verbatim from `check_error` rather than paraphrased — the exact
+  "no releases published yet for `<repo>`" wording `docs/SELFUPDATE.md` documents for
+  this repository's own current bootstrap state (no Releases cut yet). "Update now" is
+  admin-gated and disabled until `update_available` is true, then needs the operator to
+  type this host's name to confirm — built as a direct sibling of the Desktop UI tab's
+  existing Stop/Disable confirmation UX (`#deskui-confirm-wrap`/`deskuiSyncButtons()`),
+  down to the copy style. "Roll back" is admin-gated but needs no typed confirmation, per
+  the contract's own stated asymmetry (recovery stays low-friction; the disruptive verb
+  carries the confirmation). One wire-contract wrinkle worth flagging: unlike
+  `deskui-status`, `update-status`/`update-check` never carry this host's name (only
+  `update-apply`'s `need_confirm` refusal does) — `renderUpdate()` borrows the read-only,
+  non-admin-gated `deskui-status` op's `hostname` field as the confirmation label instead
+  of guessing or adding a new op, since both controllers derive it identically
+  (`socket.gethostname()`, same relay process); the relay re-derives and checks its own
+  value regardless of what the label shows. `last_apply`'s outcome (e.g. "Update to
+  1.7.0.20260929 failed its health check and was automatically rolled back to
+  1.6.1.20260929") is surfaced as its own persistent status line, not the auto-dismissing
+  `showToast()` introduced in I48 — that component is for one-off events the panel did on
+  its own, and both an available update and a recorded apply/rollback outcome are ongoing
+  host STATE that should stay visible until the operator deals with it, so the "Update"
+  tab also carries a small persistent badge dot (`#update-badge`, styled in
+  `guac-rdp.css` from this project's existing `--panel`/`--ink`/`--line`/`--err` tokens,
+  no new colors), refreshed from the same `update-status` reads rather than a
+  browser-side timer of its own. **Verification:** a scratch jsdom smoke test (same
+  ad hoc, throwaway approach as I47/I48 — not a repo dependency) loads the real
+  `index.html` + `guac-rdp.js` with `cockpit`'s channel/permission plumbing stubbed and
+  exercises the actual DOM: current/latest version and the release-notes link render;
+  the bootstrap "no releases published yet" wording renders verbatim; the badge tracks
+  `update_available`; "Update now" stays disabled with no confirmation typed (even with
+  an update available), enables only once the typed value matches the host name, and
+  never fires `update-apply` before `update_available` is true; "Roll back" fires with
+  no `confirm` field at all; a non-admin never sees either button become clickable; and
+  `last_apply`'s outcome text is shown/hidden correctly. `node --check guac-rdp.js` and
+  `./run_tests.sh` both green (the latter re-runs the untouched Python/relay half too).
 
 ## 1.6.1.20260929 - 2026-09-29
 
