@@ -39,6 +39,19 @@ EDY_RDP_GUACD=127.0.0.1:4822
 # only decides who may ask. Must exist on the host (getent group).
 EDY_RDP_ADMIN_GROUP=sudo
 
+# Unix group additionally required to point the console mirror at a DIFFERENT
+# signed-in user's desktop (on top of EDY_RDP_ADMIN_GROUP above, unchanged).
+# Being an admin decides whether you may use the mirror at all; this decides
+# whether you may use it to watch a SPECIFIC other person's active session.
+# Does not apply when nobody else is signed in at the seat, or when the
+# signed-in user IS the requester. Unlike EDY_RDP_ADMIN_GROUP this group is NOT
+# required to exist on the host — a missing group just means nobody currently
+# passes this gate (fail closed), which is the safe out-of-the-box default; an
+# operator opts in with `groupadd rdp-shadow` and `usermod -aG rdp-shadow
+# <user>` (or points this at an existing group). Set empty to turn this extra
+# gate off entirely and revert to admin-only console gating.
+EDY_RDP_SHADOW_GROUP=rdp-shadow
+
 # Where the relay persists its session registry. On tmpfs, so it does not survive
 # a reboot - which is correct, because live guacd and grd sessions do not either.
 # Absolute path.
@@ -133,6 +146,14 @@ EDY_RDP_PULSE_SEAT_UID=1000
 #PULSE_SERVER=unix:/run/pulse/native
 #PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor
 # Upgrading from 1.3.x: PULSE_SERVER=unix:/run/pulse.sock is refused as stale - change it to unix:/run/pulse/native.
+
+# --- self-update (check for / apply / roll back a newer tagged Release) -----
+
+# GitHub "owner/repo" this project's own Update tab checks for a newer tagged
+# Release than what is installed. A location, not a secret. Checking and
+# applying are available to any Cockpit administrator by default -- there is no
+# separate enable flag for this feature, only this repo override.
+EDY_RDP_UPDATE_REPO=x86Since8088/linux-cockpit-remote-desktop-guac
 
 # --- the 3390 "Remote Login" door -------------------------------------------
 

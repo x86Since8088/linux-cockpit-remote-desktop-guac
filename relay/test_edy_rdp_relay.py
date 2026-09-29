@@ -475,6 +475,318 @@ class SecurityValuesAreAcceptedByFreeRDP(unittest.TestCase):
         self.assertEqual(sec, "nla")
 
 
+class SeatedSessionPredicate(unittest.TestCase):
+    """_is_seated_graphical_session() is the pure per-session classifier
+    seated_uids() applies to each loginctl show-session property dict --
+    no subprocess involved, same style as LockedScreenHint above."""
+    def test_seated_graphical(self):
+        self.assertTrue(R._is_seated_graphical_session(
+            {"Type": "wayland", "Active": "yes", "Seat": "seat0", "Class": "user"}))
+        self.assertTrue(R._is_seated_graphical_session(
+            {"Type": "x11", "Active": "yes", "Seat": "seat0", "Class": "user"}))
+
+    def test_not_seated(self):
+        for props in (
+            {"Type": "wayland", "Active": "yes", "Seat": "seat0", "Class": "greeter"},
+            {"Type": "tty", "Active": "yes", "Seat": "seat0", "Class": "user"},
+            {"Type": "wayland", "Active": "yes", "Seat": "", "Class": "user"},
+            {"Type": "wayland", "Active": "no", "Seat": "seat0", "Class": "user"},
+            {},
+        ):
+            self.assertFalse(R._is_seated_graphical_session(props))
+
+
+class ShadowGateDecision(unittest.TestCase):
+    """shadow_gate_required() encodes the actual security decision -- pure,
+    no I/O -- so it is exercised directly with literal seated-set/requester
+    combinations, the same way LockedScreenHint drives its pure helper."""
+    def test_not_required_when_nobody_seated(self):
+        self.assertFalse(R.shadow_gate_required(set(), 1000))
+
+    def test_not_required_when_only_requester_seated(self):
+        self.assertFalse(R.shadow_gate_required({1000}, 1000))
+
+    def test_required_when_a_different_uid_seated(self):
+        self.assertTrue(R.shadow_gate_required({1000, 2000}, 1000))
+        self.assertTrue(R.shadow_gate_required({2000}, 1000))
+
+    def test_required_when_undetermined(self):   # fail closed, like is_admin()
+        self.assertTrue(R.shadow_gate_required(None, 1000))
+
+
+class ConsoleShadowGate(unittest.TestCase):
+    """Integration-level: drives the real _peek_scenario_from_connect for
+    scenario=console with seated_uids() monkey-patched, the same style Guard
+    already uses for R.bridge.start_bridge."""
+
+    class _FakeProc:
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def poll(self): return None
+        def kill(self): pass
+
+    def _conn(self, uid, admin_group="sudo", shadow_group="rdp-shadow"):
+        c = R.Connection(client=None, uid=uid, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group=admin_group,
+                         shadow_group=shadow_group)
+        c.arg_names = ["hostname", "port", "password"]
+        return c
+
+    def _connect_console(self, c):
+        orig_bridge = R.bridge.start_bridge
+        R.bridge.start_bridge = lambda *a, **k: (
+            {"VNCHOST": "127.0.0.1", "VNCPORT": "6001", "VNCPASS": "secret"},
+            self._FakeProc())
+        try:
+            return c._peek_scenario_from_connect(
+                ["connect", "scenario=console", "rdpcred=u" + "\x1f" + "p"])
+        finally:
+            R.bridge.start_bridge = orig_bridge
+            if c.desktop_id:
+                R.DESKTOP_SLOTS.release(c.desktop_id, c)
+            if c._bridge_counted:
+                R.BRIDGE_COUNTER.release(c.uid)
+
+    def test_nobody_seated_admin_only_gate_applies(self):
+        # uid 0 would pass is_admin() unconditionally regardless of the shadow
+        # gate's own exemption logic, so a non-root admin (not a shadow-group
+        # member) is used here -- this actually proves the gate was SKIPPED,
+        # not merely that it ran and trivially passed because the caller is
+        # root (found by review: the original version of this test used uid 0
+        # and could not tell the two apart).
+        c = self._conn(4242)
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: set()
+        R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, NOT a shadow member
+        try:
+            self._connect_console(c)   # must not raise: nobody seated, gate does not apply
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_same_user_seated_allowed_without_shadow_membership(self):
+        c = self._conn(4242)   # see test_nobody_seated_admin_only_gate_applies for why not uid 0
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {4242}
+        R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, NOT a shadow member
+        try:
+            self._connect_console(c)   # must not raise: requester is the one seated
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_different_user_seated_and_not_in_shadow_group_refused(self):
+        c = self._conn(4242)
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {1000}
+        # admin (so the EXISTING admin gate passes) but not a shadow-group member
+        R.is_admin = lambda uid, group="sudo": group == "sudo"
+        try:
+            with self.assertRaises(R.Refuse):
+                self._connect_console(c)
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_different_user_seated_and_in_shadow_group_allowed(self):
+        c = self._conn(4242)
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {1000}
+        R.is_admin = lambda uid, group="sudo": True   # admin AND shadow-group member
+        try:
+            self._connect_console(c)   # must not raise
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_seated_undetermined_fails_closed_unless_shadow_member(self):
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: None   # categorical failure -- cannot rule out someone else
+        try:
+            R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, not shadow member
+            c = self._conn(4242)
+            with self.assertRaises(R.Refuse):
+                self._connect_console(c)
+
+            R.is_admin = lambda uid, group="sudo": True   # admin AND shadow member
+            c = self._conn(4242)
+            self._connect_console(c)   # must not raise
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_shadow_group_empty_disables_gate(self):
+        c = self._conn(4242, shadow_group="")
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {1000}   # a different uid IS seated
+        R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, not a shadow member
+        try:
+            self._connect_console(c)   # feature off -> admin gate alone is enough
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+
+class SeatedUidsSubprocessHandling(unittest.TestCase):
+    """Drives the REAL seated_uids() against a fake subprocess.run -- the one
+    thing every ConsoleShadowGate test above deliberately bypasses by
+    monkey-patching seated_uids() itself away. This is what actually catches a
+    regression in the parsing/error-handling glue, not just the gate's policy
+    given a canned seated-uid result."""
+
+    class _Result:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def _run_with(self, fake_run):
+        orig = R.subprocess.run
+        R.subprocess.run = fake_run
+        try:
+            return R.seated_uids()
+        finally:
+            R.subprocess.run = orig
+
+    def test_list_sessions_nonzero_is_categorical_failure(self):
+        self.assertIsNone(self._run_with(lambda *a, **k: self._Result(returncode=1)))
+
+    def test_list_sessions_raises_is_categorical_failure(self):
+        def fake_run(*a, **k):
+            raise OSError("no loginctl")
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_clean_success_returns_seated_uid(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            return self._Result(returncode=0, stdout=(
+                "Type=wayland\nActive=yes\nSeat=seat0\nClass=user\nUser=1001\n"))
+        self.assertEqual(self._run_with(fake_run), {1001})
+
+    def test_show_session_exception_is_categorical_not_skipped(self):
+        # Found by review: an earlier version of this function treated a
+        # show-session FAILURE the same as "that session doesn't exist" and
+        # silently returned an empty set -- exactly the fail-open this guards.
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            raise OSError("logind hiccup")
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_show_session_nonzero_is_categorical_not_skipped(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            return self._Result(returncode=1, stdout="")
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_unparseable_user_is_categorical_not_skipped(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            return self._Result(returncode=0, stdout=(
+                "Type=wayland\nActive=yes\nSeat=seat0\nClass=user\nUser=notanumber\n"))
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_greeter_session_excluded_but_others_still_seen(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="1 0 seat0\n2 1001 seat0\n")
+            sid = argv[2]
+            if sid == "1":
+                return self._Result(returncode=0, stdout=(
+                    "Type=wayland\nActive=yes\nSeat=seat0\nClass=greeter\nUser=0\n"))
+            return self._Result(returncode=0, stdout=(
+                "Type=wayland\nActive=yes\nSeat=seat0\nClass=user\nUser=1001\n"))
+        self.assertEqual(self._run_with(fake_run), {1001})
+
+    def test_no_sessions_at_all_returns_empty_set(self):
+        self.assertEqual(self._run_with(lambda *a, **k: self._Result(returncode=0, stdout="")), set())
+
+
+class NonAdminAccess(unittest.TestCase):
+    """Proves an existing property, for docs/GROUP-ACCESS-MODEL.md: isolated, virtual
+    monitor, wayland-vnc and greeter have never had an admin_required path
+    (ADMIN_ONLY_SCENARIOS is exactly {"console"} -- console alone), so reaching the
+    relay at all is already sufficient for a non-admin, non-elevated caller to use
+    them. "Reaching the relay" is modeled here simply as a Connection constructed
+    with a non-admin uid and no session_token_admin -- the real gate is the AF_UNIX
+    socket's group permission (see docs/GROUP-ACCESS-MODEL.md), which is OS-level and
+    out of this module's reach to test directly. Each test just drives
+    _peek_scenario_from_connect and lets an unexpected Refuse fail it naturally,
+    same as the existing success-path tests in Guard above."""
+
+    NONADMIN_UID = 4242   # not in "sudo" on any real host: is_admin() fails closed (KeyError)
+
+    class _FakeProc:
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def poll(self): return None
+        def kill(self): pass
+
+    def _conn(self):
+        c = R.Connection(client=None, uid=self.NONADMIN_UID, table=SR.SessionRegistry(),
+                          guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        c.arg_names = ["hostname", "port", "password"]
+        return c
+
+    def _release(self, c):
+        if c.desktop_id:
+            R.DESKTOP_SLOTS.release(c.desktop_id, c)
+        if c._bridge_counted:
+            R.BRIDGE_COUNTER.release(c.uid)
+
+    def _fake_bridge(self, port):
+        return lambda *a, **k: (
+            {"VNCHOST": "127.0.0.1", "VNCPORT": port, "VNCPASS": "x"}, self._FakeProc())
+
+    def test_isolated_no_admin_required(self):
+        c = self._conn()
+        orig_headless, orig_bridge = R.ensure_headless_session, R.bridge.start_bridge
+        R.ensure_headless_session = lambda uid: {
+            "PORT": "33001", "USER": "isoluser", "CRED": "isolcred",
+            "DESKTOP_ID": "isolated:%d" % uid, "CREATED": None}
+        R.bridge.start_bridge = self._fake_bridge("6001")
+        try:
+            out = c._peek_scenario_from_connect(["connect", "scenario=isolated"])
+        finally:
+            R.ensure_headless_session, R.bridge.start_bridge = orig_headless, orig_bridge
+            self._release(c)
+        self.assertEqual(c.scenario, "isolated")
+        self.assertEqual(out[0], "connect")
+
+    def test_virtual_no_admin_required(self):
+        c = self._conn()
+        orig_bridge = R.bridge.start_bridge
+        R.bridge.start_bridge = self._fake_bridge("6002")
+        try:
+            out = c._peek_scenario_from_connect(
+                ["connect", "scenario=virtual", "rdpcred=u" + "\x1f" + "p"])
+        finally:
+            R.bridge.start_bridge = orig_bridge
+            self._release(c)
+        self.assertEqual(c.scenario, "virtual")
+        self.assertEqual(out[0], "connect")
+
+    def test_wayland_vnc_no_admin_required(self):
+        c = self._conn()
+        orig = R.ensure_waylandvnc_session
+        R.ensure_waylandvnc_session = lambda uid: {"HOST": "127.0.0.1", "PORT": "34001"}
+        try:
+            out = c._peek_scenario_from_connect(["connect", "scenario=wayland-vnc"])
+        finally:
+            R.ensure_waylandvnc_session = orig
+            self._release(c)
+        self.assertEqual(c.scenario, "wayland-vnc")
+        self.assertEqual(out[0], "connect")
+
+    def test_greeter_no_admin_required(self):
+        c = self._conn()
+        orig_bridge = R.bridge.start_bridge
+        R.bridge.start_bridge = self._fake_bridge("6003")
+        try:
+            out = c._peek_scenario_from_connect(
+                ["connect", "scenario=greeter", "rdpcred=u" + "\x1f" + "p"])
+        finally:
+            R.bridge.start_bridge = orig_bridge
+            self._release(c)
+        self.assertEqual(c.scenario, "greeter")
+        self.assertEqual(out[0], "connect")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

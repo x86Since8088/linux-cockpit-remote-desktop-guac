@@ -184,7 +184,7 @@ Mirror + virtual-monitor render fully through guacd today.
 ## Management API + Disconnect cleanup (2026-08-30)
 
 Added a control API on a second socket-activated AF_UNIX socket
-`/run/edy-rdp/control.sock` (0660 group edy-rdp, `edy-rdp-control.socket`):
+`/run/edy-rdp/control.sock` (0660 group cockpit-guac-rdp, `edy-rdp-control.socket`):
 - `control.py` — `handle_control()` (list/terminate/ping), `LiveConnections` (uuid->terminate).
 - Auth by SO_PEERCRED: a user sees/terminates only their own sessions; an admin (or root) all.
 - Relay registers each live connection so `terminate` actually closes it (verified: terminate ->
@@ -208,7 +208,7 @@ arrives (in addition to the 4s keepalive), so guacd's client stays responsive re
 browser tab. Both browser-path Playwright tests (list+terminate, disconnect+cleanup) pass reliably.
 
 ### I28 · Session registry never persisted; reaper pruned a phantom file · Sev M · FIXED
-The relay runs as `edy-relay` but the state dir `/run/edy-rdp` was created `0750 root:edy-rdp`
+The relay runs as `edy-relay` but the state dir `/run/edy-rdp` was created `0750 root:cockpit-guac-rdp`
 (group has only `r-x`), so the relay could not create its atomic temp file and every persist
 silently failed (`_persist_locked` swallows `OSError`). Session state therefore lived only in the
 relay's memory: it did NOT survive a relay restart, contradicting the lifecycle requirement that
@@ -221,8 +221,8 @@ update). The two registries could never converge on one file.
 
 **FIXED (2026-08-30):**
 * The relay is now the SOLE writer/authority of the registry. State moved to a relay-owned subdir
-  `/run/edy-rdp/state` (`0750 edy-relay:edy-rdp`, via tmpfiles) so `edy-relay` can write atomically;
-  the socket dir stays `root:edy-rdp` non-group-writable so a group member cannot unlink the sockets.
+  `/run/edy-rdp/state` (`0750 edy-relay:cockpit-guac-rdp`, via tmpfiles) so `edy-relay` can write atomically;
+  the socket dir stays `root:cockpit-guac-rdp` non-group-writable so a group member cannot unlink the sockets.
 * A `prune` op was added to the control API (admin-only; the reaper is root). The reaper now prunes
   THROUGH the relay's control socket instead of editing the file behind its back, and still performs
   the OS-level `gdm-greeter` reap via loginctl. `--state-file` was removed from the reaper.
@@ -251,7 +251,7 @@ FreeRDP3 guacd regressed 3389 rendering.
   the **headless** grd scope (file-based creds, no keyring) on a deterministic LOOPBACK port
   `33000 + uid-1000`. **Do NOT pre-create a `--virtual-monitor`** — grd makes the monitor on connect,
   and a pre-made one gets captured empty. An ephemeral gate credential is written to
-  `/run/edy-rdp/headless/<uid>.env` (root:edy-rdp 0640).
+  `/run/edy-rdp/headless/<uid>.env` (root:cockpit-guac-rdp 0640).
 * The ports are reachable only via loopback (`hardening/edy-rdp-headless.nft`, verified with a netns
   test); guacd on the host dials 127.0.0.1:<port>.
 * The relay routes the **isolated** scenario to the CALLER'S OWN session: it starts the unit
@@ -921,3 +921,309 @@ relay-side admin-gate gap on the `greeter` scenario — were independently check
 review's own reasoning in the corresponding commit for why. Re-verified with an extended jsdom check:
 reparents into an open dialog and back on close, `aria-hidden` clears on show and is set on hide, and
 the forced-reflow line runs without throwing.
+
+### I49 · New capability: self-update (check GitHub for a newer Release, one-click apply with automatic rollback) · Sev N/A · SHIPPED (1.7.0.20260929, backend half)
+
+Not a bug fix — a new capability, recorded here in the same spirit as I47. A deployed host has no
+git repository at all (`deploy.sh`'s own payload packaging excludes `.git/`), so "check for updates"
+goes through the GitHub API (`GET .../repos/x86Since8088/linux-cockpit-remote-desktop-guac/releases/latest`)
+and "apply" means fetching that tag's tarball (one top-level directory containing the full repo tree,
+`deploy.sh` included) and re-running **that** `deploy.sh --install-to <root>` — no `--with-units` —
+against the existing install root, reusing its payload-swap/`.env`-reconcile logic rather than
+reimplementing it. Four new control-socket ops (`update-status`, `update-check`, `update-apply`,
+`update-rollback`; see `docs/SELFUPDATE.md` for the full contract) are wired into
+`relay/control.py`'s `handle_control()` through a new injected `selfupdate=` object
+(`relay/selfupdate.py`'s `SelfUpdate`, mirroring `DesktopUI`'s shape), behind two NEW,
+deliberately **parameterless** privileged units (`edy-rdp-selfupdate-apply.service`,
+`edy-rdp-selfupdate-rollback.service` — no `%i`, no instance argument at all: one step past the
+existing `%i`-templated deskui/unlock pattern, since it means zero caller-influenced data crosses the
+`systemctl start` privilege boundary). The apply unit re-fetches and re-validates the "latest version"
+question itself from a fresh GitHub call — it never trusts the unprivileged relay's cache, an argument,
+or an environment variable — and on a failed post-restart health check (a `systemctl is-active` check
+plus a real `{"op":"ping"}` round-trip on the control socket, retried for ~20s) it automatically swaps
+back to the one non-current `payload-<version>` directory and restarts the relay again. Only
+`edy-rdp-relay.service` is ever restarted by this path; `edy-rdp-guacd.service` is deliberately never
+touched (a live RDP screencast is never dropped by an automated flow in this project — see any commit
+history mentioning "restart guacd"), which also means a version bump needing a new `guacd` image is
+out of scope for the automatic path (documented, not solved, in `docs/SELFUPDATE.md`).
+
+**Trust model, stated plainly (not overstated):** this verifies TLS to `api.github.com` and
+`codeload.github.com` and nothing more. There is **no code-signing or GPG verification** of the
+fetched release tarball in this pass — a compromised repository owner account is a compromised fleet.
+See `docs/SELFUPDATE.md`'s "Trust model" section for the full statement; a signature-verification pass
+is a plausible future follow-up, deliberately not attempted here.
+
+**This repository has no GitHub Releases or tags yet** as of this writing (`gh release list` and
+`git tag --list` both empty, verified this session) — so `update-status` will correctly report
+`update_available: false` / `latest_version: null` on every host until the maintainer cuts the first
+tagged Release. That is the expected result of the check, not a bug in it.
+
+**Verification (backend half):** `relay/test_selfupdate.py` (new) covers version parse/compare across
+equal/older/newer/malformed input (malformed never reports an update available — fails closed), the
+cache read/write round trip and its TTL staleness decision, the rollback-candidate selection logic
+(none/exactly-one/ambiguous-refuse), and `relay/control.py`'s exit-code-to-response mapping for all
+four ops including every refusal path (not admin, bad confirm, nothing to apply, rate-limited).
+`run_tests.sh` green (`test_selfupdate` added to the existing unit-test line), plus the existing
+install-completeness gate (`install.sh --verify`'s pre-flight), which now also asserts the two new
+units render clean with no leftover placeholder and every `LIBEXECDIR` reference they carry resolves
+to something the manifest actually installs. Not live-tested against a real tagged Release on edt1 in
+this pass (none exists yet, per the note above) — the mechanics were exercised via mocked
+`urllib`/`subprocess`/socket calls only, never a real network call, per this project's existing test
+philosophy.
+
+**Follow-up (same 1.7.0.20260929, frontend half): the "Update" tab.** A new tab (`guac-rdp.js`'s
+`TAB_NAMES`/`selectTab()`, `index.html`'s `#panel-update`) reads and drives the four control ops
+above: `update-status` on tab-open (plus once at page load, for the badge — no new polling timer in
+the browser), `update-check`/`update-apply`/`update-rollback` on their own buttons. "Update now" is
+admin-gated and stays disabled until `update_available` is true, then needs the operator to type this
+host's name to confirm — built as a direct sibling of the Desktop UI tab's Stop/Disable confirmation
+UX (same `-confirm-wrap` pattern, same "type the host name to confirm" copy). "Roll back" is
+admin-gated with no typed confirmation, per the contract's own low-friction-recovery /
+disruptive-needs-confirmation asymmetry. A wrinkle worth recording: `update-status`/`update-check`
+never carry this host's name (unlike `deskui-status`) — only `update-apply`'s `need_confirm` refusal
+does — so the tab borrows `deskui-status`'s `hostname` field (read-only, not admin-gated) as the
+confirmation label rather than adding a new field to the wire contract; both controllers derive it
+identically (`socket.gethostname()`, same relay process) and the relay re-checks its own value
+regardless. An available update (and any recorded `last_apply` outcome) is ongoing host STATE, not a
+one-off event, so it is surfaced two ways that both deliberately avoid `showToast()` (I48's
+auto-dismissing transient notice): a small persistent badge dot on the tab itself
+(`#update-badge`/`.badge-dot`), and `last_apply`'s outcome text (e.g. "...failed its health check and
+was automatically rolled back to...") as its own non-auto-dismissing status line. Verified with a
+scratch jsdom smoke test (same ad hoc, throwaway approach as this entry's own — loads the real
+`index.html`/`guac-rdp.js` with `cockpit`'s channel/permission plumbing stubbed): version/release-link
+rendering, the bootstrap "no releases published yet" wording shown verbatim (this repository's actual
+current state), the badge tracking `update_available`, "Update now" refusing to fire until both
+`update_available` and a matching typed hostname hold, "Roll back" firing with no `confirm` field, a
+non-admin never seeing either button enable, and `last_apply` rendering/hiding correctly. `run_tests.sh`
+re-run green (untouched Python/relay half included).
+
+**Follow-up (1.7.1.20260929): five real defects found by adversarial review, before any of this ever
+reached edt1 or was pushed.** A multi-agent review (four dimensions in parallel, each candidate
+finding independently re-checked by a skeptic on a different model) confirmed 5 of 10 candidate
+findings and refuted the other 5, including a "critical"-labelled claim that the pre-3.12 tar-extraction
+fallback could be bypassed via a symlinked intermediate directory — real as a code-level flaw, but NOT
+reachable via a genuine GitHub-generated tarball (a git tree cannot hold both a symlink entry and a file
+entry nested under the same name), so hardened anyway as defence in depth rather than treated as the
+claimed privilege escalation. The five confirmed and fixed: (1) **high** — apply and rollback had no
+mutual exclusion at all and could race on the same `payload` symlink and relay restart if an admin
+clicked "Roll back" while "Update now" still looked stuck; reproduced (two processes racing the real
+swap lost the symlink update on ~half of 20,000 stress-test iterations); fixed with a non-blocking
+`flock()` (`relay/selfupdate.exclusive_run()`) held for the entire privileged run, plus a new exit code
+6 ("already in progress") and a per-process-unique temp symlink name as defence in depth. (2) **medium**
+— the worst-case exit path could log a successful payload swap as having "also failed" whenever only
+the post-rollback health check was the actual problem, and silently dropped the rollback's own restart
+error; now reports which of three distinct failure modes actually happened. (3) **low** — rollback's
+refusal message collapsed "no earlier version" and "more than one exists (ambiguous)" into identical,
+sometimes-false text; now distinct and accurate. (4) **medium** — the "no releases published yet" state
+(this repo's actual, expected, day-one state) rendered as a bold red error, indistinguishable from a
+real GitHub outage, because both shared one untyped `check_error` field; fixed with a typed `no_releases`
+boolean. (5) **low, but the fix it enabled was not** — `_safe_extract()`/`fetch_and_extract_release()`
+had zero test coverage; writing it immediately surfaced a real, previously-unnoticed bug: on this
+project's own Python (3.14), a path-traversal tarball raised a raw `tarfile.OutsideDestinationError`
+that `_safe_extract()` did not catch, so it would have crashed the privileged script with an uncaught
+traceback instead of the intended, accurate "nothing was touched" refusal — fixed by catching
+`tarfile.TarError` and wrapping it as `SelfUpdateError`. `run_tests.sh` green throughout (82 tests now
+in `relay/test_selfupdate.py` alone).
+
+### I50 · New capability: shadow-group gate for mirroring a DIFFERENT signed-in user's console session · Sev N/A · SHIPPED (1.8.0.20260929)
+
+Not a bug fix — a new capability, recorded here in the same spirit as I47/I49. The console
+scenario's existing gate (I4, above) answers one question: is the caller a Cockpit
+administrator? That is the right question for "may this person use the mirror at all," but
+it is silent on a genuinely separate one — if a *different* user is currently signed in at
+the physical seat, may this admin secretly watch **that specific person's** active desktop?
+An organization can reasonably want every admin able to mirror an *empty* seat or *their
+own* session, while restricting who may mirror a **co-worker's** live screen to a smaller,
+deliberately-provisioned set — a privacy boundary the old gate had no way to express, since
+it only ever asked "admin or not."
+
+**Mechanics.** `Connection._peek_scenario_from_connect()` now runs a second, additive check
+for `scenario == "console"`, immediately after the existing admin gate and using the exact
+same `is_admin(uid, group)` primitive (I4) against a *different* configured group
+(`EDY_RDP_SHADOW_GROUP`, default `rdp-shadow`) — reused as-is, not reimplemented, since
+`is_admin()` was already a generic "is this uid a member of this named group" check despite
+its name/docstring. A new `seated_uids()` (`relay/edy_rdp_relay.py`) answers "who, if
+anyone, is physically at the seat right now" via `loginctl list-sessions` + `show-session
+-p User` (the same uid space Cockpit sessions run under, since `self.uid` already comes
+from SO_PEERCRED); a new pure `shadow_gate_required(seated, requester_uid)` decides the
+gate applies iff a uid *other than the requester* is seated. Nobody seated, or the
+requester seated alone, needs nothing beyond the existing admin gate — unchanged in every
+respect, same wording, same code path. The gate is evaluated fresh on every console connect
+attempt (never cached), since who is seated can change between connects.
+
+**Fail-closed by design — the opposite of `physical_session_locked()`'s role.**
+`seated_uids()` returns `None`, not an empty set, when it cannot determine who (if anyone)
+is seated at all (`loginctl list-sessions` itself failed or errored); `shadow_gate_required()`
+treats `None` as "cannot rule out someone else," so an admin with no shadow-group membership
+is refused rather than let through on a lookup failure. This is deliberately the mirror image
+of `physical_session_locked()` (above): that function feeds a *cosmetic* message-relabeling
+role and must fail OPEN (an undetermined lock state must never block a connection), while
+`seated_uids()` feeds an actual authorization decision and must fail CLOSED, the same posture
+`is_admin()` already takes on an unresolvable uid or a missing group. A future reader should
+not "fix" `seated_uids()` to match `physical_session_locked()`'s fail-open behavior — they
+answer different kinds of questions on purpose. **A per-session `show-session` lookup
+failure is ALSO a categorical failure here (returns `None`), not a skip-and-continue** — see
+the follow-up below for why the first version of this function got that distinction wrong.
+
+**Deliberately un-hardened at install time, and that is the correct default.** Unlike
+`EDY_RDP_ADMIN_GROUP` (which must exist on the host — `sudo` does, on essentially every real
+Linux install), `lib/edy-rdp-env.sh` validates `EDY_RDP_SHADOW_GROUP` only for shape (empty,
+or a syntactically valid unix group name), never for existence. `rdp-shadow` is a brand-new,
+project-specific name that will not exist on any host until an operator creates it, and
+`install.sh`'s preflight validates the environment *before* copying anything — hard-refusing
+every install and every routine redeploy (this project's own edt1 included) until someone
+pre-creates a custom group would be a deploy-breaking foot-gun for no safety gain, since
+`is_admin()` already turns a nonexistent group into "nobody is a member" (fails closed) with
+no crash risk either way. `EDY_RDP_SHADOW_GROUP` is therefore deliberately **not** in
+`install.sh`'s `REQUIRED_ENV`, mirroring `EDY_RDP_REMOTE_ALLOW`'s precedent: `.envdefault`
+ships it non-empty (`rdp-shadow`) so it is live on every fresh install, but an operator may
+explicitly blank it in their own `.env` as a supported way to turn this extra gate off
+entirely and revert to admin-only console gating. **Operational note: the group is not
+created or populated by any tooling in this project** — an operator runs `groupadd
+rdp-shadow` and `usermod -aG rdp-shadow <user>` themselves (or points the variable at an
+existing group) before anyone can shadow a different user's console session; until then the
+gate's fail-closed default means nobody can.
+
+**Verification.** `relay/test_edy_rdp_relay.py`: `SeatedSessionPredicate` (pure, literal
+`loginctl` property dicts, no subprocess — same style as `LockedScreenHint`) covers the
+seated/graphical/non-greeter classification; `ShadowGateDecision` (pure) covers
+`shadow_gate_required()` for nobody-seated, requester-seated-alone, a-different-uid-seated,
+and the `None` fail-closed case; `ConsoleShadowGate` (integration, `Guard`-style, driving the
+real `_peek_scenario_from_connect` with `seated_uids()` monkey-patched the same way
+`R.bridge.start_bridge` already is) covers nobody seated (admin gate alone suffices), the
+same user seated as the requester (no shadow membership needed), a different user seated
+with the requester out of the shadow group (refused), a different user seated with the
+requester in it (allowed), the `seated_uids() is None` fail-closed path both with and
+without shadow-group membership, and `EDY_RDP_SHADOW_GROUP=` empty disabling the gate
+entirely. `run_tests.sh` green throughout (187 relay unit tests across all four suites, up
+from 175; no regression in the untouched admin gate, remote-allow, credential-injection, or
+any other existing suite).
+
+**Follow-up (same 1.8.0.20260929): two real bugs found by adversarial review, before this
+ever reached edt1.** A multi-agent review (four dimensions in parallel, each candidate
+finding independently re-checked by a skeptic on a different model) confirmed 3 of 7
+candidate findings and refuted the other 4 — including a claim that uid 0 unconditionally
+bypasses the gate, which is real but not a bypass (root already has every capability this
+gate could possibly restrict, and Cockpit's own shipped default, `/etc/cockpit/disallowed-
+users`, refuses a root login in the first place). The two confirmed:
+
+- **The one that mattered: `seated_uids()`'s original per-session failure handling was
+  exactly backwards for an authorization function.** It treated a `show-session` call that
+  RAISED or returned NON-ZERO the same as "that session doesn't exist" — `continue`, drop it,
+  keep going — following `_active_graphical_sessions()`'s existing precedent for a narrow
+  session-ended-mid-query race. But that precedent's function is cosmetic (a miscounted
+  desktop-in-use tally); this one decides who may watch whom. A reviewer reproduced it
+  directly: `list-sessions` reporting two real, seated uids while every `show-session` call
+  failed (a plausible transient logind/D-Bus hiccup, not something a requester can trigger on
+  demand) made `seated_uids()` return an EMPTY set instead of `None` — silently skipping the
+  gate for an admin who was never checked against `rdp-shadow`, in precisely the situation
+  the `None` path exists to catch. Fixed: any `show-session` failure (exception, non-zero
+  exit, or a seated session with an unparseable `User=`) now fails the WHOLE call closed
+  (`None`), not just that one session — there is no reliable way to tell "session ended
+  benignly" apart from "logind errored" from the command's output alone, so this trades a
+  narrow, rare false "someone might be seated" against ever again silently reporting an empty
+  seat that was not. New `SeatedUidsSubprocessHandling` tests drive the REAL function against
+  a fake `subprocess.run` (every prior test monkey-patched `seated_uids()` itself away
+  entirely, so this exact regression had zero coverage) — a clean success case, a greeter
+  correctly excluded, and every failure mode above asserted to return `None`.
+- **Two integration tests used uid 0 (root) to prove the gate does NOT apply when it
+  shouldn't** — but `is_admin()` returns `True` unconditionally for uid 0 regardless of which
+  group is asked about, so those tests could not distinguish "the exemption logic correctly
+  skipped the gate" from "the gate ran and trivially passed because the caller is root." A
+  mutation test proved it: hard-coding the shadow gate to apply unconditionally to every
+  console connect still left the whole relay suite green. Fixed by switching both tests to a
+  non-root, non-shadow-group admin uid with `is_admin()` mocked explicitly — the mutation now
+  fails both tests, as it should.
+
+`run_tests.sh` green throughout (63 tests in `relay/test_edy_rdp_relay.py` alone, up from
+55).
+
+### I51 · New capability/clarification: `cockpit-guac-rdp` group rename, a safe migration, and an explicit non-admin access model · Sev N/A · SHIPPED (1.9.0.20260929)
+
+Not a bug fix — a rename plus a clarification, recorded here in the same spirit as
+I47/I49/I50. The relay's unix group was named `edy-rdp` since this project's first
+release; it is now `cockpit-guac-rdp`, matching the project's own name. On its own that
+is cosmetic. What makes it worth an entry is what it forced this project to finally say
+out loud: **membership in this group was already, on its own, sufficient for most of
+what the plugin does** — a property that had never been asserted anywhere as a single,
+explicit claim, let alone tested.
+
+**The migration.** An already-deployed host (edt1, per `docs/DEFENSE-LAYER.md`) has a
+real `edy-rdp` group with real members. A naive check-and-create in `deploy.sh`'s
+`create_users()` would have left that group alone and `groupadd`-ed a fresh, EMPTY
+`cockpit-guac-rdp` — every member losing access silently the moment the relay/sockets
+next restarted onto the new group name. `create_users()` (still `--with-users`-gated)
+now prefers `groupmod -n cockpit-guac-rdp edy-rdp` — same GID, same members — falling
+back to `groupadd` only when neither name exists. A plain `deploy.sh` run (no
+`--with-users`, consistent with every other host-mutating action in this script staying
+opt-in) cannot perform that rename itself, so it now warns loudly instead when the old
+group exists and the new one does not, naming the exact fix.
+
+**The access model, made explicit for the first time.** `ADMIN_ONLY_SCENARIOS` has
+always been exactly `{"console"}` — isolated, virtual monitor, wayland-vnc and greeter
+have never had an `admin_required` path, and remote/vnc are admin-gated only when an
+operator opts in via `EDY_RDP_REMOTE_ADMIN_ONLY=1` (default off). None of that changed
+here. What changed is that it is now: (1) tested — `relay/test_edy_rdp_relay.py`'s new
+`NonAdminAccess` class asserts none of the four raise `Refuse` for a non-admin,
+non-elevated uid, closing a real gap (nothing before this asserted "no admin path
+exists" as its own property, only that specific gates behaved correctly where they did
+exist); and (2) documented in one place — `docs/GROUP-ACCESS-MODEL.md` — instead of
+scattered inferences across `docs/ARCHITECTURE.md`, `docs/SCENARIOS.md` and the deploy
+banner, including an honest operator-facing note that the greeter scenario lets a group
+member attempt to sign in as any account the host knows, not just their own, and that
+this rename's migration deliberately preserves existing group membership rather than
+prompting anyone to re-audit it.
+
+**Verification.** `run_tests.sh` green throughout (199 tests across the four relay unit
+suites, up from 195; 67 in `relay/test_edy_rdp_relay.py` alone, up from 63);
+`install.sh --verify`'s manifest-completeness gate and `tests/installer_tests.sh`'s
+staged installer/deploy roundtrip unaffected by the rename.
+
+**Follow-up (1.9.1.20260929): the migration design above was wrong, found by adversarial
+review before this ever reached edt1 or was pushed — and the fix was itself verified live
+against edt1's actual group state.** A multi-agent review (three dimensions in parallel,
+each candidate finding independently re-checked by a skeptic on a different model)
+confirmed 5 of 6 candidate findings. The one that mattered:
+
+- **HIGH: gating the `groupmod` migration behind `--with-users` broke the very
+  redeploy pattern this project uses every day.** `install.sh`'s own preflight has
+  *always* required `$RELAY_GROUP` to exist *unconditionally*, on the assumption that a
+  fresh host ran `--with-users` exactly once at initial setup and every plain redeploy
+  since could rely on the group already being there. The 1.9.0 design gated the *rename*
+  itself behind that same flag — so a plain `deploy.sh` (no flags), the pattern used for
+  every routine update this project makes, and the *only* one self-update's own
+  `deploy.sh` invocation ever uses, would print the correct warning and then immediately
+  hit install.sh's fatal group-missing check anyway, on every host deployed before this
+  rename. Verified directly against edt1's real state (`getent group edy-rdp` →
+  `edy-rdp:x:970:cptest,eddie,cpadmin,eddie2`; `cockpit-guac-rdp` does not exist), and
+  reproduced end to end: self-update to 1.9.0 would have failed deterministically on the
+  one real deployment until an operator stepped in by hand — no access lost (the failure
+  is in `install.sh`'s preflight, before anything is rendered), but the just-shipped
+  self-update feature (I49) broken for this release. **Fixed:** the rename is now its own
+  `migrate_group_rename()`, run *unconditionally* in `do_deploy()` (same reasoning as the
+  pre-existing `migrate_legacy_env()`: renaming an *existing* group to the name this
+  version's units now reference is a compatibility carry-forward, not a new grant of
+  capability) — `create_users()` (still `--with-users`-gated) goes back to a plain
+  check-and-create, since the rename has already happened unconditionally by the time it
+  runs. A genuinely fresh host, where neither group exists, is untouched by the rename
+  step and still needs `--with-users` on its first-ever deploy, exactly as before.
+- **A bug the fix itself introduced, caught by this project's own test suite before it
+  ever shipped:** making the migration unconditional meant it ran during the staged/
+  DESTDIR roundtrip test too — which executes on a real host that may itself have a
+  genuine `edy-rdp` group (this one does). Unlike `create_users()`, which was only ever
+  implicitly protected by no test passing `--with-users`, the now-unconditional function
+  had no guard of its own and attempted `groupmod` against this session's **actual**
+  system group table during a test run that must never touch real host state. Caught
+  immediately by `run_tests.sh` going red; confirmed no actual mutation occurred
+  (`groupmod` failed on privilege first) before fixing it with the same `-z "$D"` guard
+  `preflight()`'s noexec check and the `--with-units` unit-enabling step already use.
+- Two low-severity documentation fixes: the CHANGELOG's own verification paragraph
+  mis-stated the post-rename test count (203 instead of 199); and two comments in
+  `relay/selfupdate.py` still said the relay's default `--group` was `"edy-rdp"` after
+  the rename changed it.
+- **Refuted:** a claim that the new `NonAdminAccess` tests prove nothing because they'd
+  also pass for an admin uid — true, but beside the point: they are positive-path
+  regression guards, and a mutation test confirmed they correctly fail if an admin gate
+  is later added to any of the four scenarios, which is the property that matters.
+
+`run_tests.sh` green throughout after both fixes.

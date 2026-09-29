@@ -17,7 +17,7 @@ echo "== py_compile relay =="
 python3 -m py_compile "$SRC"/relay/*.py && echo "  ok" || { echo "  FAIL"; fail=1; }
 
 echo "== relay unit tests (isolation, console gate, session tokens, allow-list, keepalive codec, registry, reaper) =="
-( cd "$SRC/relay" && python3 -m unittest test_edy_rdp_relay test_session_registry test_control ) \
+( cd "$SRC/relay" && python3 -m unittest test_edy_rdp_relay test_session_registry test_control test_selfupdate ) \
   || { echo "  FAIL"; fail=1; }
 
 echo "== JS syntax (gjs if present) =="
