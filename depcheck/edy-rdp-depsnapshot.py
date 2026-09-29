@@ -26,10 +26,11 @@
 #   2 = refused: this host's package manager is not dnf/yum (informational-only
 #       path — the manual command hints already in the snapshot data are what
 #       an operator uses instead)
-#   3 = refused: no dnf/yum transaction id on record to undo (either nothing has
-#       ever been snapshotted, or the latest "after" snapshot's own
-#       install_deps() caused no new transaction to attribute one to —
-#       see attributable_transaction_id())
+#   3 = refused: no dnf/yum transaction id on record to undo -- nothing has ever
+#       been snapshotted, the latest snapshot on disk is not a completed
+#       "after" snapshot (a deploy may have aborted before writing one), or
+#       the "after" snapshot's own install_deps() caused no new transaction to
+#       attribute one to — see attributable_transaction_id()
 #   4 = refused: a NEWER dnf/yum transaction exists on this host than the one
 #       recorded in the snapshot (stale snapshot; refusing to guess — it could
 #       otherwise undo something unrelated, including a security patch)
@@ -417,32 +418,33 @@ def write_snapshot(dep_dir, timestamp, data):
     _write_json_atomic(summary_path, data.get("summary") or {})
 
 
-def attributable_transaction_id(pm, current_tx, before_tx, label):
-    """The dnf/yum transaction id to record in THIS snapshot, or None.
-    "before" (and unlabeled) snapshots are just a baseline picture -- whatever
-    is newest right now is recorded unconditionally, nothing to attribute yet.
-    "after" is the one label rollback() actually reads, and recording
-    "whatever is newest right now" there let an operator's own unrelated
-    dnf/yum transaction (run moments before a --with-deps deploy that itself
-    changed nothing) get rolled back by mistake: nothing established the
-    recorded transaction was ever CAUSED by this run's own install_deps().
-    `before_tx` is THIS SAME deploy.sh run's own "before" snapshot's
-    transaction id, threaded through explicitly via --before-tx (see
-    deploy.sh's run_depsnapshot()) -- deliberately NOT inferred by loading
-    "whatever snapshot happens to be newest on disk", since that can silently
-    resolve to an unrelated earlier run's snapshot when THIS run's own
-    "before" snapshot failed to write (best-effort/non-fatal) or raced with a
-    concurrent deploy. If before_tx is unknown, refuse to attribute rather
-    than guess: an "after" snapshot with no recorded transaction just means
-    rollback has nothing to undo yet (safe); misattributing an unrelated
-    transaction is not."""
-    if pm not in ("dnf", "yum") or current_tx is None:
+def attributable_transaction_id(pm, install_tx, label):
+    """The dnf/yum transaction id to record in THIS snapshot's
+    dnf_transaction_id field, or None. This is the ONLY field cmd_rollback()
+    may ever read (it additionally requires label == "after" itself, as
+    defense in depth against exactly this function ever being bypassed) --
+    "before" and unlabeled snapshots never get a value here at all, only a
+    purely informational baseline_transaction_id (see cmd_snapshot()).
+
+    `install_tx` is THIS SAME deploy.sh run's own install_deps() bracketing
+    itself tightly around its one package-manager invocation and observing
+    a NEW transaction id appear (--install-tx, see deploy.sh's
+    depsnapshot_current_tx()) -- deliberately NOT inferred by comparing this
+    snapshot's own "current" transaction reading against some OTHER
+    snapshot's (an earlier bdd7c45-era design did exactly that, comparing
+    against "whatever 'latest' happens to be on disk"; the window between
+    install_deps() finishing and an "after" snapshot actually running, at the
+    very end of deploy.sh, can contain unrelated dnf/yum activity -- an
+    image pull's own package operations, a concurrent operator command, an
+    unattended-upgrades run -- that a coarser comparison would misattribute
+    to install_deps() (KNOWN_ISSUES I51 F3)). If install_tx is unknown
+    (install_deps() never ran, or created no new transaction), refuse to
+    attribute rather than guess: an "after" snapshot with no recorded
+    transaction just means rollback has nothing to undo yet (safe);
+    misattributing an unrelated transaction is not."""
+    if pm not in ("dnf", "yum") or label != "after":
         return None
-    if label != "after":
-        return current_tx
-    if not before_tx:
-        return None
-    return current_tx if current_tx != before_tx else None
+    return install_tx or None
 
 
 def cmd_snapshot(args):
@@ -455,9 +457,11 @@ def cmd_snapshot(args):
     for p in inv:
         p["tracked"] = p["name"] in tracked_names
     prev = DC.load_snapshot(dep_dir, "latest")
-    current_tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
-    before_tx = args.before_tx if args.label == "after" else None
-    dnf_tx = attributable_transaction_id(pm, current_tx, before_tx, args.label)
+    # Purely informational -- "whatever dnf/yum transaction is newest at THIS
+    # snapshot's own moment", shown in history/diagnostics. Never used to
+    # decide what rollback may undo; see attributable_transaction_id().
+    baseline_tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
+    dnf_tx = attributable_transaction_id(pm, args.install_tx, args.label)
     timestamp = DC.now_timestamp()
     noncompliant = sum(1 for t in tracked.values() if not t["compliant"])
 
@@ -468,6 +472,7 @@ def cmd_snapshot(args):
         "label": args.label or None,
         "pkg_mgr": pm,
         "dnf_transaction_id": dnf_tx,
+        "baseline_transaction_id": baseline_tx,
         "packages": inv,
         "tracked": tracked,
     }
@@ -488,13 +493,17 @@ def cmd_snapshot(args):
     log("snapshot %s written: %d packages, %d tracked (%d noncompliant), pkg_mgr=%s%s"
         % (timestamp, len(inv), len(tracked), noncompliant, pm or "none detected",
            " (dnf tx=%s)" % dnf_tx if dnf_tx else ""))
-    if args.label == "before":
-        # Machine-parseable, on its own line: deploy.sh's run_depsnapshot()
-        # captures this and threads it into the matching "after" call via
-        # --before-tx, so attribution never has to guess which on-disk
-        # snapshot was really THIS run's own baseline (see
-        # attributable_transaction_id()).
-        print("DEPSNAPSHOT_BEFORE_TX=%s" % (dnf_tx or ""), flush=True)
+    return 0
+
+
+def cmd_current_tx():
+    """Cheap, standalone: pm detection + one history query, no inventory
+    scan. deploy.sh's install_deps() calls this twice, bracketing its own
+    package-manager invocation tightly, to compute --install-tx precisely
+    (see attributable_transaction_id() for why that precision matters)."""
+    pm = DC.detect_pm()
+    tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
+    print("CURRENT_TX=%s" % (tx or ""), flush=True)
     return 0
 
 
@@ -515,6 +524,18 @@ def cmd_rollback():
     snap = DC.load_snapshot(dep_dir, "latest")
     if not snap:
         die("no dependency-snapshot history on this host yet; nothing to roll back", 3)
+    # Defense in depth, on top of attributable_transaction_id() only ever
+    # setting dnf_transaction_id for an "after" snapshot in the first place:
+    # if the newest snapshot on disk is anything else (a deploy aborted, or
+    # was interrupted, before its own "after" snapshot ran; an admin
+    # triggered rollback mid-deploy), its dnf_transaction_id must never be
+    # trusted even if somehow present -- it was never verified to have been
+    # caused by THIS host's own install_deps().
+    if snap.get("label") != "after":
+        die("the latest dependency snapshot on this host is labeled %r, not a completed "
+            "'after' snapshot -- refusing to guess what to undo (a deploy may have aborted "
+            "before its 'after' snapshot ran). Let a deploy finish, or take a fresh snapshot, "
+            "before rolling back." % (snap.get("label") or "(none)"), 3)
     tx_id = snap.get("dnf_transaction_id")
     if not tx_id:
         die("the latest snapshot recorded no %s transaction id to undo" % pm, 3)
@@ -544,11 +565,16 @@ def main(argv=None):
     sp.add_argument("--deploy-version", required=True, help="this project's VERSION being deployed")
     sp.add_argument("--label", default="", choices=["", "before", "after"],
                     help="which half of the deploy.sh run took this snapshot (metadata only)")
-    sp.add_argument("--before-tx", default=None,
-                    help="THIS SAME run's own '--label before' transaction id, as printed "
-                         "by that call's DEPSNAPSHOT_BEFORE_TX= line -- only meaningful "
-                         "with --label after; establishes a positive attribution baseline "
-                         "instead of trusting whatever snapshot happens to be newest on disk")
+    sp.add_argument("--install-tx", default=None,
+                    help="the exact dnf/yum transaction id THIS SAME deploy.sh run's own "
+                         "install_deps() was observed to create, bracketed tightly around "
+                         "its own package-manager invocation (see deploy.sh's "
+                         "depsnapshot_current_tx()) -- only meaningful with --label after; "
+                         "never inferred by comparing against some other snapshot's own "
+                         "transaction reading (KNOWN_ISSUES I51 F3)")
+
+    sub.add_parser("current-tx", help="print this host's current dnf/yum transaction id "
+                   "(pm detection + one cheap history query, no inventory scan)")
 
     sub.add_parser("rollback", help="undo the most recent dnf/yum transaction (dnf/yum only)")
 
@@ -558,6 +584,8 @@ def main(argv=None):
             return cmd_snapshot(args)
         except RuntimeError as exc:
             die(str(exc), 1)
+    elif args.cmd == "current-tx":
+        return cmd_current_tx()
     elif args.cmd == "rollback":
         return cmd_rollback()
     return 1

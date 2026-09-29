@@ -49,6 +49,13 @@ import time
 INSTALL_CONF = "/etc/cockpit-guac-rdp/install.conf"
 SNAPSHOT_DIRNAME = "dep-history"
 TIMESTAMP_FMT = "%Y%m%dT%H%M%SZ"      # sorts lexically == chronologically
+# What now_timestamp() actually produces -- load_snapshot()/list_snapshots()
+# validate against this (never accepting a caller-supplied value that merely
+# LOOKS like a filename) before ever building a path from it: deps-list's
+# control-API op passes an authenticated caller's own request field straight
+# through to here, and a "../" or absolute value must never be allowed to
+# widen that into an arbitrary read of anything the relay user can see.
+TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
 # The small companion file write_snapshot() writes beside each full snapshot,
 # holding ONLY its "summary" dict -- named here, once, so the writer
 # (depcheck/edy-rdp-depsnapshot.py) and the reader (list_snapshots() below)
@@ -270,6 +277,8 @@ def list_snapshots(directory):
     for path in sorted(glob.glob(os.path.join(directory, "*.json")), reverse=True):
         if path.endswith(SUMMARY_SUFFIX):
             continue
+        if not TIMESTAMP_RE.match(os.path.basename(path)[:-len(".json")]):
+            continue  # not one of ours (KNOWN_ISSUES I51 F5) -- e.g. a stray notes.json
         summary_path = path[:-len(".json")] + SUMMARY_SUFFIX
         try:
             if os.path.isfile(summary_path):
@@ -290,24 +299,37 @@ def list_snapshots(directory):
 
 
 def _snapshot_path(directory, timestamp):
+    # Callers MUST validate `timestamp` against TIMESTAMP_RE first (see
+    # load_snapshot() below) -- this function does not, and deps-list's
+    # control-API op passes an authenticated caller's own request field all
+    # the way down to here.
     return os.path.join(directory, "%s.json" % timestamp)
 
 
 def load_snapshot(directory, timestamp_or_latest="latest"):
     """The full parsed snapshot dict, or None when the directory, the file or
-    its JSON is missing/unreadable. "latest" resolves to the
-    lexically-greatest (== chronologically newest) filename on disk."""
+    its JSON is missing/unreadable, or `timestamp_or_latest` is neither
+    "latest" nor a genuine now_timestamp()-shaped value. "latest" resolves to
+    the lexically-greatest (== chronologically newest) filename on disk.
+    KNOWN_ISSUES I51 F5/path-traversal: `deps-list` threads an authenticated
+    caller's own request field straight through to here as
+    `timestamp_or_latest` -- rejecting anything that doesn't match
+    TIMESTAMP_RE before it ever reaches a path join is load-bearing, not
+    cosmetic."""
     if not directory or not os.path.isdir(directory):
         return None
     if timestamp_or_latest == "latest":
         files = sorted(
             p for p in glob.glob(os.path.join(directory, "*.json"))
             if not p.endswith(SUMMARY_SUFFIX)
+            and TIMESTAMP_RE.match(os.path.basename(p)[:-len(".json")])
         )
         if not files:
             return None
         path = files[-1]
     else:
+        if not TIMESTAMP_RE.match(timestamp_or_latest or ""):
+            return None
         path = _snapshot_path(directory, timestamp_or_latest)
         if not os.path.isfile(path):
             return None

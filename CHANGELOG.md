@@ -40,25 +40,42 @@ rollback where the host's package manager genuinely supports one.
   inventory (2656 packages, all 9 tracked prerequisites correctly mapped and
   compliant); `dnf`/`yum`/`pacman`/`zypper` paths were code-reviewed and
   unit-tested with mocks, not exercised against a live host of those distros.
-- **Follow-up fixes from two rounds of adversarial review**, before this reaches
-  `main`: the rollback unit's timeout chain (unit/script/relay each disagreed on
-  how long a `dnf history undo` may run); the recorded transaction id was
-  "whatever is newest on the host" rather than verified to have been caused by
-  this run's own `install_deps()`, and — found in a second pass, after the first
-  fix's own `<timestamp>.summary.json` companion file broke `load_snapshot()`'s
-  "latest" lookup — that verification was silently defeated in real execution
-  even though every test passed, because "latest" resolved to the small summary
-  object instead of the full snapshot. Attribution is now threaded explicitly
-  (`deploy.sh` passes the "before" snapshot's own transaction id to the "after"
-  call via `--before-tx`, never inferred from whatever happens to be newest on
-  disk) and refuses to record anything when that baseline is unknown, rather
-  than guessing; a regression test now writes both files together and asserts
-  "latest" returns the full snapshot. Also fixed: the "before" snapshot ran
+- **Follow-up fixes from three rounds of adversarial review**, before this
+  reaches `main`. Round one: the rollback unit's timeout chain (unit/script/relay
+  each disagreed on how long a `dnf history undo` may run); the recorded
+  transaction id was "whatever is newest on the host" rather than verified to
+  have been caused by this run's own `install_deps()`; the "before" snapshot ran
   after `install_deps()` had already changed packages; `list_snapshots()` read
   full package arrays just for a summary; a failed reverse-dependency check
   rendered identically to a real "nothing depends on this"; and stale comments
-  pointing at files that don't exist on this branch. `run_tests.sh` green
-  throughout (185 relay tests, up from 167).
+  pointing at files that don't exist on this branch. Round two, found because
+  round one's own `<timestamp>.summary.json` companion file broke
+  `load_snapshot()`'s "latest" lookup: attribution was silently defeated in real
+  execution even though every test passed, because "latest" resolved to the
+  small summary object instead of the full snapshot (fixed by excluding
+  summary files from that lookup, with a regression test that writes both
+  files together). Round three, found by a cross-model check of round two's own
+  fix: **rollback could still undo an unrelated transaction whenever the latest
+  snapshot on disk was a "before" baseline rather than a completed "after"** —
+  reachable through an aborted deploy, a failed "after" write, or rollback
+  triggered mid-deploy, not an exotic race. `cmd_rollback()` now refuses unless
+  the latest snapshot is labeled `after`. Attribution itself was also redesigned
+  to be precise rather than inferred: `install_deps()` now brackets its own
+  package-manager invocation tightly (a new `current-tx` subcommand, called
+  immediately before and after `eval "$cmd"`) and threads the exact transaction
+  id it observed through `--install-tx`, rather than comparing against any
+  snapshot's own "current" reading — a coarser comparison could misattribute
+  unrelated dnf/yum activity happening anywhere in the wider window between
+  `install_deps()` finishing and the "after" snapshot actually running, at the
+  very end of `deploy.sh`. Also hardened in this round: `deps-list`'s snapshot
+  timestamp parameter (an authenticated caller's own request field) is now
+  validated against the exact shape `now_timestamp()` produces before it can
+  reach a filesystem path, closing a path-traversal read of any `.json` file
+  the relay user can see; the same validation tightens "latest" against a stray
+  non-snapshot `.json` file in the history directory. `run_tests.sh` green
+  throughout (188 relay unit tests, up from 185; mutation-tested by reverting
+  each of the round-three fixes individually and confirming the new tests
+  fail).
 
 ## 1.6.2.20260929 - 2026-09-29
 

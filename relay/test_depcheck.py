@@ -10,6 +10,7 @@
 # transaction-attribution/timeout logic is exercised below (loaded via
 # importlib, since its filename is not a valid module name) with every real
 # subprocess call mocked out the same way.
+import argparse
 import importlib.util
 import json
 import os
@@ -697,54 +698,117 @@ class RollbackTimeoutAgreement(unittest.TestCase):
         self.assertGreaterEqual(DC.ROLLBACK_TIMEOUT, script_timeout)
 
 
-# --- KNOWN_ISSUES I51 F2: a rollback tx id must be attributable to THIS run --
+# --- KNOWN_ISSUES I51 F2/F3: a rollback tx id must be attributable to THIS
+# run's own install_deps(), precisely -- never inferred from any snapshot's
+# own "current" transaction reading. --------------------------------------
 
 
 class AttributableTransactionId(unittest.TestCase):
     def setUp(self):
         self.mod = _load_depsnapshot()
 
-    def test_non_after_label_records_whatever_is_newest(self):
-        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", None, "before"), "7")
-        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", "6", ""), "7")
+    def test_non_after_label_is_always_none(self):
+        # "before" and unlabeled snapshots never get an attributed value at
+        # all, regardless of install_tx -- only cmd_rollback()'s own
+        # label == "after" check matters, and this is the first line of
+        # defense for it (KNOWN_ISSUES I51 F1: rollback must never trust a
+        # non-"after" snapshot's dnf_transaction_id).
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", "before"))
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", ""))
 
-    def test_after_label_records_only_a_changed_transaction(self):
-        # before_tx is THIS SAME run's own "before" snapshot's tx, threaded
-        # through explicitly by deploy.sh's --before-tx -- never inferred from
-        # whatever snapshot happens to be newest on disk (KNOWN_ISSUES I51 F2
-        # follow-up: a failed/missing "before" write must never silently fall
-        # back to an unrelated earlier run's snapshot).
-        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", "6", "after"), "7")
+    def test_after_label_records_the_given_install_tx(self):
+        # install_tx is THIS SAME run's own install_deps() bracketing its one
+        # package-manager invocation tightly and observing a new transaction
+        # id -- passed through explicitly via deploy.sh's --install-tx, never
+        # inferred by comparing against any snapshot's own reading (that
+        # comparison-based design was KNOWN_ISSUES I51 F3: it misattributed
+        # unrelated dnf/yum activity happening anywhere in the wider window
+        # between install_deps() finishing and the "after" snapshot actually
+        # running, at the very end of deploy.sh).
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", "after"), "7")
 
-    def test_after_label_refuses_to_attribute_an_unchanged_transaction(self):
-        # install_deps() caused nothing new -- the newest tx on the host is
-        # whatever it already was before this run touched anything, so it must
-        # NOT be recorded (that would let a rollback undo an unrelated,
-        # pre-existing operator transaction -- see cmd_rollback()'s exit 3).
-        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "6", "6", "after"))
+    def test_after_label_with_no_install_tx_refuses_rather_than_guessing(self):
+        # install_deps() never ran, or ran and created no new transaction --
+        # either way, nothing to attribute. Refusing here just means rollback
+        # has nothing to undo yet (safe); guessing would not be.
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", None, "after"))
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "", "after"))
 
-    def test_after_label_with_no_before_tx_refuses_rather_than_guessing(self):
-        # An unknown baseline (the "before" call failed, raced, or this is an
-        # older depsnapshot.py invoked without --before-tx) must refuse to
-        # attribute rather than fall back to "record whatever is newest" --
-        # that fallback was the original F2 bug.
-        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", None, "after"))
-        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", "", "after"))
+    def test_non_dnf_yum_is_always_none(self):
+        self.assertIsNone(self.mod.attributable_transaction_id("apt-get", "7", "after"))
 
-    def test_non_dnf_yum_or_no_current_tx_is_always_none(self):
-        self.assertIsNone(self.mod.attributable_transaction_id("apt-get", "7", "6", "after"))
-        self.assertIsNone(self.mod.attributable_transaction_id("dnf", None, "6", "after"))
+
+class CmdSnapshotAttribution(unittest.TestCase):
+    """cmd_snapshot() end to end (mocked inventory/requires/pm-detection,
+    real write_snapshot()/load_snapshot() against a real temp directory) --
+    the exact wiring a mutation test showed had ZERO coverage before this
+    (KNOWN_ISSUES I51 F4): flipping --install-tx to a no-op, or reverting to
+    the old "compare against whatever snapshot is newest on disk" design,
+    left every other test in this file green."""
+
+    def setUp(self):
+        self.mod = _load_depsnapshot()
+        self.tmp = tempfile.mkdtemp()
+        self.requires_path = os.path.join(self.tmp, "requires.txt")
+        with open(self.requires_path, "w") as fh:
+            fh.write("cockpit\t>=1\n")
+        self._patches = [
+            mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"),
+            mock.patch.object(self.mod, "gather_inventory", return_value=([], {})),
+            mock.patch.object(self.mod.DC, "parse_requires", return_value=[]),
+            mock.patch.object(self.mod, "build_tracked", return_value=({}, set())),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _snapshot(self, label, install_tx=None):
+        args = argparse.Namespace(root=self.tmp, requires=self.requires_path,
+                                  deploy_version="1.9.3.test", label=label,
+                                  install_tx=install_tx)
+        self.assertEqual(self.mod.cmd_snapshot(args), 0)
+        return self.mod.DC.load_snapshot(self.mod.DC.snapshot_dir(self.tmp), "latest")
+
+    def test_before_snapshot_never_gets_a_dnf_transaction_id(self):
+        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value="41"):
+            snap = self._snapshot("before")
+        self.assertIsNone(snap["dnf_transaction_id"])
+        self.assertEqual(snap["baseline_transaction_id"], "41")  # informational only
+
+    def test_after_snapshot_with_install_tx_records_exactly_that_value(self):
+        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value="99"):
+            snap = self._snapshot("after", install_tx="42")
+        self.assertEqual(snap["dnf_transaction_id"], "42")
+        # baseline_transaction_id is independent -- "whatever is newest right
+        # now" (99, from an unrelated concurrent transaction in this
+        # fixture), never conflated with the attributed value (42).
+        self.assertEqual(snap["baseline_transaction_id"], "99")
+
+    def test_after_snapshot_with_no_install_tx_records_nothing_attributable(self):
+        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value="99"):
+            snap = self._snapshot("after", install_tx=None)
+        self.assertIsNone(snap["dnf_transaction_id"])
+
+
+class RollbackRefusesUnattributedSnapshots(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_depsnapshot()
 
     def test_no_attributable_transaction_produces_a_rollback_refusal(self):
-        # End-to-end through cmd_rollback()'s own exit-3 path: a snapshot with
-        # no dnf_transaction_id (install_deps() caused no new transaction)
-        # refuses cleanly rather than falling back to some unrelated tx.
+        # End-to-end through cmd_rollback()'s own exit-3 path: an "after"
+        # snapshot with no dnf_transaction_id (install_deps() caused no new
+        # transaction) refuses cleanly rather than falling back to some
+        # unrelated tx.
         tmp = tempfile.mkdtemp()
         try:
             dep_dir = os.path.join(tmp, "dep-history")
             os.makedirs(dep_dir)
             self.mod.write_snapshot(dep_dir, "20260101T000000Z",
-                                    {"timestamp": "20260101T000000Z", "dnf_transaction_id": None,
+                                    {"timestamp": "20260101T000000Z", "label": "after",
+                                     "dnf_transaction_id": None,
                                      "packages": [], "tracked": {},
                                      "summary": {"timestamp": "20260101T000000Z"}})
             with mock.patch.object(self.mod.DC, "install_root", return_value=tmp), \
@@ -753,6 +817,35 @@ class AttributableTransactionId(unittest.TestCase):
                  self.assertRaises(SystemExit) as ctx:
                 self.mod.cmd_rollback()
             self.assertEqual(ctx.exception.code, 3)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rollback_refuses_a_non_after_snapshot_even_with_a_tx_id_on_it(self):
+        # KNOWN_ISSUES I51 F1 (found by adversarial review of an earlier fix
+        # in this same file, reproduced live): if a deploy aborts, or its own
+        # "after" snapshot fails to write (best-effort/non-fatal), the newest
+        # snapshot on disk can be a "before" baseline instead. cmd_rollback()
+        # must refuse based on the snapshot's OWN label, not merely on
+        # whether dnf_transaction_id happens to be present -- defense in
+        # depth on top of attributable_transaction_id() never setting that
+        # field for a non-"after" snapshot in real use, in case any future
+        # code path ever writes one that does.
+        tmp = tempfile.mkdtemp()
+        try:
+            dep_dir = os.path.join(tmp, "dep-history")
+            os.makedirs(dep_dir)
+            self.mod.write_snapshot(dep_dir, "20260101T000000Z",
+                                    {"timestamp": "20260101T000000Z", "label": "before",
+                                     "dnf_transaction_id": "41",
+                                     "packages": [], "tracked": {},
+                                     "summary": {"timestamp": "20260101T000000Z"}})
+            with mock.patch.object(self.mod.DC, "install_root", return_value=tmp), \
+                 mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
+                 mock.patch.object(self.mod, "run_history_undo") as undo, \
+                 self.assertRaises(SystemExit) as ctx:
+                self.mod.cmd_rollback()
+            self.assertEqual(ctx.exception.code, 3)
+            undo.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

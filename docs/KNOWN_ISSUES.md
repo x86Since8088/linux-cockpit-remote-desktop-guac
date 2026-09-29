@@ -1029,3 +1029,32 @@ the full snapshot and its companion together and asserts "latest" returns the fu
 before/after attribution flow was additionally verified end to end with a scripted two-call simulation
 (both a real-transaction case and a failed-"before" misattribution case), not just isolated
 pure-function unit tests.
+
+**Round three (a cross-model adversarial check of round two's own fix, before either had merged):**
+found that `cmd_rollback()` reads the latest snapshot's `dnf_transaction_id` without checking its
+`label` — reachable, not exotic: a deploy that aborts (e.g. `install.sh` fails under `set -e`) between
+the "before" and "after" snapshots, an "after" write that itself fails (deliberately non-fatal), or an
+admin triggering rollback while a deploy is still running, all leave a "before" baseline as the newest
+snapshot on disk. A "before" snapshot unconditionally recorded "whatever transaction is newest right
+now" for its own informational purposes — reproduced live: rollback undid an operator's own, unrelated
+transaction in exactly this state. Separately, the round-two attribution design (comparing an "after"
+snapshot's own current-transaction reading against the immediately-preceding snapshot's) was still
+imprecise: the comparison window ran from the "before" snapshot (near the start of `deploy.sh`) to the
+"after" snapshot (at the very end, after image pull, unit install and config steps) — wider than
+`install_deps()` itself, so unrelated dnf/yum activity anywhere in that window (an unattended-upgrades
+run, a concurrent operator command) could still be misattributed. Both are fixed together:
+`cmd_rollback()` now refuses unless the latest snapshot's `label == "after"` (defense in depth, on top
+of the second fix below); and attribution no longer compares against any snapshot's reading at all —
+`install_deps()` brackets its own package-manager invocation tightly (`depsnapshot_current_tx()`,
+called immediately before and after `eval "$cmd"`, via a new lightweight `current-tx` subcommand) and
+passes the exact transaction id it observed through `--install-tx`, replacing `--before-tx`. A "before"
+or unlabeled snapshot never populates `dnf_transaction_id` at all any more — only a separate,
+informational `baseline_transaction_id`, which `cmd_rollback()` never reads. Also hardened in this
+round (found in the same pass, lower severity): `deps-list`'s snapshot-timestamp parameter is an
+authenticated caller's own request field threaded straight to a filesystem path — now validated against
+the exact shape `now_timestamp()` produces before it can reach `_snapshot_path()`, closing a
+path-traversal read of any `.json` file the relay user can see; the same validation tightens `"latest"`
+in both `load_snapshot()` and `list_snapshots()` against a stray non-snapshot `.json` file in the
+history directory. Verified: `run_tests.sh` green throughout (188 relay unit tests, up from 185); each
+of the three fixes was mutation-tested by reverting it individually and confirming the corresponding new
+test fails, not just added and left unexercised.
