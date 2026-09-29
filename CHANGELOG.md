@@ -1,3 +1,30 @@
+## 1.6.2.20260929 - 2026-09-29
+
+Fixes a live-reported false-fail in the "guacd build" self-test, and adds opt-in tracing for
+clipboard and sound.
+
+- **Fixed (I49): "guacd build (FreeRDP 3 needed for grd)" always failed for a non-admin,
+  passed only with Administrative access.** The check's own `stSpawn2` helper ran
+  `podman ps --filter name=edy-rdp-guacd` with `superuser: "try"`, which does NOT reject for a
+  non-elevated Cockpit session — it silently runs the command as the plain logged-in user
+  instead. `edy-rdp-guacd` runs under ROOT's rootful podman, a separate scope from a regular
+  user's own rootless one, so the unprivileged query returned empty output (not an error) and
+  the check's own `if (!img)` branch read that as "container is not running" — a false FAIL,
+  not the intended skip. Fixed by switching to `superuser: "require"` (the same option this
+  file's own admin-elevation-challenge code already uses), which actually rejects when not
+  elevated, correctly routing into the existing skip-on-rejection handler. No new prompt is
+  introduced anywhere.
+- **New: an opt-in "Trace clipboard/sound" toggle.** Off by default, persisted the same way
+  the Clipboard/Sound toggles already are. Logs every decision point either feature makes
+  (audio negotiated at connect? `AudioContext` suspend/resume and why; both clipboard
+  auto-sync directions with byte counts and every skip/block reason; the manual Send/Receive
+  clipboard buttons) to the browser console under a `[guac-rdp:clipboard]`/`[guac-rdp:sound]`
+  prefix — byte counts only, never clipboard contents, so it is safe to leave on during a live
+  support session. Zero console output, and effectively zero cost, when the toggle is off.
+- **Verification:** `run_tests.sh` green; a jsdom smoke test (scratch project, not a repo
+  dependency) confirmed the toggle's own on/off markers and that the Clipboard/Sound toggles'
+  trace lines appear only while tracing is enabled.
+
 ## 1.6.1.20260929 - 2026-09-29
 
 Fixes three accessibility bugs in 1.6.0's new toast, all found by a multi-agent adversarial

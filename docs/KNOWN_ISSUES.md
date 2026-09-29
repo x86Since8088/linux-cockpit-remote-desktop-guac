@@ -921,3 +921,44 @@ relay-side admin-gate gap on the `greeter` scenario — were independently check
 review's own reasoning in the corresponding commit for why. Re-verified with an extended jsdom check:
 reparents into an open dialog and back on close, `aria-hidden` clears on show and is set on hide, and
 the forced-reflow line runs without throwing.
+
+### I49 · "guacd build" self-test false-FAILs for a non-admin (passes only with Administrative access) · Sev L · FIXED (1.6.2.20260929)
+Reported live: running Self Tests as a non-admin ("limited mode") always failed "guacd build (FreeRDP 3
+needed for grd)"; the identical check passed once Administrative access was turned on. The check itself
+(`stSpawn2`, only ever used by this one test) ran `podman ps --filter name=edy-rdp-guacd` with
+`superuser: "try"` — which, per Cockpit's own semantics, does NOT reject for a non-elevated session; it
+silently runs the command AS THE PLAIN LOGGED-IN USER instead. `edy-rdp-guacd` runs under ROOT's
+**rootful** podman (a systemd system unit), a completely separate scope from a regular user's own
+**rootless** podman (this project's own already-documented two-scope split — see
+`edt1-container-management`-style host notes). So the unprivileged query saw zero containers — not an
+error, just the wrong scope — and the check's own `if (!img) return {status:"fail", ...}` branch
+correctly, but wrongly, read that as "the container is not running." The intended degrade-to-skip path
+(`.catch(...) -> {status:"skip", ...}`) never fired because `"try"` never rejects; it only ever silently
+downgrades privilege. **Fixed:** `stSpawn2` now uses `superuser: "require"` — the same option this
+file's own admin-elevation-challenge code already uses (`cockpit.file(..., {superuser:"require"})`) —
+which DOES reject when the session is not already elevated via Cockpit's header toggle, correctly
+routing into the existing skip-on-rejection handler instead of running unprivileged. No prompt is
+introduced: elevation still only ever comes from the operator's own "Administrative access" toggle, as
+everywhere else in this plugin. Verified: `node --check` clean; manually traced the two code paths
+(`superuser:"try"` on a non-elevated session runs unprivileged and returns empty stdout; `"require"`
+rejects, landing in the existing catch handler) against Cockpit's documented `cockpit.spawn()` semantics.
+
+### I50 · Opt-in tracing for clipboard/sound decisions · Sev N/A · SHIPPED (1.6.2.20260929)
+Not a bug fix — a diagnostic capability, recorded here in the same spirit as I47/I48. Clipboard and
+sound are the two features this project's own history shows get reported as "just doesn't work" with
+nothing in the UI to go on (see the clipboard root-cause investigation elsewhere in this project's
+history, which was only possible by adding ad hoc `console.log` calls by hand and removing them
+afterward). A new "Trace clipboard/sound" checkbox (off by default, persisted the same way
+Clipboard/Sound already are via `URL_CONTROLS` + localStorage) gates a new `trace(category, msg)`
+helper that logs every decision point either feature actually makes to the browser console under a
+`[guac-rdp:clipboard]`/`[guac-rdp:sound]` prefix: whether `enable-audio` was negotiated at connect, every
+`AudioContext` suspend/resume transition (and why), both clipboard auto-sync directions (remote→browser
+via `client.onclipboard`, browser→remote via the focus handler) including byte counts and every reason a
+sync was skipped or blocked by the browser's Clipboard API, and the manual Send/Receive clipboard
+buttons. Deliberately logs **byte counts, never clipboard contents** — this is meant to be left on
+during a live support session without exposing what was actually copied. Zero effect on the connection
+itself; when the toggle is off (the default) every call is a single `if (!traceOn) return` with no
+console output at all. Verified with a jsdom smoke test (scratch project, not a repo dependency, deleted
+after use) loading the real `index.html` + `guac-rdp.js`: the checkbox exists and starts unchecked,
+toggling it on/off emits/withholds the enabled/disabled marker, and the Clipboard/Sound toggles' own
+trace lines appear only while tracing is on. `run_tests.sh` green throughout.

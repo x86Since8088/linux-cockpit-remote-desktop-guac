@@ -88,6 +88,10 @@
         <label for="opt-audio" title="Play the session's audio in your browser. Toggles live, during a session.">
           <input type="checkbox" id="opt-audio"> Sound</label>
       </div>
+      <div class="f adv">
+        <label for="opt-trace" title="Log clipboard and sound decisions (negotiated? gated on/off? blocked by the browser? byte counts) to the browser console (F12) for troubleshooting. Never logs clipboard CONTENTS. No effect on the connection itself.">
+          <input type="checkbox" id="opt-trace"> Trace clipboard/sound</label>
+      </div>
       <button id="go">Connect</button>
       <button id="stop" class="sec" disabled>Disconnect</button>
       <button id="numlock" class="sec toggle" disabled aria-pressed="false"
@@ -158,6 +162,6 @@
     </table>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.6.1.20260929</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.6.2.20260929</span></footer>
 </body>
 </html>

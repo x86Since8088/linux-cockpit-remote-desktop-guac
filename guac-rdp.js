@@ -83,15 +83,34 @@
         // AudioContext still applies while connected; turning Sound on from off
         // takes effect on the next connect.
         if ($("opt-audio") && $("opt-audio").checked) v["enable-audio"] = "true";
+        trace("sound", "connect: enable-audio=" + (v["enable-audio"] || "false"));
         return v;
     }
 
     // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
-    var clipboardOn = true, soundOn = false, clipReadHandler = null;
+    var clipboardOn = true, soundOn = false, traceOn = false, clipReadHandler = null;
     var lastRemoteClip = null;   // newest text the session put on its clipboard (for the "Receive clipboard" button)
     function syncPassthroughFlags() {
         clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
         soundOn = !!($("opt-audio") && $("opt-audio").checked);
+        traceOn = !!($("opt-trace") && $("opt-trace").checked);
+    }
+    // Opt-in diagnostic logging for clipboard and sound specifically -- the two
+    // paths this project's own history shows get reported as "just doesn't
+    // work" with nothing to go on (see docs/KNOWN_ISSUES.md's clipboard
+    // investigation, root-caused only by adding ad hoc console.log calls by
+    // hand). Every decision point these two features actually make --
+    // negotiated at connect, gated on/off, blocked by the browser, byte counts
+    // -- goes to the browser console under one prefix, off by default so it
+    // adds zero console noise for anyone not actively debugging one of these
+    // two things. Trace lines are diagnostic text only, never the clipboard
+    // CONTENTS themselves (byte counts, not the text) -- this toggle is meant
+    // to be left on during a support session without exposing what was copied.
+    function trace(category, msg) {
+        if (!traceOn) return;
+        try {
+            (console.debug || console.log).call(console, "[guac-rdp:" + category + "] " + msg);
+        } catch (e) { /* no console in this context */ }
     }
     // Sound gate: suspend/resume Guacamole's shared AudioContext. suspend() mutes
     // playback instantly, mid-stream; resume() is driven from the toggle's own
@@ -100,10 +119,13 @@
         try {
             var f = Guacamole.AudioContextFactory;
             var ctx = f && f.getAudioContext && f.getAudioContext();
-            if (!ctx) return;
-            if (soundOn) { if (ctx.state === "suspended" && ctx.resume) ctx.resume(); }
-            else if (ctx.state === "running" && ctx.suspend) ctx.suspend();
-        } catch (e) { /* no Web Audio in this context -> nothing to gate */ }
+            if (!ctx) { trace("sound", "gate: no AudioContext in this browser/context"); return; }
+            if (soundOn) {
+                if (ctx.state === "suspended" && ctx.resume) { trace("sound", "gate: resuming (state was " + ctx.state + ")"); ctx.resume(); }
+                else trace("sound", "gate: on, already " + ctx.state);
+            } else if (ctx.state === "running" && ctx.suspend) { trace("sound", "gate: suspending"); ctx.suspend(); }
+            else trace("sound", "gate: off, already " + ctx.state);
+        } catch (e) { trace("sound", "gate: threw " + e); }
     }
     // Read and drop a text stream we will not use (clipboard toggled off).
     function discardTextStream(stream) {
@@ -117,32 +139,42 @@
     // pushes the local clipboard into the session; "Receive" pulls the session's
     // last clipboard into the browser.
     function sendClipboardToSession() {
-        if (!client || !currentUuid) { setStatus("Connect a session first, then Send clipboard.", "err"); return; }
+        if (!client || !currentUuid) {
+            trace("clipboard", "send: refused, no live session");
+            setStatus("Connect a session first, then Send clipboard.", "err"); return;
+        }
         if (!(navigator.clipboard && navigator.clipboard.readText)) {
+            trace("clipboard", "send: no navigator.clipboard.readText in this browser/context");
             setStatus("This browser will not let the page read the clipboard.", "err"); return;
         }
         navigator.clipboard.readText().then(function (text) {
             if (!client) return;
-            if (!text) { setStatus("Your clipboard is empty."); return; }
+            if (!text) { trace("clipboard", "send: local clipboard is empty"); setStatus("Your clipboard is empty."); return; }
             try {
                 var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
                 w.sendText(text); w.sendEnd();
+                trace("clipboard", "send: wrote " + text.length + " chars to the session clipboard stream");
                 setStatus("Sent " + text.length + " characters to the session clipboard — paste inside the session.");
-            } catch (e) { setStatus("Could not reach the session clipboard.", "err"); }
-        }).catch(function () {
+            } catch (e) { trace("clipboard", "send: stream write threw " + e); setStatus("Could not reach the session clipboard.", "err"); }
+        }).catch(function (e) {
+            trace("clipboard", "send: readText() rejected " + e);
             setStatus("Clipboard read was blocked — click inside the page, then press Send clipboard again.", "err");
         });
     }
     function receiveClipboardFromSession() {
         if (lastRemoteClip == null) {
+            trace("clipboard", "receive: nothing captured from the session yet");
             setStatus("Nothing captured yet — copy something INSIDE the session first, then Receive clipboard.", "err"); return;
         }
         if (!(navigator.clipboard && navigator.clipboard.writeText)) {
+            trace("clipboard", "receive: no navigator.clipboard.writeText in this browser/context");
             setStatus("This browser will not let the page write the clipboard.", "err"); return;
         }
         navigator.clipboard.writeText(lastRemoteClip).then(function () {
+            trace("clipboard", "receive: wrote " + lastRemoteClip.length + " chars to the OS clipboard");
             setStatus("Copied " + lastRemoteClip.length + " characters from the session — paste locally.");
-        }).catch(function () {
+        }).catch(function (e) {
+            trace("clipboard", "receive: writeText() rejected " + e);
             setStatus("Clipboard write was blocked by the browser.", "err");
         });
     }
@@ -458,7 +490,7 @@
         head.appendChild(title); head.appendChild(closeBtn);
         card.appendChild(head);
         [ "target", "hostwrap", "portwrap", "authwrap", "credwrap", "passwrap",
-          "resolution", "scale", "opt-clipboard", "opt-audio" ].forEach(function (id) {
+          "resolution", "scale", "opt-clipboard", "opt-audio", "opt-trace" ].forEach(function (id) {
             moveField(card, id);
         });
         var btns = document.createElement("div"); btns.className = "row";
@@ -1110,21 +1142,34 @@
         // sync", never an error, and the OS clipboard is only written while ON.
         syncPassthroughFlags();
         client.onclipboard = function (stream, mimetype) {
-            if (!/^text\//.test(mimetype || "text/plain")) { discardTextStream(stream); return; }
+            trace("clipboard", "remote->browser: stream opened, mimetype=" + mimetype);
+            if (!/^text\//.test(mimetype || "text/plain")) {
+                trace("clipboard", "remote->browser: non-text mimetype, discarding");
+                discardTextStream(stream); return;
+            }
             var reader = new Guacamole.StringReader(stream), text = "";
             reader.ontext = function (t) { text += t; };
             reader.onend = function () {
                 lastRemoteClip = text;   // always captured, so "Receive clipboard" can hand it over
+                trace("clipboard", "remote->browser: captured " + text.length + " chars (clipboardOn=" + clipboardOn + " focused=" + document.hasFocus() + ")");
                 // Auto-sync to the OS clipboard only while the toggle is on AND this
                 // document is focused -- writeText() REJECTS (async) when the window is
                 // not focused, so guard on hasFocus() and swallow the promise rejection
                 // (a try/catch does not catch an async reject). When unfocused the text
                 // still sits in lastRemoteClip for the "Receive clip" button.
-                if (!clipboardOn || !document.hasFocus()) return;
+                if (!clipboardOn || !document.hasFocus()) {
+                    trace("clipboard", "remote->browser: not auto-writing to OS clipboard (toggle off or unfocused)");
+                    return;
+                }
                 try {
-                    if (navigator.clipboard && navigator.clipboard.writeText)
-                        navigator.clipboard.writeText(text).catch(function () { /* blocked */ });
-                } catch (e) { /* no Clipboard API */ }
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(text).then(function () {
+                            trace("clipboard", "remote->browser: auto-wrote " + text.length + " chars to the OS clipboard");
+                        }, function (e) { trace("clipboard", "remote->browser: OS clipboard write blocked: " + e); });
+                    } else {
+                        trace("clipboard", "remote->browser: no navigator.clipboard.writeText in this context");
+                    }
+                } catch (e) { trace("clipboard", "remote->browser: threw " + e); }
             };
         };
         // Sound is negotiated (enable-audio); start it gated to the toggle's state.
@@ -1219,16 +1264,24 @@
             // (currentUuid is set on tunnel OPEN). Writing to the RDP clipboard
             // channel during connect/teardown raised cliprdr VirtualChannelWrite
             // errors and could disturb the connection.
-            if (!client || !clipboardOn || !currentUuid) return;
+            if (!client || !clipboardOn || !currentUuid) {
+                trace("clipboard", "browser->remote: focus event ignored (client=" + !!client
+                    + " clipboardOn=" + clipboardOn + " currentUuid=" + !!currentUuid + ")");
+                return;
+            }
             try {
                 if (navigator.clipboard && navigator.clipboard.readText) {
                     navigator.clipboard.readText().then(function (text) {
-                        if (!client || !clipboardOn || !text) return;
+                        if (!client || !clipboardOn || !text) {
+                            trace("clipboard", "browser->remote: readText resolved but nothing to send (empty or state changed)");
+                            return;
+                        }
                         try {
                             var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
                             w.sendText(text); w.sendEnd();
-                        } catch (e) { /* stream unavailable */ }
-                    }).catch(function () { /* clipboard-read blocked */ });
+                            trace("clipboard", "browser->remote: pushed " + text.length + " chars on focus");
+                        } catch (e) { trace("clipboard", "browser->remote: stream unavailable: " + e); }
+                    }).catch(function (e) { trace("clipboard", "browser->remote: readText() blocked: " + e); });
                 }
             } catch (e) { /* no Clipboard API */ }
         };
@@ -1506,9 +1559,20 @@
                      "guacamole-common-js/all.min.js"];
 
     function stSpawn(argv) { return cockpit.spawn(argv, { err: "message" }); }
-    // Some checks read container state, which is root-owned. superuser:"try"
-    // degrades to a skip rather than failing the whole run for a non-admin.
-    function stSpawn2(argv) { return cockpit.spawn(argv, { err: "message", superuser: "try" }); }
+    // Some checks read container state, which is root-owned -- specifically,
+    // edy-rdp-guacd runs under ROOT's ROOTFUL podman, a separate scope from a
+    // logged-in user's own rootless one (this project's own established
+    // two-scope split). superuser:"try" does NOT reject for a non-admin
+    // session; it silently runs the command AS THE PLAIN USER instead, so
+    // "podman ps" for the guacd self-test queried the wrong scope entirely,
+    // came back with empty (not missing) output, and was misread as "the
+    // container is not running" -- a false FAIL, not the intended skip (found
+    // live: passed in Administrative-access mode, failed in limited mode).
+    // superuser:"require" actually rejects when the session is not already
+    // elevated (same option this file's own admin-elevation challenge already
+    // uses at cockpit.file(...) above), which is what lets the existing
+    // catch handler below correctly degrade this to a skip.
+    function stSpawn2(argv) { return cockpit.spawn(argv, { err: "message", superuser: "require" }); }
 
     // Resolve a name on PATH without a shell interpolation: the name is passed
     // as an argument, never spliced into the script text.
@@ -1744,7 +1808,8 @@
         { key: "res",    id: "resolution",    kind: "select" },
         { key: "scale",  id: "scale",         kind: "select" },
         { key: "clip",   id: "opt-clipboard", kind: "check"  },
-        { key: "audio",  id: "opt-audio",     kind: "check"  }
+        { key: "audio",  id: "opt-audio",     kind: "check"  },
+        { key: "trace",  id: "opt-trace",     kind: "check"  }
     ];
     var CONTROLS_LS_KEY = "edy-rdp-controls";
     // history.replaceState() changes location.hash but does NOT fire a
@@ -1857,19 +1922,31 @@
         // Sound / Clipboard passthrough toggles gate LIVE, during a session.
         $("opt-clipboard").addEventListener("change", function () {
             clipboardOn = $("opt-clipboard").checked;
+            trace("clipboard", "toggle -> " + (clipboardOn ? "on" : "off"));
             if (client) setStatus(clipboardOn ? "Clipboard passthrough on." : "Clipboard passthrough off.");
         });
         $("opt-audio").addEventListener("change", function () {
             soundOn = $("opt-audio").checked;
+            trace("sound", "toggle -> " + (soundOn ? "on" : "off"));
             applySoundGate();
             // enable-audio is negotiated at connect, so toggling Sound live
             // reconnects the same scenario to add/drop the audio channel.
             if (client && activeKey) {
                 setStatus(soundOn ? "Enabling sound…" : "Muting sound…");
+                trace("sound", "toggle reconnect: dropping and re-establishing " + activeKey + " to renegotiate enable-audio");
                 teardown(true);
                 window.setTimeout(function () { connect(activeKey); }, 80);
             }
         });
+        if ($("opt-trace")) {
+            $("opt-trace").addEventListener("change", function () {
+                traceOn = $("opt-trace").checked;
+                // The one line that always prints regardless of the flag it is
+                // about to flip, so turning tracing ON confirms it took effect and
+                // turning it OFF leaves a clear "logging stops here" marker.
+                (console.debug || console.log).call(console, "[guac-rdp:trace] " + (traceOn ? "enabled" : "disabled"));
+            });
+        }
         syncPassthroughFlags();
         $("scale").addEventListener("change", function () {
             scaleMode = $("scale").value; applyScale();
