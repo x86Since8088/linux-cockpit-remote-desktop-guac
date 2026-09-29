@@ -459,11 +459,39 @@
                 + "a remote host…), sign in, or change Resolution/Scale/Clipboard/Sound "
                 + "— all without needing the tab this window was opened from.";
         b.setAttribute("aria-pressed", "false");
-        b.addEventListener("click", function () {
-            var open = !card.classList.contains("open");
+        // Anchor the card's top-right corner to the button's bottom-right corner
+        // (a normal dropdown-menu placement) instead of a fixed viewport corner --
+        // the button can be anywhere along the seatbar, which scrolls
+        // horizontally. Recomputed on every open (not just once) since the
+        // window can resize or the seatbar can scroll between opens.
+        function positionCard() {
+            var r = b.getBoundingClientRect();
+            card.style.top = (r.bottom + 4) + "px";
+            card.style.right = Math.max(4, window.innerWidth - r.right) + "px";
+            card.style.left = "auto";
+        }
+        function setOpen(open) {
+            if (open) positionCard();
             card.classList.toggle("open", open);
             b.setAttribute("aria-pressed", open ? "true" : "false");
             b.classList.toggle("on", open);
+        }
+        b.addEventListener("click", function (e) {
+            e.stopPropagation();   // don't let the document click-outside handler see this one
+            setOpen(!card.classList.contains("open"));
+        });
+        // Drop-down behavior: dismiss on an outside click or Escape, like any
+        // other menu/popover, instead of staying open until the button is
+        // clicked again.
+        document.addEventListener("click", function (e) {
+            if (card.classList.contains("open") && !card.contains(e.target)) setOpen(false);
+        });
+        card.addEventListener("click", function (e) { e.stopPropagation(); });
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape" && card.classList.contains("open")) setOpen(false);
+        });
+        window.addEventListener("resize", function () {
+            if (card.classList.contains("open")) positionCard();
         });
         bar.appendChild(b);
         return b;
