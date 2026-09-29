@@ -90,9 +90,10 @@ html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-spac
    panel did on its own, e.g. switching to the greeter because nobody is signed in
    on the seat. Not a persistent line like .status: it floats bottom-centre, fades
    in/out, and takes no pointer events so it can never sit under a click. Same
-   surface treatment as the Session… card. Like #status it lives OUTSIDE that
-   <dialog>, so while the modal is open (browser top layer) it renders dimmed
-   behind the ::backdrop -- accepted, same as #status already does. */
+   surface treatment as the Session… card. showToast() reparents it into whichever
+   <dialog> is currently open (position:fixed keeps it viewport-anchored regardless
+   of DOM parent), so it renders above the ::backdrop and stays reachable by
+   assistive tech instead of being dimmed/inert behind an open Session… card. */
 #toast { position:fixed; left:50%; bottom:1.5rem; z-index:30;
   transform:translate(-50%, .5rem); opacity:0; pointer-events:none;
   max-width:calc(100vw - 2rem); box-sizing:border-box;

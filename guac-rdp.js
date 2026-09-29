@@ -688,11 +688,31 @@
             el = document.createElement("div"); el.id = "toast";
             el.setAttribute("role", "status"); el.setAttribute("aria-live", "polite");
             document.body.appendChild(el);
+            void el.offsetWidth;   // commit the initial (hidden) style BEFORE .show is ever
+                                    // added, so the very first toast of a page load actually
+                                    // transitions instead of just appearing at full opacity.
         }
+        // A native <dialog> opened with showModal() (the Session… card) makes
+        // everything OUTSIDE it inert -- removed from the accessibility tree, not
+        // merely dimmed -- so a toast left parented to <body> while that dialog is
+        // open would be both visually stuck under the backdrop AND silently
+        // unannounced to assistive tech, exactly when this feature most needs to
+        // say why the scenario changed. Reparent into whichever dialog is
+        // currently open (or back to <body> once none is) so it stays live either
+        // way -- position:fixed keeps it viewport-anchored regardless of parent.
+        var host = document.querySelector("dialog[open]") || document.body;
+        if (el.parentNode !== host) host.appendChild(el);
+        el.removeAttribute("aria-hidden");
         el.textContent = msg;
         el.className = (kind ? kind + " " : "") + "show";
         if (toastTimer) clearTimeout(toastTimer);
-        toastTimer = setTimeout(function () { toastTimer = null; el.classList.remove("show"); }, TOAST_MS);
+        toastTimer = setTimeout(function () {
+            toastTimer = null;
+            el.classList.remove("show");
+            // opacity:0 alone leaves the node (and its stale text) in the
+            // accessibility tree indefinitely; aria-hidden actually removes it.
+            el.setAttribute("aria-hidden", "true");
+        }, TOAST_MS);
     }
 
     // Unlocking the seat is the ONLY way to resume the session the user left.

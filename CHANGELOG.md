@@ -1,3 +1,43 @@
+## 1.6.1.20260929 - 2026-09-29
+
+Fixes three accessibility bugs in 1.6.0's new toast, all found by a multi-agent adversarial
+review of that commit before it ever reached edt1 (four independent dimension reviews --
+control-flow, admin-gate security, toast UX/accessibility, test coverage -- each candidate
+finding then independently re-checked by a skeptic on a different model). 3 of 11 candidate
+findings were confirmed real; the other 8, including a claimed relay-side admin-gate gap on
+the `greeter` scenario, were checked against the actual code and refuted (see the review
+transcript referenced in this commit for the reasoning on each).
+
+- **Toast was inert -- not just dimmed -- while the Session… card is open.** 1.6.0's own
+  comment said a toast firing while that `<dialog>` is open would render "dimmed behind the
+  `::backdrop`", same as `#status`. That undersold it: `showModal()` makes everything OUTSIDE
+  the dialog *inert* per the HTML spec -- removed from the accessibility tree entirely, not
+  merely dimmed -- and Connect lives inside that dialog, so the ordinary path (open Session…,
+  pick Console, click Connect) left the fail-over toast silently unannounced to assistive
+  tech, for the one message this whole feature exists to convey. Confirmed with a real
+  headless-Chromium accessibility-tree dump (`Accessibility.getFullAXTree` with/without the
+  dialog open). Fixed: `showToast()` now reparents `#toast` into whichever `<dialog>` is
+  currently open (back to `<body>` once none is) -- `position:fixed` keeps it viewport-
+  anchored regardless of DOM parent, so this also fixes the visual dimming as a side effect.
+- **Auto-hide left stale text in the accessibility tree indefinitely.** The 5s timer only did
+  `classList.remove("show")`, which drives `opacity:0` -- and an `opacity:0` element stays in
+  the accessibility tree and gets re-encountered by anyone browsing the page linearly (screen
+  reader browse mode, "read from here"), with nothing marking it as dismissed. Fixed: toggle
+  `aria-hidden` on hide/show, which actually removes/restores the node from the tree.
+- **The first toast of a page load never faded in.** `showToast()` created the element,
+  appended it, and set the `.show` class in one synchronous run with no forced reflow in
+  between -- the browser had no earlier committed style to transition FROM, so it collapsed
+  both changes into one and the toast just appeared at full opacity. Every later reuse of the
+  same (already-painted) element faded correctly; only the very first one in a session did
+  not. Fixed with a single `el.offsetWidth` read right after the element's first creation.
+- **Verification:** `run_tests.sh` green, `node --check` clean. A small ad hoc jsdom check
+  (scratch project, not a repo dependency, deleted after use) that extracts the real
+  `showToast()` block verbatim -- same technique `tests/js/keyboard_remap.test.js` already
+  uses for its own TESTHOOK block -- confirmed: reparenting into an open `<dialog>` and back
+  to `<body>` on close, `aria-hidden` clearing on show and being set on hide, and the forced-
+  reflow line running without error. Not re-tested live on edt1 beyond what 1.6.0 already
+  covers -- these are additive fixes to the same code path.
+
 ## 1.6.0.20260929 - 2026-09-29
 
 Connecting to the Console (mirror) while nobody is signed in on the physical

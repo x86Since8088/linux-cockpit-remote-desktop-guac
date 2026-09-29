@@ -897,3 +897,27 @@ sessions → `greeter` + toast; 1 session → `console`, no toast; control rejec
 no answer (timeout) → `console`; `virtual`/`greeter` never probe; the `#seat` pop-out auto-connect
 takes the same path; toast auto-hides and a second toast resets its clock. Not live-tested against a
 real Cockpit/relay session in this pass — confirm on edt1 against a freshly booted seat.
+
+**Follow-up (1.6.1.20260929), found by a multi-agent adversarial review before this ever reached
+edt1:** the "known and accepted, dimmed behind the `::backdrop`" call above understated the actual
+problem. A native `<dialog>` opened with `showModal()` makes everything OUTSIDE it *inert* per the
+HTML spec — removed from the accessibility tree, not merely dimmed — and since Connect lives inside
+the Session… card, the ordinary path (open Session…, pick Console, click Connect) left the toast
+silently unannounced to assistive tech for the exact message this feature exists to convey.
+Two further, independent bugs in the same function: the 5s auto-hide only removed the `.show` CSS
+class, so `opacity:0` alone left the stale text permanently discoverable in the accessibility tree
+(only `display`/`visibility`/`hidden`/`aria-hidden` actually remove a node from it); and the very
+first toast of a page load skipped its fade-in entirely, because the element's initial (hidden) style
+was never committed to a frame before the `.show` class was applied in the same synchronous call, so
+the browser collapsed both changes into one. Fixed: `showToast()` now reparents `#toast` into
+whichever `<dialog>` is currently open (or back to `<body>` once none is — `position:fixed` keeps it
+viewport-anchored regardless of DOM parent), so it renders above the `::backdrop` and stays reachable
+by assistive tech instead of inert; toggles `aria-hidden` on hide/show so the node actually leaves and
+rejoins the accessibility tree; and forces a style flush (`el.offsetWidth`) right after the element's
+first creation so the very first toast fades in like every later one. All three were confirmed with a
+concrete reproduction (one against a real headless Chromium accessibility-tree dump) before being
+accepted as real, and eight other candidate findings from the same review — including a claimed
+relay-side admin-gate gap on the `greeter` scenario — were independently checked and refuted; see the
+review's own reasoning in the corresponding commit for why. Re-verified with an extended jsdom check:
+reparents into an open dialog and back on close, `aria-hidden` clears on show and is set on hide, and
+the forced-reflow line runs without throwing.
