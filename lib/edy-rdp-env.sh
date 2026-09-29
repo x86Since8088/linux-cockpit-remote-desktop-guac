@@ -165,6 +165,9 @@ env_check_values() {
                 printf '%s: must be unix:<path>\n' "$k"; rc=1; fi ;;
           EDY_RDP_DOOR_USER)
             [[ "$v" =~ ^[a-z_][a-z0-9_-]*$ ]] || { printf '%s: must be a unix user name\n' "$k"; rc=1; } ;;
+          EDY_RDP_UPDATE_REPO)
+            [[ "$v" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+                || { printf '%s: must be owner/repo\n' "$k"; rc=1; } ;;
         esac
     done < <(_env_scan "$file" data 2>/dev/null || true)
     return $rc

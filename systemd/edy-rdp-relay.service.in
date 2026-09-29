@@ -46,6 +46,10 @@ Environment=EDY_RDP_REMOTE_ADMIN_ONLY=0
 # no write verb runs (fail closed). NEVER set this on an operator's own
 # workstation: a Stop there would kill the local session.
 Environment=EDY_RDP_DESKUI_ENABLE=0
+# Self-update: which GitHub repo to check for a newer tagged Release. A
+# location, not a flag -- read straight from the process environment (this
+# EnvironmentFile mechanism), never passed on the ExecStart line below.
+Environment=EDY_RDP_UPDATE_REPO=x86Since8088/linux-cockpit-remote-desktop-guac
 # NOT optional (no leading '-'): a relay running on built-in defaults it was
 # never configured with is worse than a relay that did not start. install.sh
 # places this file from .envdefault, reconciles it on upgrade and validates it

@@ -1,3 +1,110 @@
+## 1.7.0.20260929 - 2026-09-29
+
+New capability (I49): the plugin can now check this project's own GitHub repository
+for a newer tagged Release than what is installed, and apply it — with AUTOMATIC
+rollback if the newly-installed version fails a post-restart health check. This entry
+covers the **backend control-API half** only (relay + privileged units + polkit +
+deploy manifest + docs + tests); the Update tab itself (the Cockpit-facing UI) is a
+separate piece built against the contract documented below and in `docs/SELFUPDATE.md`.
+
+- **Why GitHub, never local git:** a deployed host has no git repository at all —
+  `deploy.sh`'s own `copy_declared_payload_into()` explicitly excludes `.git/`, `docs/`,
+  `deploy.sh` itself, `CHANGELOG.md` and `README.md` from what ships into
+  `/opt/cockpit-guac-rdp/payload-<version>/`. So "check for updates" goes through the
+  GitHub API, and "apply" means fetching a fresh copy of the repo tree at a tag (which
+  DOES include `deploy.sh` — that exclusion is `deploy.sh`'s own packaging step, not
+  something present in a tagged tree) and re-running **that** `deploy.sh` against the
+  existing install root, reusing its payload-swap/`.env`-reconcile/preflight logic by
+  invoking it rather than reimplementing it. Python stdlib only for all of it
+  (`urllib.request`, `json`, `tarfile`, `hashlib`, `socket`, `subprocess`) — this
+  project's own stated philosophy ("relay/reaper are stdlib Python 3, no PyPI
+  dependencies") and `requires.txt` pin no `curl`/`jq`/`git`, so none were added.
+- **New module `relay/selfupdate.py`** (imported by `edy_rdp_relay.py` exactly like
+  `session_registry.py`/`control.py`/`bridge.py` already are): version parse/compare for
+  this project's `maj.min.patch.YYYYMMDD` scheme; the GitHub `releases/latest` call;
+  atomic cache read/write to `/run/edy-rdp/update-status.json` (write-to-temp-then-
+  `os.rename`, chowned back to `edy-relay:edy-rdp` since both the unprivileged relay and
+  the ROOT-run apply/rollback scripts write it); tarball fetch+extract guarded against
+  path traversal (`extractall(..., filter="data")` on Python 3.12+, a manual per-member
+  containment check on the 3.9–3.11 this project's `requires.txt` also supports); the
+  health check (`systemctl is-active` + a real `{"op":"ping"}` round-trip on the control
+  socket, retried ~20s); and the `SelfUpdate` class (mirroring `DesktopUI`'s shape) that
+  `relay/control.py` calls through injection.
+- **Four new control-socket ops** — `update-status`, `update-check`, `update-apply`,
+  `update-rollback` — wired into `handle_control()` via a new injected `selfupdate=`
+  parameter, following the exact contract in `docs/SELFUPDATE.md`. Status/check are
+  read-only for any authenticated caller (status never blocks on GitHub's latency; check
+  forces a live call, server-side rate-limited to 60s). Apply is admin-gated PLUS a
+  typed-hostname confirmation (same pattern as the Desktop UI tab's `stop`/`disable`);
+  rollback is admin-gated with NO confirmation (this project's convention: the recovery
+  action stays low-friction, the disruptive one carries the confirmation). Neither op
+  ever trusts a caller-supplied version — apply re-validates against the relay's own
+  cache, and the privileged script re-validates AGAIN against a fresh GitHub call before
+  touching anything.
+- **Two new privileged units, deliberately NOT templated:** `edy-rdp-selfupdate-apply
+  .service` and `edy-rdp-selfupdate-rollback.service` take no `%i`, no instance argument
+  at all — one step past this project's existing `%i`-templated pattern
+  (`edy-rdp-deskui@`, `edy-rdp-unlock@`), because it means **zero** caller-influenced
+  data crosses the `systemctl start` privilege boundary: "apply" always means "whatever
+  the script's own fresh GitHub call says is latest", "rollback" always means "the one
+  non-current `payload-<version>` directory on disk, refuse cleanly if that isn't
+  exactly one". Both added to the SAME polkit rule (`hardening/edy-rdp-headless.rules`)
+  that already whitelists `edy-relay`, matched by exact unit name (not a prefix, since
+  they are not templated).
+- **A real, easy-to-miss `deploy.sh` gotcha, handled explicitly:** `deploy.sh` run with
+  no `--with-units` flag still has `install.sh` render unit files whenever the layout is
+  a deployed one (unconditional there, not gated by `--with-units` — verified against
+  `do_install()`'s actual skip condition), and `install.sh` itself already calls
+  `systemctl daemon-reload` in that same branch. `edy-rdp-selfupdate-apply.py` calls
+  `systemctl daemon-reload` again anyway, immediately after `deploy.sh` returns and
+  before restarting the relay, as explicit defense in depth — documented in
+  `docs/SELFUPDATE.md` as normally a harmless repeat rather than the only thing standing
+  between a changed `edy-rdp-relay.service` unit and it taking effect.
+- **`edy-rdp-guacd.service` is never restarted by this feature** — only
+  `edy-rdp-relay.service` is. Restarting `guacd` drops every live RDP screencast, and a
+  `guacd`/container restart has always been a deliberate, separate, explicitly-requested
+  action in this project. A version bump that also needs a new `guacd` image is
+  documented as out of scope for the automatic path, not silently mishandled.
+- **New `.envdefault` key `EDY_RDP_UPDATE_REPO`** (default: this project's own GitHub
+  `owner/repo`), validated by a new case in `lib/edy-rdp-env.sh`'s `env_check_values()`.
+  Deliberately no enable/disable flag for this feature (by product decision, checking
+  and applying are available to any Cockpit admin by default) — only the repo location
+  is configurable.
+- **install.sh's manifest** gained `relay/selfupdate.py`, the two new privileged scripts
+  (`selfupdate/edy-rdp-selfupdate-{apply,rollback}.py`, installed as
+  `edy-rdp-selfupdate-{apply,rollback}` in `/usr/libexec/edy-rdp`) and the two new unit
+  names — a file left out of this manifest is a file that silently never ships, so this
+  was checked against `install.sh --verify`'s own completeness gate, not just eyeballed.
+- **Docs:** new `docs/SELFUPDATE.md` (architecture, the exact control-op contract, the
+  exit-code enums, and an explicit TRUST MODEL section — this verifies TLS to
+  `api.github.com`/`codeload.github.com` and nothing more; there is no code-signing or
+  GPG verification of the fetched tarball in this pass, named as a known limitation in
+  the same spirit as this file's other "OPEN (deferred)" entries, not hidden behind a
+  fake verification step). `docs/KNOWN_ISSUES.md` I49 (a new-capability entry, following
+  the precedent set by I47). `README.md` gained `EDY_RDP_UPDATE_REPO` in the settings
+  section. Also noted plainly, in both new docs: **this repository has no GitHub
+  Releases or tags yet** as of this writing (`gh release list` and `git tag --list` both
+  empty, verified this session) — so `update-status` will show `update_available: false`
+  / `latest_version: null` on every host until the maintainer cuts the first tagged
+  Release. Expected, not a bug.
+- **Tests:** new `relay/test_selfupdate.py` — version parse/compare across
+  equal/older/newer/malformed input (malformed never crashes and never reports an update
+  available), the cache read/write round trip and its TTL staleness decision, the
+  rollback-candidate selection logic (none / exactly one / more-than-one-is-ambiguous-
+  refuse), and `relay/control.py`'s exit-code-to-response mapping for all four ops
+  including every refusal path (not admin, bad confirm, nothing to apply, rate-limited).
+  Added to `run_tests.sh`'s existing relay-unit-test line. No test in this pass hits the
+  real network — `urllib`/`subprocess`/socket are mocked throughout, matching this
+  project's existing test philosophy.
+- **Verification (backend/control-API half):** `run_tests.sh` green, including
+  `install.sh --verify`'s pre-flight (both new units render with no leftover
+  placeholder, and every `LIBEXECDIR` reference they carry resolves to something the
+  manifest installs) and the staged `DESTDIR` install-to-completion roundtrip in
+  `tests/installer_tests.sh`. Not live-tested against a real tagged Release on edt1 in
+  this pass — none exists yet on this repository, per the note above — nor is there a
+  Cockpit "Update" tab to click yet; that UI half lands as a follow-up to this same
+  entry, against the contract documented in `docs/SELFUPDATE.md`.
+
 ## 1.6.1.20260929 - 2026-09-29
 
 Fixes three accessibility bugs in 1.6.0's new toast, all found by a multi-agent adversarial

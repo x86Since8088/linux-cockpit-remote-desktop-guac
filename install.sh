@@ -50,6 +50,7 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          relay/session_registry.py:session_registry.py
          relay/control.py:control.py
          relay/bridge.py:bridge.py
+         relay/selfupdate.py:selfupdate.py
          bridge/edy-rdp-bridge-start.sh:edy-rdp-bridge-start
          bridge/edy-rdp-krb-preflight.sh:edy-rdp-krb-preflight.sh
          headless/edy-rdp-headless-start.sh:edy-rdp-headless-start
@@ -60,7 +61,9 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          deskui/edy-rdp-deskui.sh:edy-rdp-deskui
          rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin
          bootstrap/edy-rdp-bootstrap.sh:edy-rdp-bootstrap
-         pulse/edy-rdp-pulse-bind.sh:edy-rdp-pulse-bind)
+         pulse/edy-rdp-pulse-bind.sh:edy-rdp-pulse-bind
+         selfupdate/edy-rdp-selfupdate-apply.py:edy-rdp-selfupdate-apply
+         selfupdate/edy-rdp-selfupdate-rollback.py:edy-rdp-selfupdate-rollback)
 # Sourced libraries (not entry points): linked into $LIBEXECDIR beside the scripts
 # that source them, so a deployed host has ONE copy of the .env grammar and ONE
 # reading of requires.txt - the same code install.sh, deploy.sh and the start-time
@@ -80,7 +83,11 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        # Audio: a path unit per seat uid that binds the seat's pulse socket into the
        # SHARED /run/edy-rdp-pulse the moment it appears (login), so it propagates into
        # the running guacd container without a restart (KNOWN_ISSUES I42).
-       edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service)
+       edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service
+       # Self-update: deliberately NOT templated (no %i) -- see
+       # systemd/edy-rdp-selfupdate-apply.service.in for why that is a stronger
+       # property here than the %i-templated units above.
+       edy-rdp-selfupdate-apply.service edy-rdp-selfupdate-rollback.service)
 # System files that are COPIED (rendered where they carry a placeholder), because
 # the software that reads them - systemd-tmpfiles, dbus, polkit, nft - does not
 # follow a symlink out of its own configuration directory in every distro's
@@ -861,7 +868,8 @@ EOF
         n="$(libexec_name "$f")"; t="$(readlink -f -- "$LIBEXECDIR_D/$n")"
         [[ -e "$t" ]] || die "post-install: $LIBEXECDIR_D/$n dangles"
         case "$n" in
-          *.py|edy-rdp-*) [[ "$n" == session_registry.py || "$n" == control.py || "$n" == bridge.py ]] \
+          *.py|edy-rdp-*) [[ "$n" == session_registry.py || "$n" == control.py \
+                             || "$n" == bridge.py || "$n" == selfupdate.py ]] \
                           || [[ -x "$t" ]] || die "post-install: $t is not executable" ;;
         esac
     done

@@ -921,3 +921,52 @@ relay-side admin-gate gap on the `greeter` scenario — were independently check
 review's own reasoning in the corresponding commit for why. Re-verified with an extended jsdom check:
 reparents into an open dialog and back on close, `aria-hidden` clears on show and is set on hide, and
 the forced-reflow line runs without throwing.
+
+### I49 · New capability: self-update (check GitHub for a newer Release, one-click apply with automatic rollback) · Sev N/A · SHIPPED (1.7.0.20260929, backend half)
+
+Not a bug fix — a new capability, recorded here in the same spirit as I47. A deployed host has no
+git repository at all (`deploy.sh`'s own payload packaging excludes `.git/`), so "check for updates"
+goes through the GitHub API (`GET .../repos/x86Since8088/linux-cockpit-remote-desktop-guac/releases/latest`)
+and "apply" means fetching that tag's tarball (one top-level directory containing the full repo tree,
+`deploy.sh` included) and re-running **that** `deploy.sh --install-to <root>` — no `--with-units` —
+against the existing install root, reusing its payload-swap/`.env`-reconcile logic rather than
+reimplementing it. Four new control-socket ops (`update-status`, `update-check`, `update-apply`,
+`update-rollback`; see `docs/SELFUPDATE.md` for the full contract) are wired into
+`relay/control.py`'s `handle_control()` through a new injected `selfupdate=` object
+(`relay/selfupdate.py`'s `SelfUpdate`, mirroring `DesktopUI`'s shape), behind two NEW,
+deliberately **parameterless** privileged units (`edy-rdp-selfupdate-apply.service`,
+`edy-rdp-selfupdate-rollback.service` — no `%i`, no instance argument at all: one step past the
+existing `%i`-templated deskui/unlock pattern, since it means zero caller-influenced data crosses the
+`systemctl start` privilege boundary). The apply unit re-fetches and re-validates the "latest version"
+question itself from a fresh GitHub call — it never trusts the unprivileged relay's cache, an argument,
+or an environment variable — and on a failed post-restart health check (a `systemctl is-active` check
+plus a real `{"op":"ping"}` round-trip on the control socket, retried for ~20s) it automatically swaps
+back to the one non-current `payload-<version>` directory and restarts the relay again. Only
+`edy-rdp-relay.service` is ever restarted by this path; `edy-rdp-guacd.service` is deliberately never
+touched (a live RDP screencast is never dropped by an automated flow in this project — see any commit
+history mentioning "restart guacd"), which also means a version bump needing a new `guacd` image is
+out of scope for the automatic path (documented, not solved, in `docs/SELFUPDATE.md`).
+
+**Trust model, stated plainly (not overstated):** this verifies TLS to `api.github.com` and
+`codeload.github.com` and nothing more. There is **no code-signing or GPG verification** of the
+fetched release tarball in this pass — a compromised repository owner account is a compromised fleet.
+See `docs/SELFUPDATE.md`'s "Trust model" section for the full statement; a signature-verification pass
+is a plausible future follow-up, deliberately not attempted here.
+
+**This repository has no GitHub Releases or tags yet** as of this writing (`gh release list` and
+`git tag --list` both empty, verified this session) — so `update-status` will correctly report
+`update_available: false` / `latest_version: null` on every host until the maintainer cuts the first
+tagged Release. That is the expected result of the check, not a bug in it.
+
+**Verification (backend half):** `relay/test_selfupdate.py` (new) covers version parse/compare across
+equal/older/newer/malformed input (malformed never reports an update available — fails closed), the
+cache read/write round trip and its TTL staleness decision, the rollback-candidate selection logic
+(none/exactly-one/ambiguous-refuse), and `relay/control.py`'s exit-code-to-response mapping for all
+four ops including every refusal path (not admin, bad confirm, nothing to apply, rate-limited).
+`run_tests.sh` green (`test_selfupdate` added to the existing unit-test line), plus the existing
+install-completeness gate (`install.sh --verify`'s pre-flight), which now also asserts the two new
+units render clean with no leftover placeholder and every `LIBEXECDIR` reference they carry resolves
+to something the manifest actually installs. Not live-tested against a real tagged Release on edt1 in
+this pass (none exists yet, per the note above) — the mechanics were exercised via mocked
+`urllib`/`subprocess`/socket calls only, never a real network call, per this project's existing test
+philosophy.

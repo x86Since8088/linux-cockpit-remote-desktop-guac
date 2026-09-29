@@ -158,7 +158,9 @@ and validates it either way — a bad value refuses the install by key and reaso
 units read it directly (`EnvironmentFile`), so there is one copy of each setting on
 the host and not two. It sets the guacd endpoint, the admin group, the local and
 remote RDP allow-lists, the log level, the pinned `GUACD_IMAGE` + `GUACD_ENTRYPOINT`,
-the 3390 door username and the seat uid whose pulse socket carries audio.
+the 3390 door username, the seat uid whose pulse socket carries audio, and the
+GitHub repo the **Update** tab checks for a newer Release (`EDY_RDP_UPDATE_REPO`,
+see `docs/SELFUPDATE.md`).
 
 > **Moved in this version.** These settings used to be `/etc/default/edy-rdp`, seeded
 > from `etcdefaults/edy-rdp`. That file was `.envdefault` wearing the wrong hat: it is
@@ -192,6 +194,17 @@ sudo systemctl restart edy-rdp-relay.service
 ```
 Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are accepted.
 
+**Self-update.** The relay checks `EDY_RDP_UPDATE_REPO` (a GitHub `owner/repo`,
+default this project's own) for a newer tagged Release. Checking and applying are
+available to any Cockpit administrator by default (no separate enable flag) — see
+`docs/SELFUPDATE.md` for the control-op contract, the exit-code enums and the
+trust model.
+
+```bash
+# in /opt/cockpit-guac-rdp/.env
+EDY_RDP_UPDATE_REPO=x86Since8088/linux-cockpit-remote-desktop-guac
+```
+
 ## Layout
 | path | purpose |
 |---|---|
@@ -202,11 +215,13 @@ Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are 
 | `relay/session_registry.py` | persistent per-user session state + prune policy |
 | `relay/control.py` | management API: list / terminate / register / elevate |
 | `relay/bridge.py` | orchestrates the per-connection FreeRDP3 bridge |
+| `relay/selfupdate.py` | self-update: version compare, GitHub release check, cache, health check, payload/rollback bookkeeping |
 | `relay/edy_rdp_reaper.py` | closes idle greeters + prunes the registry |
 | `relay/test_*.py` | unit tests (isolation, gates, allow-list, reaper, reconnect, codec) |
 | `bridge/edy-rdp-bridge-start.sh` | the bridge launcher (xfreerdp3 → Xvfb → x11vnc) |
 | `headless/edy-rdp-headless-{start,stop}.sh` | per-user isolated headless-session lifecycle |
 | `rotate/edy-rdp-rotate-rdplogin.sh` | rotates the 3390 door credential |
+| `selfupdate/edy-rdp-selfupdate-{apply,rollback}.py` | privileged, parameterless self-update mechanics (fetch/extract/deploy.sh, or payload-symlink swap; both health-check and gate on it) |
 | `lib/edy-rdp-env.sh` `lib/edy-rdp-requires.sh` | sourced libraries (linked into libexec): the ONE `.env` grammar + validators, the ONE reading of `requires.txt` |
 | `bootstrap/edy-rdp-bootstrap.sh` | the relay's `ExecStartPre=+`: validates `.env`, checks prerequisites, builds/refreshes the venv offline, writes `venv.env` |
 | `pulse/edy-rdp-pulse-bind.sh` | makes `/run/edy-rdp-pulse` a shared mount and binds the seat pulse socket into it (guacd `ExecStartPre` + the per-seat path unit) |

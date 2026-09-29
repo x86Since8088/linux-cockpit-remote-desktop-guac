@@ -55,7 +55,7 @@ class LiveConnections:
 
 
 def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
-                   unlock=None, deskui=None):
+                   unlock=None, deskui=None, selfupdate=None):
     """Dispatch one control request. Returns a JSON-serialisable dict.
 
     request: parsed dict with "op" in {"list","terminate","ping","register","elevate"}.
@@ -75,6 +75,17 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
           .hostname      -> str    this host's name (the confirmation phrase)
           .status()      -> dict   current desktop/DM/session state
           .control(action, force) -> (ok, detail)   run the privileged verb
+    selfupdate: optional self-update controller (duck-typed, mirrors deskui's
+        injection). Admin gate + typed-hostname confirmation for "update-apply"
+        live HERE (same split as deskui), so a leaked/forged confirm string is
+        checked before any privileged unit ever starts. Must expose:
+          .hostname          -> str    this host's name (the confirmation phrase)
+          .status()          -> dict   cached update state (never blocks)
+          .check_now()       -> dict   forces a live GitHub check (rate-limited)
+          .apply()           -> (ok, detail, rolled_back)     run the apply unit
+          .rollback()        -> (ok, detail, rolled_back)     run the rollback unit
+        rolled_back is None for "refused before touching the unit at all" (maps
+        to the "error" response shape), True/False once the unit actually ran.
     """
     if not isinstance(request, dict):
         return {"ok": False, "error": "malformed request"}
@@ -179,6 +190,64 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
                 force = True
         ok, detail = deskui.control(action, force)
         return {"ok": bool(ok), "action": action, "forced": bool(force), "detail": detail}
+
+    # -- self-update: read cached state, forcing a live check for "update-check" --
+    #
+    # Read-only, ANY authenticated caller (same trust level as deskui-status):
+    # a host's own available-update state is not a secret. "update-status" never
+    # blocks on GitHub's latency; "update-check" does, but is rate-limited by the
+    # injected object itself (60s wall-clock, server-side, regardless of caller),
+    # returning the cache with rate_limited=True inside that window rather than
+    # erroring.
+    if op in ("update-status", "update-check"):
+        if selfupdate is None:
+            return {"ok": False, "error": "self-update is not available on this server"}
+        try:
+            return selfupdate.status() if op == "update-status" else selfupdate.check_now()
+        except Exception as exc:               # never let a probe error 500 the panel
+            return {"ok": False, "error": "could not read update status: %s" % exc}
+
+    # -- self-update: apply the cached latest release --------------------------
+    #
+    # Gated exactly like deskui's disruptive verbs: admin, then a typed-hostname
+    # confirmation (this restarts a live production relay). Unlike deskui there
+    # is no separate opt-in flag — checking and applying updates are available to
+    # any admin by default (product decision) — and the "which version" question
+    # is never asked of the caller: apply() re-validates against its OWN cache
+    # server-side, and the privileged script behind it re-validates AGAIN against
+    # a fresh GitHub call before touching anything.
+    if op == "update-apply":
+        if selfupdate is None:
+            return {"ok": False, "error": "self-update is not available on this server"}
+        if not is_admin:
+            return {"ok": False, "error": "applying an update needs administrative access"}
+        if request.get("confirm") != selfupdate.hostname:
+            return {"ok": False, "need_confirm": True, "hostname": selfupdate.hostname}
+        ok, detail, rolled_back = selfupdate.apply()
+        if ok:
+            return {"ok": True, "detail": detail}
+        if rolled_back is None:
+            return {"ok": False, "error": detail}
+        return {"ok": False, "detail": detail, "rolled_back": bool(rolled_back)}
+
+    # -- self-update: roll back to the previous payload -------------------------
+    #
+    # Admin-gated, but deliberately NO typed confirmation: this project's own
+    # convention is that the RECOVERY action stays low-friction while the
+    # disruptive one (apply) carries the confirmation — the same asymmetry as
+    # deskui's plain "start" (no confirm) versus "stop"/"disable" (confirm
+    # required).
+    if op == "update-rollback":
+        if selfupdate is None:
+            return {"ok": False, "error": "self-update is not available on this server"}
+        if not is_admin:
+            return {"ok": False, "error": "rolling back an update needs administrative access"}
+        ok, detail, rolled_back = selfupdate.rollback()
+        if ok:
+            return {"ok": True, "detail": detail}
+        if rolled_back is None:
+            return {"ok": False, "error": detail}
+        return {"ok": False, "detail": detail, "rolled_back": bool(rolled_back)}
 
     if op == "list":
         sessions = []

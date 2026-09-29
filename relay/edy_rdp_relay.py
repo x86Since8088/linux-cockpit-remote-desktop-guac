@@ -68,6 +68,7 @@ import uuid as uuidlib
 from session_registry import SessionRegistry
 from control import LiveConnections, handle_control
 import bridge
+from selfupdate import SelfUpdate
 
 log = logging.getLogger("edy-rdp-relay")
 
@@ -549,6 +550,13 @@ class DesktopUI:
 #: module-level singleton, mirrored on SESSION_TOKENS; write_enabled is set in main()
 #: from the --deskui-write flag so the control server's closure can reach it.
 DESKTOP_UI = DesktopUI()
+
+#: module-level singleton (mirrors DESKTOP_UI): the repo is read straight out of
+#: the process environment, not through argparse -- EDY_RDP_UPDATE_REPO reaches
+#: this process via the unit's EnvironmentFile=@ENV_FILE@ exactly like every
+#: other .env key, with no ExecStart plumbing needed for a location (not a
+#: secret, not a flag someone would ever override per-invocation).
+SELF_UPDATE = SelfUpdate(repo=os.environ.get("EDY_RDP_UPDATE_REPO", "").strip() or None)
 
 
 def ensure_waylandvnc_session(uid):
@@ -1384,7 +1392,8 @@ def control_server(srv, table, live, admin_group, path_label=""):
                 resp = {"ok": False, "error": "invalid JSON"}
             else:
                 resp = handle_control(req, uid, table, live, admin, SESSION_TOKENS,
-                                      unlock=unlock_seat_session, deskui=DESKTOP_UI)
+                                      unlock=unlock_seat_session, deskui=DESKTOP_UI,
+                                      selfupdate=SELF_UPDATE)
             conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
         except OSError:
             pass

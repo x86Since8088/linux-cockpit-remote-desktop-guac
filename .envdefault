@@ -134,6 +134,14 @@ EDY_RDP_PULSE_SEAT_UID=1000
 #PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor
 # Upgrading from 1.3.x: PULSE_SERVER=unix:/run/pulse.sock is refused as stale - change it to unix:/run/pulse/native.
 
+# --- self-update (check for / apply / roll back a newer tagged Release) -----
+
+# GitHub "owner/repo" this project's own Update tab checks for a newer tagged
+# Release than what is installed. A location, not a secret. Checking and
+# applying are available to any Cockpit administrator by default -- there is no
+# separate enable flag for this feature, only this repo override.
+EDY_RDP_UPDATE_REPO=x86Since8088/linux-cockpit-remote-desktop-guac
+
 # --- the 3390 "Remote Login" door -------------------------------------------
 
 # Username of the greeter door credential that edy-rdp-rotate-rdplogin rotates.
