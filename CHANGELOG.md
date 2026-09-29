@@ -1,3 +1,53 @@
+## 1.5.0.20260929 - 2026-09-29
+
+A pop-out window (Pop-out / Add Monitor) can now pick its own session and
+reconnect entirely on its own, independent of the tab it was opened from.
+
+- **The problem:** a pop-out is a genuinely separate page load (`window.open`
+  to the same URL with a different hash, not a shared JS context with the
+  opener), so it was never actually TIED to the opener tab in the code -- but
+  it had no UI to use that independence. `enterSeatMode()`/`enterMonitorMode()`
+  only exposed a small fixed subset of controls (a monitor picker, Sound) and
+  hardcoded the scenario (`console` / `virtual`) at open time, with no way to
+  change it short of closing the window. Concretely, reported against a fresh
+  boot with nobody logged into the physical seat: Pop-out (hardcoded to the
+  `console` mirror, which needs an active per-user desktop session on :3389)
+  can't connect until someone logs in via the GDM greeter -- and once logged
+  in, if the connection carrying that greeter/login is later disconnected from
+  the main tab, the pop-out's mirror session drops too. The exact mechanism
+  wasn't nailed down live (worth confirming against this project's own
+  documented grd/lock-screen interaction: a disconnected RDSTLS/greeter-
+  handover connection plausibly locks the physical seat, and a locked seat is
+  already known to make grd kill any active screencast -- see I39a), but the
+  practical problem is the same either way: the pop-out had no way to recover
+  or switch to a different scenario without the opener tab.
+- **The fix** (`guac-rdp.js`, `buildSessionCard()` + `addSessionButton()`): a
+  new "Session…" button in both pop-out types opens a floating card holding
+  the FULL connect controls -- Session target (+ host/port for Remote/VNC),
+  Sign-in mode + credentials, Resolution, Scale, Clipboard, Sound, and
+  Connect/Disconnect. Every field keeps its existing id and event listener
+  (`target`/`authmode` change -> `refreshUi()`; Connect/Disconnect ->
+  `connect()`/`teardown()`; the generic `URL_CONTROLS` hash/localStorage
+  persistence) -- this only REPARENTS the existing DOM nodes into the new
+  card, it does not duplicate or rewire any connect logic. A pop-out can now,
+  entirely on its own: try `console`, fail because nobody's logged in yet,
+  switch to `greeter` to reach the GDM login screen, and once logged in
+  switch back to `console` -- all without the tab it was opened from.
+  Resolution/Scale/Sound moved out of the always-visible top strip and into
+  the card (previously inline for Add Monitor) for consistency between both
+  pop-out types and to keep the slim top strip uncluttered.
+- **Verification:** `run_tests.sh` green (no Python/shell logic touched).
+  DOM-level smoke test (ad hoc, via jsdom against the real `index.html` +
+  `guac-rdp.js` -- not part of the repo's own test suite, which uses
+  Playwright against a live Cockpit instead) confirmed, for both `#seat` and
+  `#monitor` modes: the card and button are created and correctly parented,
+  all ten fields plus Connect/Disconnect end up inside the card, the toggle
+  button opens/closes it, and `refreshUi()`'s existing show/hide logic
+  (`[hidden]` on `hostwrap`/`portwrap`/`authwrap`/etc.) still works correctly
+  on the reparented elements. Not live-tested against a real Cockpit/relay
+  (no browser tool was reachable in this session) -- worth a manual pass in
+  the real UI before relying on it.
+
 ## 1.4.2.20260928 - 2026-09-28
 
 Fix (I45): typing "<" sent ">" to the guest. The fix generalizes to every

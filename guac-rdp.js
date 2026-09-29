@@ -425,18 +425,62 @@
         wrap.appendChild(b); bar.appendChild(wrap);
         return b;
     }
+    // ---- "Session…" card (pop-out windows only) --------------------------------
+    // Packs the full connect controls (Session target, host/port, Sign-in +
+    // credentials, Resolution, Scale, Clipboard, Sound, Connect/Disconnect) into
+    // a floating card toggled by a button in the seatbar -- so a pop-out (console
+    // mirror or virtual monitor) can pick a DIFFERENT scenario and (re)connect
+    // entirely on its own. Without this, a pop-out could only ever show the one
+    // scenario it auto-connected to on open, with no way to recover if that
+    // session ended except closing the window -- and since a pop-out is a fresh,
+    // independent page load (window.open to the same URL, not a shared JS
+    // context with the opener), it was never actually TIED to the opener tab
+    // except by this missing UI. Every field here KEEPS its existing id and
+    // event listeners (target/authmode change -> refreshUi; go/stop clicks ->
+    // connect()/teardown(); URL_CONTROLS -> saveControls()) -- this only
+    // reparents the existing DOM nodes, it does not rewire anything.
+    function buildSessionCard() {
+        var card = document.createElement("div"); card.id = "sessioncard";
+        [ "target", "hostwrap", "portwrap", "authwrap", "credwrap", "passwrap",
+          "resolution", "scale", "opt-clipboard", "opt-audio" ].forEach(function (id) {
+            moveField(card, id);
+        });
+        var btns = document.createElement("div"); btns.className = "row";
+        btns.appendChild($("go")); btns.appendChild($("stop"));
+        card.appendChild(btns);
+        document.body.appendChild(card);
+        return card;
+    }
+    function addSessionButton(bar, card) {
+        var b = document.createElement("button");
+        b.id = "sessionbtn"; b.type = "button"; b.className = "sec toggle";
+        b.textContent = "Session…";
+        b.title = "Choose a different session (Isolated / Console / Virtual monitor / "
+                + "a remote host…), sign in, or change Resolution/Scale/Clipboard/Sound "
+                + "— all without needing the tab this window was opened from.";
+        b.setAttribute("aria-pressed", "false");
+        b.addEventListener("click", function () {
+            var open = !card.classList.contains("open");
+            card.classList.toggle("open", open);
+            b.setAttribute("aria-pressed", open ? "true" : "false");
+            b.classList.toggle("on", open);
+        });
+        bar.appendChild(b);
+        return b;
+    }
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
         document.title = "Virtual Monitor" + (m ? " " + m[1] : "") + " — " + location.hostname;
         window.addEventListener("pagehide", monitorTeardown);
         window.addEventListener("beforeunload", monitorTeardown);
-        // top control strip: Resolution + Sound (grd honours the resolution for a
-        // virtual monitor). Moved out of the hidden main bar.
+        // top control strip, moved out of the hidden main bar. The full connect
+        // controls (Resolution/Scale/Sound included) live in the "Session…" card
+        // so this pop-out can switch scenario and reconnect on its own.
         var bar = document.createElement("div"); bar.id = "seatbar";
         document.body.appendChild(bar);
-        moveField(bar, "resolution");
-        moveField(bar, "opt-audio");
+        var card = buildSessionCard();
+        addSessionButton(bar, card);
         addFullscreenButton(bar);
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
@@ -502,7 +546,13 @@
             if (client) { setStatus("Switching monitor…"); teardown(true); window.setTimeout(function () { connect("console"); }, 80); }
         });
         populateSeatMonitors(sel);
-        moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
+        // Full connect controls (Session/Sign-in/Resolution/Scale/Clipboard/Sound
+        // + Connect/Disconnect) live in the "Session…" card -- see buildSessionCard
+        // -- so this pop-out can pick a different scenario (e.g. Isolated, to reach
+        // the GDM greeter, which the console mirror cannot show pre-login) and
+        // reconnect without needing the tab it was opened from.
+        var card = buildSessionCard();
+        addSessionButton(bar, card);
         addFullscreenButton(bar);
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);

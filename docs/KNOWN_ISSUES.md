@@ -799,3 +799,32 @@ here, and fixing it needs its own investigation into how NumLock state interacts
 choice for this specific ambiguity. **Deferred rather than rushed into the I45 fix** — recorded here so
 it isn't lost. Reproduce with `x11vnc -debug_keyboard`: send keysym `0xFFAE` (`KP_Decimal`) and confirm
 which keycode gets XTestFakeKeyEvent'd.
+
+### I47 · A pop-out could only ever show the one scenario it opened with, with no way to recover · Sev M · FIXED (1.5.0.20260929)
+Reported: after a reboot with nobody logged into the physical seat, Pop-out (hardcoded to the `console`
+mirror, which needs an active per-user desktop session on :3389) can't connect until someone signs in via
+the GDM greeter through the main tab — expected, since nothing is listening on the per-user :3389 grd
+service before a login. Once logged in, Pop-out connects fine. But if the connection carrying that
+greeter sign-in is later disconnected from the main tab, the Pop-out's console mirror drops too, and
+Pop-out had no way to reconnect or switch scenario short of closing the window (it auto-connects exactly
+once, to whatever `enterSeatMode()`/`enterMonitorMode()` hardcoded, and exposed only a small fixed subset
+of controls — a monitor picker and Sound).
+
+The exact reason the console mirror drops when the greeter connection disconnects was not nailed down
+live in this pass — worth confirming against this project's own documented grd/lock-screen interaction:
+a disconnected RDSTLS/greeter-handover connection plausibly locks the physical seat, and a locked seat is
+already known here to make grd kill any active screencast (I39a: "the active grd screencast" is
+terminated and new ones refused while locked). But the practical gap is the same regardless of the exact
+mechanism: **a pop-out is a genuinely separate page load** (`window.open` to the same URL with a
+different hash — not a shared JS context with the opener), so it was never actually tied to the opener
+tab in the code, only by having no UI to exploit that independence.
+
+**Fix (`guac-rdp.js`, `buildSessionCard()` + `addSessionButton()`):** both pop-out types (`#seat` /
+`#monitor`) now get a "Session…" button opening a floating card with the full connect controls — Session
+target (+ host/port for Remote/VNC), Sign-in + credentials, Resolution, Scale, Clipboard, Sound, and
+Connect/Disconnect — by reparenting the EXISTING elements (same ids, same event listeners; nothing
+duplicated or rewired). A pop-out can now try `console`, fail pre-login, switch to `greeter` to reach the
+GDM screen, and switch back to `console` after login — entirely on its own, no opener tab required.
+Verified via a DOM-level smoke test (jsdom, ad hoc, not part of the repo's Playwright suite) that the card
+is built correctly and the pre-existing `refreshUi()` show/hide logic still works on the reparented
+fields, for both pop-out modes; not live-tested against a real Cockpit/relay session.

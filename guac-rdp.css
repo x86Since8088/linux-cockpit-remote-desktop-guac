@@ -60,6 +60,26 @@ html.monitor #seatbar .f { flex-direction:row; gap:.3rem; align-items:center; ma
 html.monitor #seatbar label { color:#fff; font-weight:400; font-size:.8rem; }
 html.monitor #seatbar select, html.monitor #seatbar input { font:inherit; padding:.05rem .3rem; }
 html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-space:nowrap; }
+
+/* "Session…" card (#seat / #monitor pop-outs): a floating panel holding the full
+   connect controls, toggled by the seatbar's "Session…" button -- see
+   buildSessionCard(). Collapsed by default so it never covers the mirror/monitor
+   underneath; opened it sits just under the seatbar, on the right so it does not
+   block the pointer's path to the guest's top-left. */
+#sessioncard { display:none; }
+html.monitor #sessioncard.open {
+  display:flex; flex-direction:column; gap:.6rem;
+  position:fixed; top:calc(var(--seatbar-h) + .4rem); right:.6rem; z-index:21;
+  background:var(--panel); color:var(--ink); border:1px solid var(--line);
+  border-radius:4px; box-shadow:0 4px 16px rgba(0,0,0,.4);
+  padding:.8rem 1rem; width:16rem; max-height:calc(100vh - var(--seatbar-h) - 1.4rem);
+  overflow:auto;
+}
+html.monitor #sessioncard .f { flex-direction:column; align-items:stretch; }
+html.monitor #sessioncard label { color:var(--muted); font-weight:600; font-size:.75rem; }
+html.monitor #sessioncard select, html.monitor #sessioncard input { font:inherit; }
+html.monitor #sessioncard .row { display:flex; gap:.5rem; }
+html.monitor #sessioncard .row button { flex:1; }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }
