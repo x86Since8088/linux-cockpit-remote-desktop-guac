@@ -26,6 +26,10 @@
 #       rollback SUCCEEDED (host is back on the old version and healthy)
 #   5 = new version installed + relay restarted, health check FAILED, and the
 #       rollback attempt ALSO failed -- worst case, a human is needed now
+#   6 = refused: an apply or rollback is already in progress on this host (see
+#       relay/selfupdate.py's exclusive_run() -- found by review: an admin
+#       clicking "Roll back" while "Update now" still looked slow enough to
+#       start a second, overlapping run against the same payload symlink)
 import os
 import subprocess
 import sys
@@ -50,6 +54,16 @@ def main():
     if not root:
         die("could not determine this host's install path "
             "(%s missing or unreadable)" % su.INSTALL_CONF, 3)
+    try:
+        with su.exclusive_run(root):
+            _apply(root)
+    except su.AlreadyRunning:
+        die("an apply or rollback is already in progress on this host -- wait "
+            "for it to finish (systemctl status %s %s)"
+            % (su.APPLY_UNIT, su.ROLLBACK_UNIT), 6)
+
+
+def _apply(root):
     current = su.current_version()
     if not current:
         die("could not determine the currently installed version", 3)
@@ -152,9 +166,9 @@ def main():
     restart_ok, restart_err = su.restart_relay()
     if not restart_ok:
         log("rollback restart command failed: %s" % restart_err)
-    rb_healthy = su.wait_for_healthy() if swap_ok else False
+    rb_healthy = su.wait_for_healthy() if (swap_ok and restart_ok) else False
 
-    if swap_ok and rb_healthy:
+    if swap_ok and restart_ok and rb_healthy:
         log("automatic rollback to %s succeeded and is healthy" % current)
         su.record_apply_result(repo, {"from": current, "to": latest,
                                       "result": "rolled_back",
@@ -162,12 +176,23 @@ def main():
                                                 "back to %s" % current, "at": now})
         sys.exit(4)
 
-    log("automatic rollback FAILED: %s" % swap_detail)
+    # Three genuinely different failure modes here -- collapsing them into one
+    # message previously called a SUCCESSFUL swap "also failed" whenever only
+    # the post-restart health check was the actual problem (found by review).
+    if not swap_ok:
+        reason = "the automatic rollback ALSO failed to swap the payload: %s" % swap_detail
+    elif not restart_ok:
+        reason = ("rolled back to %s but restarting the relay failed: %s"
+                  % (current, restart_err or "unknown error"))
+    else:
+        reason = ("rolled back to %s and restarted it, but it still did not pass "
+                  "its health check -- the relay itself needs attention "
+                  "(journalctl -u %s)" % (current, su.RELAY_UNIT))
+    log("automatic rollback FAILED: %s" % reason)
     su.record_apply_result(repo, {"from": current, "to": latest,
                                   "result": "rollback_failed",
-                                  "detail": "update failed health check AND the "
-                                            "automatic rollback also failed: %s"
-                                            % swap_detail, "at": now})
+                                  "detail": "update failed health check AND %s" % reason,
+                                  "at": now})
     sys.exit(5)
 
 

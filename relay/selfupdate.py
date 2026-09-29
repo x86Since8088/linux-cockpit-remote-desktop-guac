@@ -24,6 +24,8 @@
 # never trusted from a caller. Zero caller-influenced data crosses the
 # `systemctl start` boundary.
 
+import contextlib
+import fcntl
 import json
 import os
 import socket
@@ -64,6 +66,50 @@ HEALTH_POLL_INTERVAL = 1.0
 
 class SelfUpdateError(Exception):
     """A GitHub call or a fetch/extract step failed. Message is operator-facing."""
+
+
+class NoReleasesError(SelfUpdateError):
+    """This repo has no GitHub Releases published yet (HTTP 404 on
+    .../releases/latest). A known, calm, day-one state (docs/SELFUPDATE.md) --
+    NOT a failure -- kept as its own type so callers can tell it apart from a
+    real outage without string-matching the message."""
+
+
+class AlreadyRunning(Exception):
+    """Another apply/rollback is already in progress on this host."""
+
+
+LOCK_NAME = ".selfupdate.lock"
+
+
+@contextlib.contextmanager
+def exclusive_run(root):
+    """Hold an exclusive, non-blocking lock for the ENTIRE duration of one
+    privileged apply or rollback run (both scripts wrap their whole main() in
+    this). Without it, an admin clicking 'Roll back' while 'Update now' is
+    still in flight (a real scenario: apply can take up to APPLY_TIMEOUT, and
+    an admin who thinks it looks stuck is exactly who reaches for the recovery
+    button) starts a SECOND oneshot unit that races the first one's swap of the
+    SAME `payload` symlink and its restart of the SAME relay unit -- found by
+    review, reproduced (two processes racing swap_payload_and_install() lost
+    the payload symlink update about half the time in a stress test). Raises
+    AlreadyRunning immediately (LOCK_NB) rather than queuing: the caller should
+    refuse and say so, not silently block for minutes behind someone else's run."""
+    path = os.path.join(root, LOCK_NAME)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise AlreadyRunning()
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 # --- version parse/compare ---------------------------------------------------
@@ -272,6 +318,11 @@ def _do_live_check(repo, path, last_apply=_UNSET):
             "release_notes_url": prev.get("release_notes_url"),
             "published_at": prev.get("published_at"),
             "check_error": str(exc),
+            # Typed, not string-matched: found by review that treating "no
+            # releases published yet" (an expected, calm, day-one state for a
+            # repo with none — see docs/SELFUPDATE.md) the same as a real
+            # outage made the UI render it as a bold error on this very repo.
+            "no_releases": isinstance(exc, NoReleasesError),
         })
         write_cache(entry, path)
         return entry
@@ -282,6 +333,7 @@ def _do_live_check(repo, path, last_apply=_UNSET):
         "release_notes_url": rel.get("release_notes_url"),
         "published_at": rel.get("published_at"),
         "check_error": None,
+        "no_releases": False,
     })
     write_cache(entry, path)
     return entry
@@ -322,7 +374,7 @@ def check_latest_release(repo, timeout=GITHUB_API_TIMEOUT):
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            raise SelfUpdateError("no releases published yet for %s" % repo)
+            raise NoReleasesError("no releases published yet for %s" % repo)
         raise SelfUpdateError("GitHub API returned HTTP %s for %s" % (exc.code, repo))
     except (urllib.error.URLError, OSError) as exc:
         raise SelfUpdateError("could not reach GitHub: %s" % exc)
@@ -383,9 +435,23 @@ def fetch_and_extract_release(tarball_url, dest_dir, timeout=TARBALL_FETCH_TIMEO
 
 def _safe_extract(tar_path, dest_dir):
     """extractall() guarded against path traversal: try the filter="data" kwarg
-    (Python 3.12+, CVE-2007-4559-class protection built in); on an older
-    interpreter (requires.txt only pins python3 >=3.9) fall back to a manual
-    per-member containment check before extracting anything."""
+    (Python 3.12+, and backported to 3.9.17/3.10.12/3.11.4+ — CVE-2007-4559-class
+    protection built in); on an interpreter without it (requires.txt only pins
+    python3 >=3.9, so an unpatched 3.9-3.11 is possible) fall back to a manual
+    per-member check before extracting anything.
+
+    The manual fallback's containment check uses realpath() on each member's
+    OWN path, which cannot see a not-yet-extracted symlink: a member "evil" that
+    IS a symlink to somewhere outside dest_dir, followed by a member
+    "evil/pwned" nested under it, both pass the per-member realpath check (the
+    "evil" path component doesn't exist on disk yet), and extractall() would
+    then create the symlink and write "pwned" through it. Reviewed and found to
+    be unreachable via a genuine GitHub-generated tarball (a git tree cannot
+    hold both a symlink entry and a file entry nested under the same name — one
+    tree entry is either a blob or a subtree, never both), so this is defence
+    in depth rather than a fix for a reachable bug: reject any symlink/hardlink
+    member outright in the fallback path, the same way filter="data" already
+    would on a newer interpreter."""
     import tarfile
     dest_real = os.path.realpath(dest_dir)
     with tarfile.open(tar_path, "r:*") as tf:
@@ -393,8 +459,22 @@ def _safe_extract(tar_path, dest_dir):
             tf.extractall(dest_dir, filter="data")
             return
         except TypeError:
-            pass   # this Python has no `filter=` kwarg (< 3.12) — fall through
+            pass   # this Python has no `filter=` kwarg — fall through
+        except tarfile.TarError as exc:
+            # filter="data" itself rejected the tarball (traversal, an
+            # absolute/outside-destination link, a device/special file, ...) --
+            # found by testing: this propagated as a raw tarfile exception
+            # instead of SelfUpdateError, which the caller only catches as the
+            # latter, so a malicious/malformed tarball crashed the privileged
+            # script with an uncaught traceback (exit 1, unclassified) instead
+            # of the intended "fetch/extract failed, nothing touched" (exit 3).
+            raise SelfUpdateError(
+                "refusing to extract release tarball: %s" % exc) from exc
         for member in tf.getmembers():
+            if member.issym() or member.islnk():
+                raise SelfUpdateError(
+                    "refusing to extract %r: link members are not permitted "
+                    "in a release tarball" % member.name)
             member_path = os.path.realpath(os.path.join(dest_dir, member.name))
             if member_path != dest_real and not member_path.startswith(dest_real + os.sep):
                 raise SelfUpdateError(
@@ -470,13 +550,21 @@ def swap_payload_and_install(root, payload_name, timeout=150):
     if not os.path.isdir(target):
         return (False, "%s does not exist" % target)
     link = os.path.join(root, "payload")
-    new_link = os.path.join(root, "payload.new")
+    # Per-process name, not the fixed "payload.new" deploy.sh itself uses --
+    # exclusive_run() is what actually prevents two privileged runs from
+    # overlapping, but a unique name here means even a bypass of that lock
+    # (e.g. someone starting the unit by hand outside the normal flow) cannot
+    # collide on the same temp path, matching deploy.sh's own versioned
+    # "$NEW.tmp" convention rather than a single shared scratch name.
+    new_link = os.path.join(root, "payload.new.%d" % os.getpid())
     try:
-        if os.path.lexists(new_link):
-            os.unlink(new_link)
         os.symlink(payload_name, new_link)
         os.replace(new_link, link)
     except OSError as exc:
+        try:
+            os.unlink(new_link)   # best-effort: don't leave an orphaned temp symlink
+        except OSError:
+            pass
         return (False, "could not swap the payload symlink: %s" % exc)
     install_sh = os.path.join(target, "install.sh")
     try:
@@ -571,6 +659,7 @@ class SelfUpdate:
             "published_at": cache.get("published_at"),
             "checked_at": cache.get("checked_at"),
             "check_error": cache.get("check_error"),
+            "no_releases": bool(cache.get("no_releases")),
             "rollback_available": rollback_available,
             "rollback_version": rollback_version,
             "last_apply": cache.get("last_apply"),
@@ -656,16 +745,34 @@ class SelfUpdate:
             return (False, "update to %s failed its health check AND the "
                     "automatic rollback also failed -- this host needs a human "
                     "right now" % latest, False)
+        if code == "6":
+            return (False, "an apply or rollback is already in progress on "
+                    "this host; wait for it to finish and try again", None)
         return (False, detail or ("self-update apply failed (exit status %r)" % code), False)
+
+    #: rollback_candidate()'s refusal reasons, translated to an operator-facing
+    #: message -- found by review: collapsing "ambiguous" (more than one older
+    #: payload dir on disk) into the same text as "none" told an operator
+    #: nothing exists to roll back to on a host where multiple actually do.
+    _ROLLBACK_REFUSAL_MESSAGES = {
+        "no-root": "install path is unknown; cannot roll back",
+        "no-current": "this host's `payload` symlink is missing or broken; "
+                      "cannot determine what to roll back FROM",
+        "none": "no earlier version is available to roll back to on this host",
+        "ambiguous": "more than one earlier version exists on this host; an "
+                     "operator must remove the extra payload-<version> "
+                     "directory before an automatic rollback can pick one",
+    }
 
     def rollback(self):
         root = install_root()
         if not root:
-            return (False, "install path is unknown; cannot roll back", None)
+            return (False, self._ROLLBACK_REFUSAL_MESSAGES["no-root"], None)
         ok, val = rollback_candidate(root)
         if not ok:
-            return (False, "no earlier version is available to roll back to "
-                    "on this host", None)
+            return (False, self._ROLLBACK_REFUSAL_MESSAGES.get(
+                val, "no earlier version is available to roll back to "
+                     "on this host"), None)
         target = version_from_payload_name(val) or val
         try:
             subprocess.run(["systemctl", "start", ROLLBACK_UNIT], check=True,
@@ -687,4 +794,7 @@ class SelfUpdate:
             return (False, detail or (
                 "rollback to %s failed; the relay may be in a bad state and "
                 "needs a human" % target), False)
+        if code == "6":
+            return (False, "an apply or rollback is already in progress on "
+                    "this host; wait for it to finish and try again", None)
         return (False, detail or ("self-update rollback failed (exit status %r)" % code), False)

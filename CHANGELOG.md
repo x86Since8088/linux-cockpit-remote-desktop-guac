@@ -1,3 +1,83 @@
+## 1.7.1.20260929 - 2026-09-29
+
+Fixes five real defects in 1.7.0's self-update feature, all found by a multi-agent
+adversarial review of that feature (four dimensions in parallel — supply-chain/code-
+execution safety, rollback/health-check correctness, admin-gate/API conformance,
+deploy-manifest completeness + UX — each candidate finding then independently
+re-checked by a skeptic on a different model) before any of it reached edt1 or was
+pushed. 5 of 10 candidate findings were confirmed real; the other 5 — including a
+"critical"-labelled tar-extraction symlink bypass — were checked against the actual
+code, reproduced or disproved concretely, and refuted (the symlink-bypass claim was
+real as a code-level flaw in the pre-3.12 fallback, but not reachable via a genuine
+GitHub-generated tarball: a git tree cannot hold both a symlink entry and a file entry
+nested under the same name; hardened anyway as defence in depth, see below).
+
+- **No mutual exclusion between apply and rollback (high severity).** An admin
+  clicking "Roll back" while "Update now" still looked slow enough to be stuck (a
+  realistic scenario — apply can take up to 300s) started a SECOND privileged oneshot
+  unit racing the first one's swap of the SAME `payload` symlink and its restart of the
+  SAME relay unit. Reproduced: two processes racing the real `swap_payload_and_install
+  ()` lost the payload symlink update on roughly half of 20,000 stress-test iterations.
+  Fixed with `relay/selfupdate.exclusive_run()` — a non-blocking `flock()` on
+  `<install-root>/.selfupdate.lock`, held for the ENTIRE apply/rollback run by both
+  privileged scripts; the second script to try exits immediately with a new exit code
+  6 ("already in progress") rather than queuing behind the first, since queuing would
+  mean the recovery action silently waits minutes behind whatever it was trying to
+  recover from. `swap_payload_and_install()` also now uses a per-process-unique temp
+  symlink name (`payload.new.<pid>`, not one fixed name) as defence in depth on top of
+  the lock, matching `deploy.sh`'s own versioned `$NEW.tmp` convention.
+- **Self-contradictory diagnostic on the worst-case exit path (medium).** When the
+  automatic rollback's OWN payload swap succeeded but the relay still failed its health
+  check afterward (e.g. crash-looping for an unrelated reason), the recorded message
+  called that successful swap "also failed", gluing the SUCCESS string returned by
+  `swap_payload_and_install()` into a sentence claiming failure — and separately
+  captured `restart_err` (if the rollback's own restart command failed) but never
+  actually included it anywhere an operator could see it. This is exactly the "a human
+  is needed right now" triage path, so the misleading text mattered most exactly when
+  it was read. Fixed: `edy-rdp-selfupdate-apply.py` now distinguishes three genuinely
+  different failure modes (swap itself failed / swap ok but restart failed / swap and
+  restart ok but health check still failed) and reports each with its own accurate text.
+- **Rollback's refusal message collapsed "none" and "ambiguous" (low).** A host with
+  more than one older `payload-<version>` directory on disk (raised `KEEP`, or a host
+  where `install.sh`/the image pull failed mid-deploy before `deploy.sh`'s own pruning
+  ran) got told "no earlier version is available" — factually wrong, and it hid the
+  actually actionable fix (remove the extra directory). Fixed: `SelfUpdate.rollback()`
+  now returns a distinct, accurate message for `none` vs. `ambiguous` vs. a missing/
+  broken `payload` symlink, instead of one generic string for all three.
+- **"No releases published yet" rendered as a bold red error (medium).** This
+  repository genuinely has no GitHub Releases yet (see `docs/SELFUPDATE.md`), so this
+  is the exact state every install sees on day one — but it shared the same untyped
+  `check_error` field as a real GitHub outage, and the frontend styled ANY `check_error`
+  in bold `--err` red. An administrator opening the brand-new Update tab on this very
+  repo saw a scary-looking error for a state that is completely expected. Fixed: a new,
+  typed `no_releases` boolean (not a string match) lets the frontend render it as a
+  calm informational line instead.
+- **Zero test coverage for the actual extraction path (low, but the fix it enabled was
+  not low).** `relay/test_selfupdate.py` had no test touching `_safe_extract()` or
+  `fetch_and_extract_release()` at all — the single function that runs, as root,
+  against internet-fetched content. Writing that coverage immediately surfaced a real
+  bug this pass had not otherwise caught: on this host's actual Python (3.14, which
+  DOES have `filter="data"`), a path-traversal tarball raises `tarfile
+  .OutsideDestinationError` — a plain `tarfile.TarError`, not `SelfUpdateError` — which
+  `_safe_extract()` only caught as `TypeError` (its signal for "no `filter=` support")
+  and so let propagate uncaught, meaning the privileged script would have crashed with
+  a raw traceback (exit 1, unclassified) instead of the intended, accurate "fetch/
+  extract failed, nothing on this host was touched" (exit 3). Fixed by catching
+  `tarfile.TarError` explicitly and wrapping it as `SelfUpdateError`. Also hardened the
+  pre-3.12 manual fallback to reject any symlink/hardlink member outright (the
+  refuted-but-real flaw noted above: its realpath containment check cannot see a
+  not-yet-extracted symlink, so a symlink member followed by a file nested under it
+  could pass the check and get written through the symlink on an unpatched
+  interpreter) — unreachable via a real GitHub tarball per the refutation above, but
+  cheap, correct, and removes the "looks exploitable until you check git's tree model"
+  ambiguity for any future reader.
+- **Verification:** `run_tests.sh` green (`node --check` clean; 160 relay unit tests,
+  82 of them in `test_selfupdate.py` alone, now including `SafeExtract` — happy path,
+  `../` traversal on both the real `filter="data"` path and a forced pre-3.12 fallback,
+  and the symlink-through-fallback case as a reproduction of the refuted "critical"
+  finding — `ExclusiveRunTest`, exit-code-6 mapping for both apply and rollback, the
+  ambiguous-vs-none message distinction, and the `no_releases` flag's cache round trip).
+
 ## 1.7.0.20260929 - 2026-09-29
 
 New capability (I49): the plugin can now check this project's own GitHub repository

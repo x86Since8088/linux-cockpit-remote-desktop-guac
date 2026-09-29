@@ -18,6 +18,8 @@
 #   2 = refused: no second payload-<version> directory exists on disk
 #   3 = rollback swap/install.sh/restart failed -- the relay may be in a bad
 #       state, needs a human
+#   6 = refused: an apply or rollback is already in progress on this host (see
+#       relay/selfupdate.py's exclusive_run())
 import os
 import sys
 import time
@@ -40,6 +42,16 @@ def main():
     if not root:
         die("could not determine this host's install path "
             "(%s missing or unreadable)" % su.INSTALL_CONF, 3)
+    try:
+        with su.exclusive_run(root):
+            _rollback(root)
+    except su.AlreadyRunning:
+        die("an apply or rollback is already in progress on this host -- wait "
+            "for it to finish (systemctl status %s %s)"
+            % (su.APPLY_UNIT, su.ROLLBACK_UNIT), 6)
+
+
+def _rollback(root):
     current = su.current_version()
     repo = os.environ.get("EDY_RDP_UPDATE_REPO", "").strip()
 

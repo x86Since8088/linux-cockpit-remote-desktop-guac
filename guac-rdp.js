@@ -1515,9 +1515,14 @@
     // distinct from a live check that came back with an error (e.g. this
     // repository has no GitHub Releases published yet) -- check_error already
     // reads as a full sentence ("no releases published yet for owner/repo"),
-    // so it is shown verbatim rather than paraphrased.
+    // so it is shown verbatim rather than paraphrased. no_releases is its own
+    // typed flag (not string-matched) precisely so THIS calm, expected, day-one
+    // state can be told apart from a real outage -- found by review: both used
+    // to share the untyped check_error field, so this project's own repo (which
+    // has no Releases yet) rendered as a bold red error on a brand-new install.
     function latestVersionText(r) {
         if (!r.checked_at) return "not checked yet";
+        if (r.no_releases) return "no releases published on this repository yet";
         if (r.check_error) return r.check_error;
         return r.latest_version || "unknown";
     }
@@ -1587,7 +1592,8 @@
             $("update-hostname").textContent = updateHostname || "";
             body.innerHTML = "";
             body.appendChild(updateRow("Current version", r.current_version || "unknown"));
-            body.appendChild(updateRow("Latest known version", latestVersionText(r), !!r.check_error));
+            body.appendChild(updateRow("Latest known version", latestVersionText(r),
+                !!r.check_error && !r.no_releases));
             if (r.release_name) body.appendChild(updateRow("Release", r.release_name));
             if (r.release_notes_url) body.appendChild(updateLinkRow("Release notes", r.release_notes_url));
             if (r.published_at) body.appendChild(updateRow("Published", r.published_at));

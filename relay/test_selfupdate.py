@@ -236,6 +236,181 @@ class CheckLatestRelease(unittest.TestCase):
         with self.assertRaises(su.SelfUpdateError) as ctx:
             su.check_latest_release("x86Since8088/linux-cockpit-remote-desktop-guac")
         self.assertIn("no releases", str(ctx.exception))
+        # Typed, not just string-matched -- _do_live_check()/the frontend rely on
+        # this to tell the calm "no Releases yet" state apart from a real outage.
+        self.assertIsInstance(ctx.exception, su.NoReleasesError)
+
+    @mock.patch("selfupdate.urllib.request.urlopen")
+    def test_other_http_error_is_not_no_releases(self, mock_urlopen):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError("url", 500, "Boom", {}, None)
+        with self.assertRaises(su.SelfUpdateError) as ctx:
+            su.check_latest_release("x86Since8088/linux-cockpit-remote-desktop-guac")
+        self.assertNotIsInstance(ctx.exception, su.NoReleasesError)
+
+
+class DoLiveCheckNoReleasesFlag(unittest.TestCase):
+    """_do_live_check()'s cache entry must flag the calm 'no Releases yet' case
+    distinctly from a real check_error, and always carry SOME boolean (never a
+    missing key) so the frontend's rendering can rely on it being present."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "update-status.json")
+
+    @mock.patch("selfupdate._chown_cache", lambda path: None)
+    @mock.patch("selfupdate.check_latest_release")
+    def test_no_releases_sets_flag(self, mock_check):
+        mock_check.side_effect = su.NoReleasesError("no releases published yet for x/y")
+        entry = su._do_live_check("x/y", self.path)
+        self.assertTrue(entry["no_releases"])
+        self.assertIn("no releases", entry["check_error"])
+
+    @mock.patch("selfupdate._chown_cache", lambda path: None)
+    @mock.patch("selfupdate.check_latest_release")
+    def test_real_error_does_not_set_flag(self, mock_check):
+        mock_check.side_effect = su.SelfUpdateError("could not reach GitHub: timed out")
+        entry = su._do_live_check("x/y", self.path)
+        self.assertFalse(entry["no_releases"])
+
+    @mock.patch("selfupdate._chown_cache", lambda path: None)
+    @mock.patch("selfupdate.check_latest_release")
+    def test_success_clears_flag(self, mock_check):
+        mock_check.return_value = {"tag_name": "v1.0.0.20260101", "release_name": "r",
+                                    "release_notes_url": None, "published_at": None}
+        with mock.patch("selfupdate.current_version", return_value="0.9.0.20260101"):
+            entry = su._do_live_check("x/y", self.path)
+        self.assertFalse(entry["no_releases"])
+
+
+# --- tarball extraction: path-traversal / symlink guarding -------------------
+
+
+class SafeExtract(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dest = os.path.join(self.tmp, "dest")
+        os.makedirs(self.dest)
+
+    def _make_tar(self, members):
+        """members: list of (name, kind, content_or_linkname).
+        kind is 'file' or 'symlink'."""
+        import io
+        import tarfile
+        path = os.path.join(self.tmp, "test.tar.gz")
+        with tarfile.open(path, "w:gz") as tf:
+            for name, kind, payload in members:
+                if kind == "file":
+                    data = payload.encode()
+                    info = tarfile.TarInfo(name=name)
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+                elif kind == "symlink":
+                    info = tarfile.TarInfo(name=name)
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = payload
+                    tf.addfile(info)
+                else:
+                    raise ValueError(kind)
+        return path
+
+    def test_happy_path_extracts(self):
+        tar = self._make_tar([("top/deploy.sh", "file", "#!/bin/sh\necho hi\n"),
+                              ("top/VERSION", "file", "1.0.0.20260101\n")])
+        su._safe_extract(tar, self.dest)
+        with open(os.path.join(self.dest, "top", "VERSION")) as fh:
+            self.assertEqual(fh.read(), "1.0.0.20260101\n")
+
+    def test_path_traversal_rejected(self):
+        tar = self._make_tar([("../evil.txt", "file", "pwned")])
+        with self.assertRaises(su.SelfUpdateError):
+            su._safe_extract(tar, self.dest)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "evil.txt")))
+
+    def test_path_traversal_rejected_on_forced_fallback(self):
+        # Force the pre-3.12 fallback branch regardless of the actual
+        # interpreter running this test, so the manual containment check is
+        # exercised even on a modern Python.
+        tar = self._make_tar([("../evil.txt", "file", "pwned")])
+        import tarfile
+        real_extractall = tarfile.TarFile.extractall
+
+        def fake_extractall(self, path=".", members=None, *, numeric_owner=False, filter=None):
+            if filter is not None:
+                raise TypeError("simulated pre-3.12 interpreter: no filter= kwarg")
+            return real_extractall(self, path, members, numeric_owner=numeric_owner)
+
+        with mock.patch.object(tarfile.TarFile, "extractall", fake_extractall):
+            with self.assertRaises(su.SelfUpdateError):
+                su._safe_extract(tar, self.dest)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "evil.txt")))
+
+    def test_symlink_member_rejected_on_forced_fallback(self):
+        # The realpath-based containment check alone cannot see a NOT-YET-
+        # extracted symlink (found by review); the fallback must reject any
+        # symlink/hardlink member outright instead of relying on that check.
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        tar = self._make_tar([("evil", "symlink", outside),
+                              ("evil/pwned.txt", "file", "pwned")])
+        import tarfile
+        real_extractall = tarfile.TarFile.extractall
+
+        def fake_extractall(self, path=".", members=None, *, numeric_owner=False, filter=None):
+            if filter is not None:
+                raise TypeError("simulated pre-3.12 interpreter: no filter= kwarg")
+            return real_extractall(self, path, members, numeric_owner=numeric_owner)
+
+        with mock.patch.object(tarfile.TarFile, "extractall", fake_extractall):
+            with self.assertRaises(su.SelfUpdateError):
+                su._safe_extract(tar, self.dest)
+        self.assertFalse(os.path.exists(os.path.join(outside, "pwned.txt")))
+
+    def test_symlink_member_rejected_on_real_filter_data_path(self):
+        # Positive control: on an interpreter that DOES have filter="data"
+        # (this one), the same malicious tarball must already be rejected by
+        # Python's own stdlib guard, without ever reaching the fallback.
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        tar = self._make_tar([("evil", "symlink", outside),
+                              ("evil/pwned.txt", "file", "pwned")])
+        with self.assertRaises(Exception):
+            su._safe_extract(tar, self.dest)
+        self.assertFalse(os.path.exists(os.path.join(outside, "pwned.txt")))
+
+
+# --- exclusive_run(): mutual exclusion between apply and rollback ------------
+
+
+class ExclusiveRunTest(unittest.TestCase):
+    """Found by review: apply and rollback had no mutual exclusion at all and
+    could race on the same payload symlink + relay restart. flock() locks are
+    per OPEN FILE DESCRIPTION, not per process, so re-entering exclusive_run()
+    from the SAME process while the first call's `with` block is still open is
+    an accurate stand-in for "a second privileged script started while the
+    first is still running" -- each call does its own fresh os.open()."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_second_attempt_refused_while_first_held(self):
+        with su.exclusive_run(self.tmp):
+            with self.assertRaises(su.AlreadyRunning):
+                with su.exclusive_run(self.tmp):
+                    pass
+
+    def test_lock_released_after_normal_exit_allows_reacquire(self):
+        with su.exclusive_run(self.tmp):
+            pass
+        with su.exclusive_run(self.tmp):
+            pass   # must not raise -- the first lock was released on exit
+
+    def test_lock_released_even_on_exception(self):
+        with self.assertRaises(ValueError):
+            with su.exclusive_run(self.tmp):
+                raise ValueError("boom")
+        with su.exclusive_run(self.tmp):
+            pass   # must not raise -- released despite the exception
 
     @mock.patch("selfupdate.urllib.request.urlopen")
     def test_network_error(self, mock_urlopen):
@@ -352,6 +527,21 @@ class ApplyMapping(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(rolled_back)
 
+    @mock.patch("selfupdate._exec_main_status")
+    @mock.patch("selfupdate.subprocess.run")
+    def test_exit_6_is_already_running_not_touched(self, mock_run, mock_status):
+        # exit 6 = exclusive_run() refused a second concurrent run; nothing on
+        # the host was touched by THIS attempt, same "not yet attempted" shape
+        # as exit 2/3 (rolled_back is None, not False).
+        self._cache_update_available()
+        exc, code = self._failed_run("6")
+        mock_run.side_effect = exc
+        mock_status.return_value = code
+        ok, detail, rolled_back = self.su.apply()
+        self.assertFalse(ok)
+        self.assertIsNone(rolled_back)
+        self.assertIn("already in progress", detail)
+
 
 class RollbackMapping(unittest.TestCase):
     def setUp(self):
@@ -383,6 +573,21 @@ class RollbackMapping(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNone(rolled_back)
         mock_run.assert_not_called()
+        # Found by review: this used to collapse into the SAME message as "no
+        # earlier version exists" -- factually wrong when two+ actually do.
+        self.assertIn("more than one earlier version", detail)
+        self.assertNotIn("no earlier version is available", detail)
+
+    def test_no_earlier_version_gives_distinct_message_from_ambiguous(self):
+        # A fresh install with only the current payload dir: "none" must read
+        # differently from the "ambiguous" case above, not share its text.
+        import shutil
+        shutil.rmtree(os.path.join(self.tmp, "payload-1.6.1.20260929"))
+        ok, detail, rolled_back = self.su.rollback()
+        self.assertFalse(ok)
+        self.assertIsNone(rolled_back)
+        self.assertIn("no earlier version is available", detail)
+        self.assertNotIn("more than one", detail)
 
     @mock.patch("selfupdate.subprocess.run")
     def test_success(self, mock_run):
@@ -409,6 +614,16 @@ class RollbackMapping(unittest.TestCase):
         ok, detail, rolled_back = self.su.rollback()
         self.assertFalse(ok)
         self.assertFalse(rolled_back)
+
+    @mock.patch("selfupdate._exec_main_status")
+    @mock.patch("selfupdate.subprocess.run")
+    def test_exit_6_is_already_running_not_touched(self, mock_run, mock_status):
+        mock_run.side_effect = subprocess.CalledProcessError(1, ["systemctl"], stderr=b"x")
+        mock_status.return_value = "6"
+        ok, detail, rolled_back = self.su.rollback()
+        self.assertFalse(ok)
+        self.assertIsNone(rolled_back)
+        self.assertIn("already in progress", detail)
 
 
 # --- control.py dispatch for the four ops (FakeSelfUpdate injection) --------

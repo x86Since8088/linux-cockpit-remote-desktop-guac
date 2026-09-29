@@ -149,17 +149,25 @@ and dispatch style every other op in `relay/control.py` already uses.
  "published_at": "2026-09-29T12:00:00Z",
  "checked_at": 1790700000,
  "check_error": null,
+ "no_releases": false,
  "rollback_available": true,
  "rollback_version": "1.6.1.20260929",
  "last_apply": {"from": "...", "to": "...", "result": "ok", "detail": "...", "at": 1790700100}}
 ```
 
-Every field above except `ok`/`current_version`/`rollback_available`/
-`rollback_version` may be `null` (a host that has never checked yet, or a
-GitHub call that failed). **Never blocks on the network**: it serves whatever is
-cached immediately, and if the cache is missing or older than
+Every field above except `ok`/`current_version`/`no_releases`/
+`rollback_available`/`rollback_version` may be `null` (a host that has never
+checked yet, or a GitHub call that failed). **Never blocks on the network**: it
+serves whatever is cached immediately, and if the cache is missing or older than
 `SelfUpdate.CACHE_TTL` (24h, a named constant in `relay/selfupdate.py`) it kicks
 a background thread to refresh it for next time.
+
+`no_releases` is a TYPED flag, not a string match against `check_error` — found
+by review: this repository genuinely has no Releases yet (see "Known
+limitations" below), and that expected, calm, day-one state was originally
+indistinguishable from a real GitHub outage, both landing in the same untyped
+`check_error` field. The frontend renders `no_releases: true` as a plain
+informational line, never the bold/warn styling a real `check_error` gets.
 
 ### `update-check` (forces a live GitHub call, rate-limited)
 
@@ -201,10 +209,15 @@ touching anything.
 {"op": "update-rollback"}
 ```
 
-Responses mirror `update-apply`'s shape, via the rollback unit instead, plus:
+Responses mirror `update-apply`'s shape, via the rollback unit instead, plus a
+refusal message that distinguishes WHY there is nothing to roll back to (found
+by review: these used to collapse into one generic string, which on a host
+with two or more older `payload-<version>` directories claimed none existed at
+all):
 
 ```json
 {"ok": false, "error": "no earlier version is available to roll back to on this host"}
+{"ok": false, "error": "more than one earlier version exists on this host; an operator must remove the extra payload-<version> directory before an automatic rollback can pick one"}
 ```
 
 Deliberately **no** typed confirmation — this project's convention is that the
@@ -224,6 +237,7 @@ mapping on the relay side):
 | 3 | fetch/extract/`deploy.sh` invocation failed BEFORE anything on the host was touched (the old payload is still live and was never touched — including a best-effort symlink restore if `deploy.sh` failed after swapping it but before finishing) |
 | 4 | new version installed + relay restarted, health check FAILED, automatic rollback SUCCEEDED (host is back on the old version and healthy) |
 | 5 | new version installed + relay restarted, health check FAILED, and the rollback attempt ALSO failed — worst case, a human is needed on the host now |
+| 6 | refused: an apply or rollback is ALREADY in progress on this host (see "Mutual exclusion" below) |
 
 `edy-rdp-selfupdate-rollback`:
 
@@ -232,6 +246,25 @@ mapping on the relay side):
 | 0 | rolled back, health check passed |
 | 2 | refused: no second `payload-<version>` directory exists on disk to roll back to |
 | 3 | rollback swap/`install.sh`/restart failed — the relay may be in a bad state, needs a human |
+| 6 | refused: an apply or rollback is ALREADY in progress on this host |
+
+## Mutual exclusion between apply and rollback
+
+Found by review, and worth stating plainly: an admin clicking "Roll back"
+while "Update now" is still in flight (a realistic scenario — apply can take
+up to `APPLY_TIMEOUT`, 300s, and an admin who thinks it looks stuck is exactly
+who reaches for the recovery button) used to start a SECOND privileged oneshot
+unit racing the first one's swap of the SAME `payload` symlink and its restart
+of the SAME relay unit. Both `edy-rdp-selfupdate-apply` and
+`edy-rdp-selfupdate-rollback` now wrap their entire run in
+`relay/selfupdate.exclusive_run()`: a non-blocking `flock()` on
+`<install-root>/.selfupdate.lock`, held for the full fetch/swap/restart/
+health-check sequence. The second script to try exits immediately with code 6
+rather than queuing behind the first (queuing would mean the recovery action
+silently waits minutes behind whatever it was trying to recover from).
+`swap_payload_and_install()` also uses a per-process-unique temp symlink name
+(`payload.new.<pid>`, not a single fixed name) as defense-in-depth on top of
+the lock, matching `deploy.sh`'s own versioned `$NEW.tmp` convention.
 
 ## Trust model — read this before relying on it
 

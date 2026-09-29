@@ -996,3 +996,31 @@ current state), the badge tracking `update_available`, "Update now" refusing to 
 `update_available` and a matching typed hostname hold, "Roll back" firing with no `confirm` field, a
 non-admin never seeing either button enable, and `last_apply` rendering/hiding correctly. `run_tests.sh`
 re-run green (untouched Python/relay half included).
+
+**Follow-up (1.7.1.20260929): five real defects found by adversarial review, before any of this ever
+reached edt1 or was pushed.** A multi-agent review (four dimensions in parallel, each candidate
+finding independently re-checked by a skeptic on a different model) confirmed 5 of 10 candidate
+findings and refuted the other 5, including a "critical"-labelled claim that the pre-3.12 tar-extraction
+fallback could be bypassed via a symlinked intermediate directory — real as a code-level flaw, but NOT
+reachable via a genuine GitHub-generated tarball (a git tree cannot hold both a symlink entry and a file
+entry nested under the same name), so hardened anyway as defence in depth rather than treated as the
+claimed privilege escalation. The five confirmed and fixed: (1) **high** — apply and rollback had no
+mutual exclusion at all and could race on the same `payload` symlink and relay restart if an admin
+clicked "Roll back" while "Update now" still looked stuck; reproduced (two processes racing the real
+swap lost the symlink update on ~half of 20,000 stress-test iterations); fixed with a non-blocking
+`flock()` (`relay/selfupdate.exclusive_run()`) held for the entire privileged run, plus a new exit code
+6 ("already in progress") and a per-process-unique temp symlink name as defence in depth. (2) **medium**
+— the worst-case exit path could log a successful payload swap as having "also failed" whenever only
+the post-rollback health check was the actual problem, and silently dropped the rollback's own restart
+error; now reports which of three distinct failure modes actually happened. (3) **low** — rollback's
+refusal message collapsed "no earlier version" and "more than one exists (ambiguous)" into identical,
+sometimes-false text; now distinct and accurate. (4) **medium** — the "no releases published yet" state
+(this repo's actual, expected, day-one state) rendered as a bold red error, indistinguishable from a
+real GitHub outage, because both shared one untyped `check_error` field; fixed with a typed `no_releases`
+boolean. (5) **low, but the fix it enabled was not** — `_safe_extract()`/`fetch_and_extract_release()`
+had zero test coverage; writing it immediately surfaced a real, previously-unnoticed bug: on this
+project's own Python (3.14), a path-traversal tarball raised a raw `tarfile.OutsideDestinationError`
+that `_safe_extract()` did not catch, so it would have crashed the privileged script with an uncaught
+traceback instead of the intended, accurate "nothing was touched" refusal — fixed by catching
+`tarfile.TarError` and wrapping it as `SelfUpdateError`. `run_tests.sh` green throughout (82 tests now
+in `relay/test_selfupdate.py` alone).
