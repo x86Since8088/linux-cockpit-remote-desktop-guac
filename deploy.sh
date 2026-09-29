@@ -4,7 +4,7 @@
 #
 #   ./deploy.sh                       copy -> /opt/cockpit-guac-rdp, run the installed
 #                                     install.sh (which places/validates .env). Enables NOTHING.
-#   ./deploy.sh --with-users          also create the edy-rdp group + edy-relay user
+#   ./deploy.sh --with-users          also create the cockpit-guac-rdp group + edy-relay user
 #   ./deploy.sh --with-deps           also install the OS prerequisites
 #   ./deploy.sh --with-image          also pre-pull the pinned guacd image
 #   ./deploy.sh --with-units          also ENABLE AND START the units
@@ -167,13 +167,43 @@ install_deps() {
     fi
 }
 
+# The migration: this project's relay group used to be named edy-rdp. A host
+# deployed before the rename has real members in that group; a plain
+# check-and-create here would leave THAT group alone and groupadd a brand-new,
+# EMPTY $RELAY_GROUP, so the next unit restart picks up the new group and every
+# existing edy-rdp member silently loses access. groupmod -n renames in place -
+# same GID, same members, nothing dropped - so it is tried FIRST, and a fresh
+# groupadd only happens when neither name exists (a genuinely new host).
 create_users() {
-    getent group "$RELAY_GROUP" >/dev/null \
-        || { groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"; }
+    if getent group "$RELAY_GROUP" >/dev/null; then
+        :
+    elif getent group edy-rdp >/dev/null; then
+        groupmod -n "$RELAY_GROUP" edy-rdp
+        say renamed "group edy-rdp -> $RELAY_GROUP (GID and members preserved)"
+    else
+        groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"
+    fi
     getent passwd "$RELAY_USER" >/dev/null \
         || { useradd --system --no-create-home --shell /usr/sbin/nologin \
                      -g "$RELAY_GROUP" "$RELAY_USER"; say created "user $RELAY_USER"; }
     ok "$RELAY_USER:$RELAY_GROUP present (uid $(id -u "$RELAY_USER"))"
+}
+
+# A plain deploy.sh run (no --with-users) never mutates the host, so it cannot
+# do the groupmod above - it can only say so. Silence here is exactly the
+# access-loss regression create_users' comment describes: units get rendered
+# with Group=$RELAY_GROUP, nothing ever renames the old group, and members find
+# out only when they are locked out.
+warn_group_rename_pending() {
+    getent group "$RELAY_GROUP" >/dev/null && return 0
+    getent group edy-rdp >/dev/null || return 0
+    warn "this host still has the OLD 'edy-rdp' group (with its existing members)
+       and no '$RELAY_GROUP' group yet. Units now render Group=$RELAY_GROUP /
+       SocketGroup=$RELAY_GROUP - restarting or reloading them before this is
+       fixed will silently drop every edy-rdp member's access. Fix it with
+       --with-users (renames the group in place, preserving GID and members),
+       or by hand before the next restart:
+           groupmod -n $RELAY_GROUP edy-rdp"
 }
 
 pull_image() {
@@ -342,7 +372,7 @@ do_deploy() {
 
     step "configuration"
     migrate_legacy_env
-    ((WITH_USERS)) && { step "users"; create_users; }
+    if ((WITH_USERS)); then step "users"; create_users; else warn_group_rename_pending; fi
 
     # install.sh BEFORE the image pull: it places .env, and GUACD_IMAGE is read
     # from that file. (Users before install.sh: its check 8 wants them.)
@@ -413,7 +443,8 @@ do_deploy() {
 deployed. This host no longer depends on the development share.
 
   bring it up:   sudo $SELF --with-units
-  who may use it: usermod -aG $RELAY_GROUP <user>
+  who may use it: usermod -aG $RELAY_GROUP <user>  (docs/GROUP-ACCESS-MODEL.md - who that
+                 actually admits, and what console/remote/vnc need on top of it)
   verify:        ss -tlnp | grep 4822          (127.0.0.1 only)
                  nft list table inet edy_rdp_guacd
                  ls -l /run/edy-rdp/guacd.sock

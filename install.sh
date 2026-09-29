@@ -14,7 +14,7 @@
 # decide WHAT to link - only to record which it did.
 #
 # WHAT THIS NO LONGER DOES, and why
-#   It does not install OS packages, create the edy-rdp group or the edy-relay
+#   It does not install OS packages, create the cockpit-guac-rdp group or the edy-relay
 #   user, pull the guacd image, or enable/start/stop a single unit. All of that
 #   changes the RUNNING STATE of a host, and it belongs to deploy.sh - the script
 #   that only ever runs on a host being deployed to. install.sh runs in both
@@ -109,7 +109,7 @@ REQUIRED_ENV=(EDY_RDP_GUACD EDY_RDP_ADMIN_GROUP EDY_RDP_STATE_FILE
 UNITDIR=/etc/systemd/system
 LIBEXECDIR=/usr/libexec/edy-rdp
 RELAY_USER=edy-relay
-RELAY_GROUP=edy-rdp
+RELAY_GROUP=cockpit-guac-rdp
 # END-MANIFEST
 # ---------------------------------------------------------------------------
 
@@ -894,7 +894,9 @@ installed ($KIND). NOTHING WAS ENABLED OR STARTED - that is deploy.sh's job.
                                                   edy-rdp-relay.socket
                                                   edy-rdp-control.socket
                                                   edy-rdp-reaper.timer)
-  who may use it:          usermod -aG $RELAY_GROUP <user>
+  who may use it:          usermod -aG $RELAY_GROUP <user>  (docs/GROUP-ACCESS-MODEL.md -
+                           who that actually admits, and what console/remote/vnc need
+                           on top of it)
   cockpit.socket was NOT touched. Reload the browser (Ctrl-Shift-R for the menu).
 EOF
     [[ "$KIND" == dev ]] && cat <<EOF

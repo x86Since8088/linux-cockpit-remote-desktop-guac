@@ -68,7 +68,7 @@ browser (guac-rdp.js + guac-proto.js) ──Cockpit channel──▶ relay (uid 
 
 | # | Boundary | Channel | Trust today |
 |---|---|---|---|
-| B1 | browser → relay (data) | Cockpit `stream` → AF_UNIX, SO_PEERCRED uid, group `edy-rdp` 0660 | any `edy-rdp` member; the shipped JS is honest, a hand-built client is not |
+| B1 | browser → relay (data) | Cockpit `stream` → AF_UNIX, SO_PEERCRED uid, group `cockpit-guac-rdp` 0660 | any `cockpit-guac-rdp` member; the shipped JS is honest, a hand-built client is not |
 | B2 | browser → relay (control) | NDJSON, same peer-cred | same; `superuser:'require'` channels arrive as **uid 0** (unmapped identity, §10) |
 | B3 | relay → guacd | 127.0.0.1:4822, nft `meta skuid {0, edy-relay}` | relay only — **fail-open** if the firewall unit is down (§10) |
 | B4 | guacd → VNC server | RFB to x11vnc/wayvnc (loopback) or an operator host | local servers run as `edy-relay` / the user; remote is untrusted |
@@ -121,12 +121,12 @@ the layered plan; the control that formalises each is named.
 
 | # | Defect | Where | Impact | → |
 |---|---|---|---|---|
-| D-1 | **Connect-parameter passthrough.** `_inject_vnc_target` rewrites only `hostname`/`port`/`password`; every other value the browser supplies is copied verbatim. Live guacd `args` (journal 2026-09-25) advertise `reverse-connect`+`listen-timeout` (guacd **listens** on all interfaces in the host netns for an inbound "server" — an inbound path into libvncclient), `audio-servername` (libpulse dials an arbitrary host from the host netns — SSRF), `wol-send-packet`/`wol-*` (arbitrary UDP; `wol-wait-time` is a free sleep), `recording-path`/`create-recording-path` (browser-named file writes inside the container), `dest-host`/`dest-port`, `enable-audio-input`, `autoretry`, `disable-server-input`, `username` | relay :1131-1143 | any `edy-rdp` member, any scenario, no admin needed | C5 |
+| D-1 | **Connect-parameter passthrough.** `_inject_vnc_target` rewrites only `hostname`/`port`/`password`; every other value the browser supplies is copied verbatim. Live guacd `args` (journal 2026-09-25) advertise `reverse-connect`+`listen-timeout` (guacd **listens** on all interfaces in the host netns for an inbound "server" — an inbound path into libvncclient), `audio-servername` (libpulse dials an arbitrary host from the host netns — SSRF), `wol-send-packet`/`wol-*` (arbitrary UDP; `wol-wait-time` is a free sleep), `recording-path`/`create-recording-path` (browser-named file writes inside the container), `dest-host`/`dest-port`, `enable-audio-input`, `autoretry`, `disable-server-input`, `username` | relay :1131-1143 | any `cockpit-guac-rdp` member, any scenario, no admin needed | C5 |
 | D-2 | **No protocol pin; second `select` unguarded.** | relay :172-183, :819-835 | any member can make guacd load whatever plugin the image bundles | C4 |
 | D-3 | **`--allow-target` gate never invoked** on the live path. | relay :1145-1160 vs `on_up` :1235 | the documented SSRF control is inert | C5 (target assertion) |
 | D-4 | **`any:*` accepts loopback, link-local and `0.0.0.0`** (`_parse_remote_target` :1105-1129; `connect()` to 0.0.0.0 reaches loopback). Reachable with no password: the four qemu VNC consoles on 127.0.0.1:5900-5903 (`w11peer`, `w11client`, `ws2025-mem1`, `ws2025-mem2`), plus 4713, 4822-adjacent, 8444, 9090. The admin gate falls back to sudo-group membership without a token (:904-907). | relay :310-332, :897-913 | operator-directed SSRF; VM console takeover by any Cockpit admin | C12 |
 | D-5 | **Gate/door credentials round-trip through the browser.** The 3389 key via `cockpit.spawn(grdctl status --show-credentials)` and the 3390 door credential by a `superuser:'require'` read of the **whole** `credentials.ini`, then back over the data channel as `rdpcred=`. The isolated scenario already proves the server-side pattern (`ensure_headless_session` → `relay_cred`, :1069-1078). | guac-rdp.js :598-618, :770-773 | a host secret lives in every admin's JS heap and crosses the channel | C17 |
-| D-6 | **Group-readable secrets.** Bridge `<key>.env` (VNCPASS+port) is `chgrp edy-rdp; chmod 0640` (bridge script :185-187); headless `<uid>.env` (PORT/USER/CRED/DESKTOP_ID) is `root:edy-rdp 0640` (:97-114); `*.krblog` (KDC names/IPs) are 0644 and never removed (25 accumulated). On edt1 `edy-rdp` = `cptest, eddie, cpadmin`. wayvnc runs `enable_auth=false` on `34000+uid` with no owner-match on that range. | bridge, headless, waylandvnc scripts; `edy-rdp-tmpfiles.conf` | every RDP user can read every other user's live VNC password and headless RDP credential, then attach a stock client to their desktop — defeats I29's own-desktop isolation | C18 |
+| D-6 | **Group-readable secrets.** Bridge `<key>.env` (VNCPASS+port) is `chgrp cockpit-guac-rdp; chmod 0640` (bridge script :185-187); headless `<uid>.env` (PORT/USER/CRED/DESKTOP_ID) is `root:cockpit-guac-rdp 0640` (:97-114); `*.krblog` (KDC names/IPs) are 0644 and never removed (25 accumulated). On edt1, this group's members were `cptest, eddie, cpadmin` when it was still named `edy-rdp`; the rename's `groupmod` migration (`deploy.sh --with-users`, see CHANGELOG) preserves the same GID and membership under the new name — this describes the group's role, not a verified post-migration state. wayvnc runs `enable_auth=false` on `34000+uid` with no owner-match on that range. | bridge, headless, waylandvnc scripts; `edy-rdp-tmpfiles.conf` | every RDP user can read every other user's live VNC password and headless RDP credential, then attach a stock client to their desktop — defeats I29's own-desktop isolation | C18 |
 | D-7 | **Error text leaks host internals.** `_env_file_hint()` ships the live `.env` path (:32-48 → :935-937, :1094-1096); "uid %d may not join session %s" (:828) confirms a guessed uuid; OSError/systemd stderr/paths under `/run/edy-rdp` (:392-397, :535-545, :574-577, :586, :613-616, :626); the `xfreerdp3` log tail — up to 280 chars produced while talking to a possibly hostile server — via `Refuse("could not start desktop bridge: %s")` (bridge :183-192 → :1024); status `769` reused for backend-unavailable. | relay, bridge.py | reconnaissance for free; a hostile RDP server gets a channel into the operator's status line, whose regexes drive UX (the locked-seat regex adds an *Unlock* button that issues control `unlock`) | C3, C13 |
 | D-8 | **Client sinks.** Three `innerHTML` concatenations of relay-supplied text (guac-rdp.js :1123-1125, :1159, :1222 — `e` can be a `JSON.parse` SyntaxError embedding relay bytes); a blind `superuser:'require'` read of a relay-named `challenge_path` (:711); `lastRemoteClip` unbounded and never cleared (:91, :865); local clipboard pushed on **every focus** while the toggle is ON — default ON — including to an operator-chosen remote host (:963-982, index.html:85). | guac-rdp.js | HTML/UI spoofing in the admin's Cockpit iframe; relay→root file-read primitive; paste-jacking; clipboard exfiltration to untrusted hosts | C19 |
 | D-9 | **Container and firewall posture.** Rootful podman, `--network host`, no `--userns` (in-container uid 999 **is** host `dnsmasq`, and `edy-agent` also runs as 999), `CapBnd` keeps 11 caps incl. SETUID/SETGID/DAC_OVERRIDE/SYS_CHROOT, `NoNewPrivs=0` with Debian setuid binaries, rw overlay, no pids/memory limits, **no egress control**. `hardening/edy-rdp-firewall.nft` is not installed and references a stale bridge; grd binds `*:3389/*:3390` LAN-reachable (I7 open). No unit `Requires=` the firewall unit. | `edy-rdp-guacd.service.in`, hardening/ | a guacd RCE reaches every loopback service and LAN/WAN; nft is fail-open | C20, §10 |
@@ -150,7 +150,7 @@ its job. Items 1–4 are the ones the user's third ask is about.
 | 6 | guacd `error` text | guacd → browser status line, regex-classified | a category, not the text | C9/C3: numeric status → code |
 | 7 | `list` fields `desktop_id` (`remote:<ip>:<port>:<uid>`), `desktop_created`, full uuid | control → browser | UI shows 8 chars, scenario, state, live, age | C11: minimised per caller |
 | 8 | `deskui-status` hostname, DM unit, default target, session count | control → **any** member | only admins with write enabled | C11 |
-| 9 | bridge VNCPASS + port; headless CRED/PORT/USER; wayvnc endpoint | files → every `edy-rdp` member | relay only | C18 |
+| 9 | bridge VNCPASS + port; headless CRED/PORT/USER; wayvnc endpoint | files → every `cockpit-guac-rdp` member | relay only | C18 |
 | 10 | seat audio (uid 1000 sink monitor) | container → any session that sets `enable-audio` | seat-mirroring scenarios only | C5: coerced off elsewhere |
 | 11 | operator's local clipboard on every focus | browser → session, incl. remote hosts | explicit sends only | C19 + C5 defaults for remote/vnc |
 | 12 | session-side clipboard retained after disconnect | guacd → `lastRemoteClip` → OS clipboard | no | C19 |
@@ -516,7 +516,7 @@ close — what a real guacd socket does to a malformed handshake. The critic's d
 `edy-rdp-decoy.socket` labels itself. Therefore: unit file `edy-rdp-guacd-direct.socket`,
 `Description=edy-rdp guacd direct socket (legacy)`, `FileDescriptorName=direct`, and no
 "decoy" string in the unit, `LISTEN_FDNAMES`, the relay function or log names
-(`direct_server`, event kind `direct_socket`). Scope: a shell-holding `edy-rdp` member doing
+(`direct_server`, event kind `direct_socket`). Scope: a shell-holding `cockpit-guac-rdp` member doing
 reconnaissance, or a blind relay-uid implant; not G3 (the container cannot see `/run/edy-rdp`),
 not G5. The shipped client opens only `SOCK` and `CONTROL`; the reaper only `control.sock`; the
 self-test spawns `ss -tln` (TCP). *Mirror risk:* NONE.
@@ -736,8 +736,8 @@ relay makes the revert itself an outage, which discourages ever enabling enforce
     tarballs; an advisory watch (Apache, Janua, FreeRDP, Debian, xorg, libvncserver) with a named
     owner.
 12. **No named consumer or SLA for the events** (§8).
-13. **The Cockpit auth boundary and the `edy-rdp` group are outside the event stream.** → the
-    reaper diffs `getent group edy-rdp`/`sudo` each run and emits `control.group_changed`; the
+13. **The Cockpit auth boundary and the `cockpit-guac-rdp` group are outside the event stream.** → the
+    reaper diffs `getent group cockpit-guac-rdp`/`sudo` each run and emits `control.group_changed`; the
     hub tails `cockpit.service` PAM lines as a trusted source so decoy hits can be joined to the
     login that preceded them.
 14. **URL-level decoys were rejected too early.** They are the one place an attacker who never

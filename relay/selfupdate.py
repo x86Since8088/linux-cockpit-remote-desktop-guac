@@ -51,7 +51,7 @@ INSTALL_CONF = "/etc/cockpit-guac-rdp/install.conf"
 # Not read from there (this module has no shell dependency); kept in sync by
 # hand, same as the relay already hardcodes "edy-rdp" as its default --group.
 RELAY_USER = "edy-relay"
-RELAY_GROUP = "edy-rdp"
+RELAY_GROUP = "cockpit-guac-rdp"
 
 APPLY_UNIT = "edy-rdp-selfupdate-apply.service"
 ROLLBACK_UNIT = "edy-rdp-selfupdate-rollback.service"

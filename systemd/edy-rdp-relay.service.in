@@ -10,7 +10,7 @@ After=edy-rdp-relay.socket edy-rdp-control.socket edy-rdp-guacd.service
 [Service]
 Type=simple
 User=edy-relay
-Group=edy-rdp
+Group=cockpit-guac-rdp
 # Runs as the dedicated edy-relay uid so the nftables owner-match on 127.0.0.1:4822
 # admits THIS process and drops every other local uid.
 #
