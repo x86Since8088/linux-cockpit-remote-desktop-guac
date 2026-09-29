@@ -397,6 +397,27 @@ deploy_staged_completes_and_verifies() {
     [[ -f "$root/payload/requires.txt" && -f "$root/payload/requirements.txt" ]] \
         || { echo "requires.txt / requirements.txt did not ship in the payload"; bad=1; }
     [[ -L "$T/root$LIBEXECDIR/edy-rdp-bootstrap" ]] || { echo "libexec was not linked out of the payload"; bad=1; }
+    # Both dependency snapshots run UNCONDITIONALLY (KNOWN_ISSUES I51), even
+    # without --with-deps: a "before" and an "after" file should both land.
+    [[ -d "$root/dep-history" && $(ls -1 "$root/dep-history"/*.json 2>/dev/null | grep -vc '\.summary\.json$') -ge 2 ]] \
+        || { echo "dep-history does not hold at least 2 full snapshots after a plain deploy"; bad=1; }
+    # KNOWN_ISSUES I51 F3: the "before" snapshot must run BEFORE install_deps()
+    # -- the one step in do_deploy() that can actually invoke the package
+    # manager -- or it already reflects whatever --with-deps just installed,
+    # defeating the whole point of a before/after diff. Checked against
+    # deploy.sh's own source (this suite never forces a real --with-deps
+    # package-manager run just to prove an ordering fact an earlier line
+    # number already proves more safely).
+    local do_deploy_body before_ln deps_ln
+    do_deploy_body="$(sed -n '/^do_deploy() {/,/^}/p' "$T/src/deploy.sh")"
+    before_ln="$(grep -n 'run_depsnapshot before' <<<"$do_deploy_body" | head -n1 | cut -d: -f1)"
+    deps_ln="$(grep -n 'install_deps;' <<<"$do_deploy_body" | head -n1 | cut -d: -f1)"
+    if [[ -z "$before_ln" || -z "$deps_ln" ]]; then
+        echo "could not find 'run_depsnapshot before' / 'install_deps;' in do_deploy()"; bad=1
+    elif (( before_ln >= deps_ln )); then
+        echo "'before' dependency snapshot (do_deploy() line $before_ln) does not precede install_deps (line $deps_ln) - I51 F3"
+        bad=1
+    fi
     out="$(DESTDIR="$T/root" "$T/src/deploy.sh" --verify 2>&1)"; rc=$?
     last="$(sed -e '/^[[:space:]]*$/d' <<<"$out" | tail -n 1)"
     if (( rc != 0 )) || [[ "$last" != "DEPLOY VERIFY OK" ]]; then

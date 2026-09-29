@@ -21,9 +21,9 @@
 # walking dependencies, reading/undoing a dnf/yum transaction — happens ONLY in
 # depcheck/edy-rdp-depsnapshot.py, run as root, only at deploy time (or at
 # rollback time, through the privileged oneshot unit). The one exception is
-# DepCheck.rollback(), which — exactly like DesktopUI.control() and
-# SelfUpdate.rollback() elsewhere in this project — starts that privileged
-# unit via `systemctl start`; that is a write TRIGGER, not a package-manager
+# DepCheck.rollback(), which — exactly like DesktopUI.control() elsewhere in
+# this project — starts that privileged unit via `systemctl start`; that is a
+# write TRIGGER, not a package-manager
 # query, and is the same mechanism this project already uses everywhere else
 # a privilege boundary needs crossing.
 #
@@ -49,9 +49,19 @@ import time
 INSTALL_CONF = "/etc/cockpit-guac-rdp/install.conf"
 SNAPSHOT_DIRNAME = "dep-history"
 TIMESTAMP_FMT = "%Y%m%dT%H%M%SZ"      # sorts lexically == chronologically
+# The small companion file write_snapshot() writes beside each full snapshot,
+# holding ONLY its "summary" dict -- named here, once, so the writer
+# (depcheck/edy-rdp-depsnapshot.py) and the reader (list_snapshots() below)
+# can never disagree on it.
+SUMMARY_SUFFIX = ".summary.json"
 
 ROLLBACK_UNIT = "edy-rdp-depcheck-rollback.service"
-ROLLBACK_TIMEOUT = 120
+# The unit itself has no TimeoutStartSec cap any more (depsnapshot.py's own
+# run_history_undo() is the single source of truth for how long a dnf/yum
+# history undo may run, currently 600s) -- this must stay comfortably ABOVE
+# that, never below it, or a slow-but-succeeding rollback gets reported here
+# as a failure while the real dnf transaction keeps running to completion.
+ROLLBACK_TIMEOUT = 700
 
 
 def now_timestamp():
@@ -60,10 +70,10 @@ def now_timestamp():
 
 # --- this host's install ------------------------------------------------------
 #
-# Read from /etc/cockpit-guac-rdp/install.conf, the same file relay/selfupdate.py
-# (untouched by this feature) reads for the same reason — never resolved
-# relative to this file's own __file__, which is a symlink into whichever
-# payload happens to be current.
+# Read from /etc/cockpit-guac-rdp/install.conf, the same file
+# relay/edy_rdp_relay.py (untouched by this feature) reads for the same
+# reason — never resolved relative to this file's own __file__, which is a
+# symlink into whichever payload happens to be current.
 
 
 def _read_install_conf(key, path=INSTALL_CONF):
@@ -238,10 +248,13 @@ def pkg_for(name, pm):
 # --- snapshot JSON: read side (list/load) -------------------------------------
 #
 # One JSON file per snapshot, named <timestamp>.json, NEVER overwritten (the
-# append-only history). Each file carries a "summary" header with the cheap
-# fields a history LISTING needs, so list_snapshots() never has to walk the
-# (possibly large) "packages" array of every snapshot just to show one line
-# per deploy.
+# append-only history). write_snapshot() also writes a small companion
+# <timestamp>.summary.json holding JUST that "summary" dict, so
+# list_snapshots() never has to walk the (possibly large) "packages" array of
+# every snapshot just to show one line per deploy -- genuinely cheap, not only
+# in name (KNOWN_ISSUES I51 F4: json.load() cannot partially parse a single
+# JSON document, so reading the full file to reach one small sub-object was no
+# cheaper than reading everything in it).
 
 
 def list_snapshots(directory):
@@ -255,12 +268,22 @@ def list_snapshots(directory):
         return []
     out = []
     for path in sorted(glob.glob(os.path.join(directory, "*.json")), reverse=True):
+        if path.endswith(SUMMARY_SUFFIX):
+            continue
+        summary_path = path[:-len(".json")] + SUMMARY_SUFFIX
         try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
+            if os.path.isfile(summary_path):
+                with open(summary_path, encoding="utf-8") as fh:
+                    summary = json.load(fh)
+            else:
+                # A snapshot written before this companion file existed (or by
+                # an older depsnapshot.py): fall back to the one slow read for
+                # THIS entry only, rather than losing it from the history.
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                summary = data.get("summary") if isinstance(data, dict) else None
         except (OSError, ValueError):
             continue
-        summary = data.get("summary") if isinstance(data, dict) else None
         if isinstance(summary, dict):
             out.append(dict(summary))
     return out
@@ -333,19 +356,28 @@ def diff_snapshots(older, newer):
 
 
 def blast_radius(snapshot, package_name):
-    """{"found": bool, "requires":[...], "required_by":[...]} from the
-    snapshot's OWN captured tracked-dependency graph. Pure lookup, no I/O.
-    Scoped to the tracked set (see module docstring) — a package_name outside
-    it has nothing captured, and this reports that plainly rather than
-    guessing at a full-system graph this project deliberately does not
-    build."""
+    """{"found": bool, "requires":[...], "required_by":[...],
+    "required_by_unavailable": bool} from the snapshot's OWN captured
+    tracked-dependency graph. Pure lookup, no I/O. Scoped to the tracked set
+    (see module docstring) — a package_name outside it has nothing captured,
+    and this reports that plainly rather than guessing at a full-system graph
+    this project deliberately does not build.
+
+    required_by_unavailable distinguishes "genuinely zero reverse dependents"
+    from "the reverse-dependency check itself could not run" (no pactree on a
+    pacman host, or a broken rpm/apt-cache query — see
+    depcheck/edy-rdp-depsnapshot.py's own required_by_unavailable field on the
+    tracked entry, KNOWN_ISSUES I51 F5/F7); without this, a failed check and a
+    real "nothing depends on this" looked identical here and to callers."""
     tracked = (snapshot or {}).get("tracked", {})
     entry = tracked.get(package_name)
     if not isinstance(entry, dict):
-        return {"found": False, "requires": [], "required_by": []}
+        return {"found": False, "requires": [], "required_by": [],
+                "required_by_unavailable": False}
     return {"found": True,
             "requires": list(entry.get("requires") or []),
-            "required_by": list(entry.get("required_by") or [])}
+            "required_by": list(entry.get("required_by") or []),
+            "required_by_unavailable": bool(entry.get("required_by_unavailable"))}
 
 
 def rollback_command_hint(pkg_mgr, package_name, old_version):
@@ -379,7 +411,7 @@ def _exec_main_status(unit, timeout=8):
 
 # --- the object the relay injects into handle_control() ----------------------
 #
-# Mirrors DesktopUI/SelfUpdate's shape: handle_control() keeps ALL the policy
+# Mirrors DesktopUI's shape: handle_control() keeps ALL the policy
 # (any-authenticated-caller for the four reads, admin + typed-hostname confirm
 # for the one write — the SAME confirmation pattern deskui's stop/disable
 # already use) and calls through this object only for the data and the one
@@ -476,7 +508,7 @@ class DepCheck:
         return blast_radius(snap, package_name)
 
     # -- write: gated by handle_control() (admin + typed-confirm live there,
-    # same split as DesktopUI/SelfUpdate); this method is the mechanism only.
+    # same split as DesktopUI.control()); this method is the mechanism only.
     _ROLLBACK_EXIT_MESSAGES = {
         "2": "this host's package manager has no native rollback (only dnf/yum "
              "do) — see the manual command hint recorded for each changed "
@@ -492,7 +524,8 @@ class DepCheck:
         """(ok, detail). Starts the privileged, parameterless oneshot unit;
         the unit's own script re-detects the package manager and re-reads the
         latest snapshot itself (zero caller-influenced data crosses that
-        boundary — same principle as selfupdate's apply/rollback units)."""
+        boundary — same principle as DesktopUI.control() starting its own
+        privileged unit)."""
         if not list_snapshots(self._dir()):
             return (False, "no dependency-snapshot history on this host yet; "
                            "nothing to roll back")

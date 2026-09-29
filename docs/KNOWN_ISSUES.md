@@ -973,8 +973,9 @@ single before/after pair. For the tracked set specifically, each snapshot also c
 dependency graph — what each tracked package itself requires, and which OTHER installed packages
 require it (a "blast radius") — plus a compliance flag against `requires.txt`'s own stated minimum,
 reusing `lib/edy-rdp-requires.sh`'s existing `req_version_ge()` comparison logic rather than a second
-copy of it. New Python module `relay/depcheck.py` (stdlib only, mirrors `relay/selfupdate.py`'s
-philosophy) serves this read-only, from JSON already on disk — no package-manager query ever runs in the
+copy of it. New Python module `relay/depcheck.py` (stdlib only, mirrors the read-only/write-trigger
+split `relay/edy_rdp_relay.py`'s `DesktopUI` already establishes) serves this read-only, from JSON
+already on disk — no package-manager query ever runs in the
 unprivileged relay; the actual host inspection lives entirely in the new, root-run
 `depcheck/edy-rdp-depsnapshot.py` (`snapshot`/`rollback` subcommands), invoked twice, unconditionally,
 by `deploy.sh` itself (right after the payload swap, and again at the very end) — best-effort: a
@@ -983,7 +984,7 @@ snapshot failure never fails an actual deployment.
 **Rollback, scoped deliberately:** of the five package managers this project already supports
 (`apt-get`/`dnf`/`yum`/`pacman`/`zypper`), only `dnf`/`yum` have a real, safe, built-in
 transaction-undo primitive (`dnf history undo <id>`). The new `edy-rdp-depcheck-rollback.service`
-(parameterless, like the self-update units — zero caller-influenced data crosses that boundary) uses it
+(parameterless, like `edy-rdp-rotate-rdplogin.service` — zero caller-influenced data crosses that boundary) uses it
 there, ONLY after re-verifying at run time that the transaction id the snapshot recorded is STILL the
 most recent one on the host (refuses, rather than guessing, if an unrelated `dnf update` happened in
 between — this could otherwise revert something unrelated, including a security patch). On
@@ -991,8 +992,8 @@ between — this could otherwise revert something unrelated, including a securit
 **not** attempt a custom substitute (hand-tracking exact prior versions and force-reinstalling them was
 explicitly rejected as fragile); instead, the snapshot diff shows the exact manual command an operator
 would run to revert one tracked package by hand. Rollback is manual-only in every case: admin-gated,
-with the SAME typed-hostname confirmation `DesktopUI`'s Stop/Disable already use — there is no
-automatic, health-check-triggered rollback here (unlike self-update's design), because reverting SYSTEM
+with the SAME typed-hostname confirmation `DesktopUI`'s Stop/Disable already use — there is
+deliberately no automatic, health-check-triggered rollback here, because reverting SYSTEM
 packages is a materially bigger blast radius than restarting this project's own relay.
 
 **Explicitly out of scope for this pass**, named here rather than attempted: a full all-installed-

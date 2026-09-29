@@ -1712,7 +1712,18 @@
             var req = document.createElement("div");
             req.textContent = "Requires: " + (r.requires.length ? r.requires.join(", ") : "(none recorded)");
             var reqBy = document.createElement("div");
-            reqBy.textContent = "Required by: " + (r.required_by.length ? r.required_by.join(", ") : "(nothing else on this host)");
+            if (r.required_by_unavailable) {
+                // Distinct from "(nothing else on this host)" below: the check
+                // itself could not run (no pactree/rpm/apt-cache query tool, or
+                // a broken one) -- showing "none" here would be false confidence.
+                reqBy.appendChild(document.createTextNode("Required by: "));
+                var unk = document.createElement("span");
+                unk.className = "muted";
+                unk.textContent = "unable to determine";
+                reqBy.appendChild(unk);
+            } else {
+                reqBy.textContent = "Required by: " + (r.required_by.length ? r.required_by.join(", ") : "(nothing else on this host)");
+            }
             td.appendChild(req); td.appendChild(reqBy);
         });
     }

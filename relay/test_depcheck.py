@@ -2,11 +2,15 @@
 #
 # Pure-function unit tests for depcheck.py and the five new control.py ops.
 # No real subprocess/systemctl (mocked throughout), per this project's existing
-# test philosophy (relay/test_control.py, relay/test_selfupdate.py). Real
-# package-manager inspection (rpm/dpkg-query/pacman/zypper/dnf/yum) lives only
-# in depcheck/edy-rdp-depsnapshot.py, which this suite does not import — that
-# script was smoke-tested by hand against this dev host's own apt-get/dpkg
-# (see the task report), not exercised here.
+# test philosophy (relay/test_control.py, in particular its FakeDeskUI
+# injection pattern, mirrored below by FakeDepCheck). Real package-manager
+# inspection (rpm/dpkg-query/pacman/zypper/dnf/yum) lives only in
+# depcheck/edy-rdp-depsnapshot.py; that script was smoke-tested by hand against
+# this dev host's own apt-get/dpkg (see the task report), and its pure
+# transaction-attribution/timeout logic is exercised below (loaded via
+# importlib, since its filename is not a valid module name) with every real
+# subprocess call mocked out the same way.
+import importlib.util
 import os
 import shutil
 import stat
@@ -19,6 +23,22 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 import depcheck as DC
 import control as C
+
+# depcheck/edy-rdp-depsnapshot.py's filename is not a valid module name (and,
+# unflattened, its own sys.path.insert would resolve "depcheck" to the
+# depcheck/ SOURCE DIRECTORY rather than this file's relay/depcheck.py module)
+# -- loaded by path instead, with "depcheck" already in sys.modules (the
+# `import depcheck as DC` above) so its own `import depcheck as DC` reuses
+# that cached module rather than mis-resolving one.
+_DEPSNAPSHOT_PATH = os.path.join(os.path.dirname(__file__), "..", "depcheck",
+                                 "edy-rdp-depsnapshot.py")
+
+
+def _load_depsnapshot():
+    spec = importlib.util.spec_from_file_location("edy_rdp_depsnapshot", _DEPSNAPSHOT_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # --- version comparison (ported from lib/edy-rdp-requires.sh) ----------------
@@ -229,16 +249,29 @@ class BlastRadius(unittest.TestCase):
     def test_found(self):
         snap = {"tracked": {"freerdp": {"requires": ["libssl3"], "required_by": ["a", "b"]}}}
         self.assertEqual(DC.blast_radius(snap, "freerdp"),
-                         {"found": True, "requires": ["libssl3"], "required_by": ["a", "b"]})
+                         {"found": True, "requires": ["libssl3"], "required_by": ["a", "b"],
+                          "required_by_unavailable": False})
 
     def test_not_tracked(self):
         snap = {"tracked": {"freerdp": {"requires": [], "required_by": []}}}
         self.assertEqual(DC.blast_radius(snap, "some-untracked-pkg"),
-                         {"found": False, "requires": [], "required_by": []})
+                         {"found": False, "requires": [], "required_by": [],
+                          "required_by_unavailable": False})
 
     def test_missing_tracked_section(self):
         self.assertEqual(DC.blast_radius({}, "freerdp"),
-                         {"found": False, "requires": [], "required_by": []})
+                         {"found": False, "requires": [], "required_by": [],
+                          "required_by_unavailable": False})
+
+    def test_required_by_unavailable_flag_is_threaded_through(self):
+        # KNOWN_ISSUES I51 F5: a failed reverse-dependency check (no pactree,
+        # or a broken rpm/apt-cache query) must not render identically to a
+        # real "nothing depends on this" -- the flag must survive the lookup.
+        snap = {"tracked": {"freerdp": {"requires": ["libssl3"], "required_by": [],
+                                        "required_by_unavailable": True}}}
+        r = DC.blast_radius(snap, "freerdp")
+        self.assertTrue(r["required_by_unavailable"])
+        self.assertEqual(r["required_by"], [])
 
 
 # --- rollback_command_hint -----------------------------------------------------
@@ -388,7 +421,8 @@ class DepCheckReads(unittest.TestCase):
         self._write("20260101T000000Z",
                     tracked={"freerdp": {"requires": ["libssl3"], "required_by": []}})
         self.assertEqual(self.dc.blast_radius("freerdp"),
-                         {"found": True, "requires": ["libssl3"], "required_by": []})
+                         {"found": True, "requires": ["libssl3"], "required_by": [],
+                          "required_by_unavailable": False})
 
     def test_blast_radius_no_history_is_none(self):
         self.assertIsNone(self.dc.blast_radius("freerdp"))
@@ -609,6 +643,175 @@ class DepsRollbackOp(unittest.TestCase):
         r = self._ctl({"op": "deps-rollback", "confirm": "testhost"}, True, d)
         self.assertFalse(r["ok"])
         self.assertIn("newer dnf transaction", r["detail"])
+
+
+# --- KNOWN_ISSUES I51 F1: relay timeout vs. the rollback unit's own limit ----
+
+
+class RollbackTimeoutAgreement(unittest.TestCase):
+    """The relay's own wait on the rollback unit must never be SHORTER than
+    either the unit's own TimeoutStartSec or the dnf/yum-undo timeout the
+    script itself allows -- that mismatch (150s unit / 120s relay / 600s
+    script) is exactly how F1 let the relay report a timeout while the real
+    dnf transaction kept running. Reads both real values instead of
+    hardcoding a duplicate literal, so they can never silently drift apart
+    again."""
+
+    _UNIT_PATH = os.path.join(os.path.dirname(__file__), "..", "systemd",
+                              "edy-rdp-depcheck-rollback.service.in")
+
+    def _unit_timeout_start_sec(self):
+        with open(self._UNIT_PATH, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip().startswith("TimeoutStartSec="):
+                    return line.strip().split("=", 1)[1]
+        self.fail("TimeoutStartSec= not found in %s" % self._UNIT_PATH)
+
+    def test_relay_timeout_not_shorter_than_unit(self):
+        unit_timeout = self._unit_timeout_start_sec()
+        if unit_timeout == "infinity":
+            return  # no cap on that side -- the relay's own timeout is the only bound
+        self.assertGreaterEqual(DC.ROLLBACK_TIMEOUT, int(unit_timeout))
+
+    def test_relay_timeout_not_shorter_than_script_dnf_undo_timeout(self):
+        mod = _load_depsnapshot()
+        script_timeout = mod.run_history_undo.__defaults__[0]
+        self.assertGreaterEqual(DC.ROLLBACK_TIMEOUT, script_timeout)
+
+
+# --- KNOWN_ISSUES I51 F2: a rollback tx id must be attributable to THIS run --
+
+
+class AttributableTransactionId(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_depsnapshot()
+
+    def test_non_after_label_records_whatever_is_newest(self):
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", None, "before"), "7")
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", {"dnf_transaction_id": "7"}, ""), "7")
+
+    def test_after_label_records_only_a_changed_transaction(self):
+        prev = {"dnf_transaction_id": "6"}
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", prev, "after"), "7")
+
+    def test_after_label_refuses_to_attribute_an_unchanged_transaction(self):
+        # install_deps() caused nothing new -- the newest tx on the host is
+        # whatever it already was before this run touched anything, so it must
+        # NOT be recorded (that would let a rollback undo an unrelated,
+        # pre-existing operator transaction -- see cmd_rollback()'s exit 3).
+        prev = {"dnf_transaction_id": "6"}
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", "6", prev, "after"))
+
+    def test_after_label_with_no_previous_snapshot_records_current(self):
+        self.assertEqual(self.mod.attributable_transaction_id("dnf", "7", None, "after"), "7")
+
+    def test_non_dnf_yum_or_no_current_tx_is_always_none(self):
+        self.assertIsNone(self.mod.attributable_transaction_id("apt-get", "7", None, "after"))
+        self.assertIsNone(self.mod.attributable_transaction_id("dnf", None, None, "after"))
+
+    def test_no_attributable_transaction_produces_a_rollback_refusal(self):
+        # End-to-end through cmd_rollback()'s own exit-3 path: a snapshot with
+        # no dnf_transaction_id (install_deps() caused no new transaction)
+        # refuses cleanly rather than falling back to some unrelated tx.
+        tmp = tempfile.mkdtemp()
+        try:
+            dep_dir = os.path.join(tmp, "dep-history")
+            os.makedirs(dep_dir)
+            self.mod.write_snapshot(dep_dir, "20260101T000000Z",
+                                    {"timestamp": "20260101T000000Z", "dnf_transaction_id": None,
+                                     "packages": [], "tracked": {},
+                                     "summary": {"timestamp": "20260101T000000Z"}})
+            with mock.patch.object(self.mod.DC, "install_root", return_value=tmp), \
+                 mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
+                 mock.patch.object(self.mod, "get_latest_transaction_id", return_value="6"), \
+                 self.assertRaises(SystemExit) as ctx:
+                self.mod.cmd_rollback()
+            self.assertEqual(ctx.exception.code, 3)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- KNOWN_ISSUES I51 F4: list_snapshots() must stay cheap -------------------
+
+
+class ListSnapshotsCheap(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_does_not_read_the_full_packages_array(self):
+        mod = _load_depsnapshot()
+        huge_packages = [{"name": "pkg%d" % i, "version": "1.0", "arch": "x86_64"}
+                         for i in range(20000)]
+        data = {"schema_version": 1, "timestamp": "20260101T000000Z",
+               "packages": huge_packages, "tracked": {},
+               "summary": {"timestamp": "20260101T000000Z", "pkg_mgr": "dnf",
+                          "total_packages": len(huge_packages), "tracked_count": 0,
+                          "noncompliant_count": 0, "changed_since_previous": True,
+                          "deploy_version": "1.7.0.20260929"}}
+        mod.write_snapshot(self.tmp, "20260101T000000Z", data)
+        full_path = os.path.abspath(os.path.join(self.tmp, "20260101T000000Z.json"))
+        real_open = open
+
+        def spy_open(path, *a, **kw):
+            if os.path.abspath(path) == full_path:
+                raise AssertionError("list_snapshots() opened the full snapshot file: %s" % path)
+            return real_open(path, *a, **kw)
+
+        with mock.patch("depcheck.open", side_effect=spy_open):
+            hist = DC.list_snapshots(self.tmp)
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["total_packages"], 20000)
+
+    def test_falls_back_to_the_full_file_for_a_legacy_snapshot_with_no_companion(self):
+        # A snapshot written before this fix (or by an older depsnapshot.py)
+        # has no *.summary.json companion -- it must still show up, not vanish.
+        import json
+        data = {"schema_version": 1, "timestamp": "20260101T000000Z", "packages": [], "tracked": {},
+               "summary": {"timestamp": "20260101T000000Z", "pkg_mgr": "dnf", "total_packages": 0,
+                          "tracked_count": 0, "noncompliant_count": 0, "changed_since_previous": True}}
+        with open(os.path.join(self.tmp, "20260101T000000Z.json"), "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        hist = DC.list_snapshots(self.tmp)
+        self.assertEqual([h["timestamp"] for h in hist], ["20260101T000000Z"])
+
+
+# --- KNOWN_ISSUES I51 F7: rpm/apt whatrequires unavailable-vs-zero ----------
+
+
+class RpmAptWhatrequiresUnavailable(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_depsnapshot()
+
+    def test_rpm_missing_binary_is_unavailable(self):
+        with mock.patch.object(self.mod, "_which", return_value=None):
+            self.assertIsNone(self.mod._rpm_whatrequires("freerdp"))
+
+    def test_rpm_real_failure_with_stderr_is_unavailable(self):
+        with mock.patch.object(self.mod, "_which", return_value="/usr/bin/rpm"), \
+             mock.patch.object(self.mod, "_run_with_stderr", return_value=(1, "", "error: rpmdb corrupt")):
+            self.assertIsNone(self.mod._rpm_whatrequires("freerdp"))
+
+    def test_rpm_genuinely_zero_dependents_is_an_empty_list(self):
+        with mock.patch.object(self.mod, "_which", return_value="/usr/bin/rpm"), \
+             mock.patch.object(self.mod, "_run_with_stderr", return_value=(1, "", "")):
+            self.assertEqual(self.mod._rpm_whatrequires("freerdp"), [])
+
+    def test_apt_missing_binary_is_unavailable(self):
+        with mock.patch.object(self.mod, "_which", return_value=None):
+            self.assertIsNone(self.mod._apt_whatrequires("freerdp"))
+
+    def test_apt_real_failure_with_stderr_is_unavailable(self):
+        with mock.patch.object(self.mod, "_which", return_value="/usr/bin/apt-cache"), \
+             mock.patch.object(self.mod, "_run_with_stderr", return_value=(100, "", "E: No packages found")):
+            self.assertIsNone(self.mod._apt_whatrequires("freerdp"))
+
+    def test_apt_genuinely_zero_dependents_is_an_empty_list(self):
+        with mock.patch.object(self.mod, "_which", return_value="/usr/bin/apt-cache"), \
+             mock.patch.object(self.mod, "_run_with_stderr", return_value=(0, "Reverse Depends:\n", "")):
+            self.assertEqual(self.mod._apt_whatrequires("freerdp"), [])
 
 
 if __name__ == "__main__":

@@ -200,9 +200,10 @@ run_depsnapshot() {
         return 0
     fi
     # depcheck/edy-rdp-depsnapshot.py imports its sibling module (relay/depcheck.py)
-    # the same sys.path.insert(dirname(__file__)) idiom the self-update scripts
-    # already use, which only resolves once install.sh has linked both into the
-    # SAME flattened $LIBEXECDIR. The "before" snapshot runs before install.sh
+    # the same sys.path.insert(dirname(__file__)) idiom relay/edy_rdp_reaper.py
+    # already uses to import relay/session_registry.py, which only resolves
+    # once install.sh has linked both into the SAME flattened $LIBEXECDIR.
+    # The "before" snapshot runs before install.sh
     # (see this function's callers), so PYTHONPATH points straight at the
     # payload's own relay/ directory instead of relying on that flattening.
     out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" snapshot --root "$ROOT_D" \
@@ -369,7 +370,6 @@ $(sed 's/^/    /' <<<"$problems")
 do_deploy() {
     STEP=pre-flight
     preflight
-    ((WITH_DEPS)) && { step "OS prerequisites"; install_deps; }
     step "deploy $PROJECT $VERSION -> $ROOT"
     install -d -m 0755 "${OWN[@]}" -- "$ROOT_D"
 
@@ -382,8 +382,14 @@ do_deploy() {
     mv -T -- "$ROOT_D/payload.new" "$ROOT_D/payload"
     say swapped "$ROOT_D/payload -> payload-$VERSION"
 
+    # BEFORE install_deps(): install_deps() is the one step in this whole
+    # function that can actually invoke the package manager (--with-deps). A
+    # "before" snapshot taken after it would already reflect whatever it just
+    # installed/upgraded, defeating the entire point of a before/after diff.
     STEP="dependency snapshot (before)"
     run_depsnapshot before
+
+    ((WITH_DEPS)) && { step "OS prerequisites"; install_deps; }
 
     step "configuration"
     migrate_legacy_env

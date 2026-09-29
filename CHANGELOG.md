@@ -28,7 +28,8 @@ rollback where the host's package manager genuinely supports one.
   `depcheck/edy-rdp-depsnapshot.py` (`snapshot`/`rollback`), five new `relay/control.py`
   ops (`deps-status`/`deps-history`/`deps-list`/`deps-blast-radius`, and the
   admin-gated `deps-rollback`), and a new parameterless
-  `edy-rdp-depcheck-rollback.service` unit (mirrors this project's self-update units:
+  `edy-rdp-depcheck-rollback.service` unit (the same parameterless-privileged-unit
+  shape `edy-rdp-rotate-rdplogin.service` already uses elsewhere in this project:
   zero caller-influenced data crosses that privilege boundary).
 - **Explicitly out of scope, named in KNOWN_ISSUES I51:** a full all-packages
   dependency graph (bounded to the tracked set only), and a periodic background

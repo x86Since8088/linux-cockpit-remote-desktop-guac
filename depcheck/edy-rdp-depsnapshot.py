@@ -13,19 +13,23 @@
 # the same trust level as deploy.sh calling install.sh with arguments
 # elsewhere in this project). "rollback" is invoked with NO arguments at all,
 # through the parameterless edy-rdp-depcheck-rollback.service oneshot unit —
-# mirroring selfupdate's own apply/rollback units (see
+# the same parameterless-privileged-unit shape edy-rdp-rotate-rdplogin.service.in
+# already establishes elsewhere in this project (see
 # systemd/edy-rdp-depcheck-rollback.service.in): it re-detects the package
 # manager and re-reads the latest snapshot ITSELF, trusting nothing about
 # "which transaction" from any caller. Zero caller-influenced data crosses
 # that `systemctl start` boundary.
 #
-# Exit codes for "rollback" (mirrors DesktopUI.control()'s ExecMainStatus idiom
-# and relay/selfupdate.py's own apply/rollback exit-code convention):
+# Exit codes for "rollback" (mirrors DesktopUI.control()'s own ExecMainStatus
+# idiom and exit-code convention in relay/edy_rdp_relay.py):
 #   0 = rolled back
 #   2 = refused: this host's package manager is not dnf/yum (informational-only
 #       path — the manual command hints already in the snapshot data are what
 #       an operator uses instead)
-#   3 = refused: no dnf/yum transaction id on record to undo
+#   3 = refused: no dnf/yum transaction id on record to undo (either nothing has
+#       ever been snapshotted, or the latest "after" snapshot's own
+#       install_deps() caused no new transaction to attribute one to —
+#       see attributable_transaction_id())
 #   4 = refused: a NEWER dnf/yum transaction exists on this host than the one
 #       recorded in the snapshot (stale snapshot; refusing to guess — it could
 #       otherwise undo something unrelated, including a security patch)
@@ -60,6 +64,18 @@ def _run(argv, timeout=60):
         return p.returncode, p.stdout.decode("utf-8", "replace")
     except (OSError, subprocess.TimeoutExpired):
         return 1, ""
+
+
+def _run_with_stderr(argv, timeout=60):
+    """Like _run(), but also returns stderr text -- needed only where a
+    non-zero exit is ambiguous (see _rpm_whatrequires()/_apt_whatrequires())
+    and telling "genuinely nothing" from "the query itself failed" needs more
+    than the return code alone."""
+    try:
+        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, "", ""
 
 
 def _which(cmd):
@@ -174,9 +190,18 @@ def _rpm_requires(pkg):
 
 
 def _rpm_whatrequires(pkg):
-    rc, out = _run(["rpm", "-q", "--whatrequires", pkg, "--qf", "%{NAME}\n"])
+    """None means "unavailable" -- the same signal _pacman_whatrequires()
+    already gives when its tool is missing (KNOWN_ISSUES I51 F7). rpm's exit
+    code 1 is BOTH the documented, normal result for "nothing requires this
+    package" AND what a missing rpm binary, a corrupt rpmdb or a permission
+    error produces; collapsing both to [] would silently report "nothing
+    depends on this" when the check actually just failed. A real failure
+    prints to stderr; the normal empty-result case does not."""
+    if _which("rpm") is None:
+        return None
+    rc, out, err = _run_with_stderr(["rpm", "-q", "--whatrequires", pkg, "--qf", "%{NAME}\n"])
     if rc != 0:
-        return []
+        return None if err.strip() else []
     return sorted(set(line.strip() for line in out.splitlines() if line.strip()))
 
 
@@ -196,9 +221,17 @@ def _dpkg_requires(pkg):
 
 
 def _apt_whatrequires(pkg):
-    rc, out = _run(["apt-cache", "rdepends", pkg])
+    """None means "unavailable" -- same distinction as _rpm_whatrequires()
+    above (KNOWN_ISSUES I51 F7): apt-cache exits 0 with an empty
+    "Reverse Depends:" block for the normal "nothing depends on this"
+    case, so a non-zero exit here means the query itself failed (a missing
+    binary is already ruled out by the _which() check below), and stderr
+    text tells that apart from a same-shaped-but-silent failure."""
+    if _which("apt-cache") is None:
+        return None
+    rc, out, err = _run_with_stderr(["apt-cache", "rdepends", pkg])
     if rc != 0:
-        return []
+        return None if err.strip() else []
     deps, started = [], False
     for line in out.splitlines():
         if line.strip() == "Reverse Depends:":
@@ -353,13 +386,7 @@ def build_tracked(pm, req_list, inv_by_name, ctx):
     return tracked, tracked_names
 
 
-def write_snapshot(dep_dir, timestamp, data):
-    try:
-        os.makedirs(dep_dir, exist_ok=True)
-        os.chmod(dep_dir, 0o755)
-    except OSError as exc:
-        raise RuntimeError("could not create %s: %s" % (dep_dir, exc))
-    path = os.path.join(dep_dir, "%s.json" % timestamp)
+def _write_json_atomic(path, data):
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -375,6 +402,42 @@ def write_snapshot(dep_dir, timestamp, data):
         raise RuntimeError("could not write %s: %s" % (path, exc))
 
 
+def write_snapshot(dep_dir, timestamp, data):
+    try:
+        os.makedirs(dep_dir, exist_ok=True)
+        os.chmod(dep_dir, 0o755)
+    except OSError as exc:
+        raise RuntimeError("could not create %s: %s" % (dep_dir, exc))
+    path = os.path.join(dep_dir, "%s.json" % timestamp)
+    _write_json_atomic(path, data)
+    # The small companion relay/depcheck.py's list_snapshots() actually reads
+    # (KNOWN_ISSUES I51 F4) -- written AFTER the full snapshot so a reader
+    # never sees a summary for a snapshot whose full file is not there yet.
+    summary_path = os.path.join(dep_dir, "%s%s" % (timestamp, DC.SUMMARY_SUFFIX))
+    _write_json_atomic(summary_path, data.get("summary") or {})
+
+
+def attributable_transaction_id(pm, current_tx, prev_snapshot, label):
+    """The dnf/yum transaction id to record in THIS snapshot, or None.
+    "before" (and unlabeled) snapshots are just a baseline picture -- whatever
+    is newest right now is recorded unconditionally, nothing to attribute yet.
+    "after" is the one label rollback() actually reads, and recording
+    "whatever is newest right now" there let an operator's own unrelated
+    dnf/yum transaction (run moments before a --with-deps deploy that itself
+    changed nothing) get rolled back by mistake: nothing established the
+    recorded transaction was ever CAUSED by this run's own install_deps().
+    Comparing against the immediately-preceding snapshot's own transaction id
+    (the "before" picture deploy.sh's do_deploy() takes right before
+    install_deps() runs) tells the difference: unchanged means install_deps()
+    caused no new transaction, and nothing should be recorded to undo."""
+    if pm not in ("dnf", "yum") or current_tx is None:
+        return None
+    if label != "after":
+        return current_tx
+    prev_tx = (prev_snapshot or {}).get("dnf_transaction_id")
+    return current_tx if current_tx != prev_tx else None
+
+
 def cmd_snapshot(args):
     pm = DC.detect_pm()
     dep_dir = DC.snapshot_dir(args.root)
@@ -384,7 +447,9 @@ def cmd_snapshot(args):
     tracked, tracked_names = build_tracked(pm, req_list, inv_by_name, ctx)
     for p in inv:
         p["tracked"] = p["name"] in tracked_names
-    dnf_tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
+    prev = DC.load_snapshot(dep_dir, "latest")
+    current_tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
+    dnf_tx = attributable_transaction_id(pm, current_tx, prev, args.label)
     timestamp = DC.now_timestamp()
     noncompliant = sum(1 for t in tracked.values() if not t["compliant"])
 
@@ -398,7 +463,6 @@ def cmd_snapshot(args):
         "packages": inv,
         "tracked": tracked,
     }
-    prev = DC.load_snapshot(dep_dir, "latest")
     changed_since_previous = prev is None
     if prev is not None:
         d = DC.diff_snapshots(prev, snapshot)

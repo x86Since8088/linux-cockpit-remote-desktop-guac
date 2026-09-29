@@ -85,7 +85,8 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service
        # Dependency-tracking rollback: deliberately NOT templated (no %i) -- see
        # systemd/edy-rdp-depcheck-rollback.service.in for why that is a stronger
-       # property here, mirroring this project's self-update units.
+       # property here, mirroring edy-rdp-rotate-rdplogin.service elsewhere in
+       # this project.
        edy-rdp-depcheck-rollback.service)
 # System files that are COPIED (rendered where they carry a placeholder), because
 # the software that reads them - systemd-tmpfiles, dbus, polkit, nft - does not

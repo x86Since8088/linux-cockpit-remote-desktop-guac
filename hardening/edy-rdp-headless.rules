@@ -11,8 +11,9 @@ polkit.addRule(function(action, subject) {
                        unit.indexOf("edy-rdp-unlock@") === 0 ||
                      // Dependency-tracking rollback: EXACT name, not a prefix
                      // match -- this unit is deliberately NOT templated (no %i
-                     // instance at all), the same stronger property the
-                     // self-update units elsewhere in this project use.
+                     // instance at all), the same stronger property
+                     // edy-rdp-rotate-rdplogin.service already uses elsewhere
+                     // in this project.
                      unit === "edy-rdp-depcheck-rollback.service")) {
             return polkit.Result.YES;
         }

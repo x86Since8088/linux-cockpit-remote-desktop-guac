@@ -1,8 +1,8 @@
 [Unit]
 Description=edy-rdp dependency tracking: undo the most recent dnf/yum transaction (native rollback; dnf/yum only)
 # Deliberately NOT templated -- no %i, no instance argument at all, the same
-# stronger property systemd/edy-rdp-selfupdate-rollback.service.in established
-# for this project's OTHER privileged, parameterless unit. "rollback" always
+# stronger property edy-rdp-rotate-rdplogin.service.in already establishes for
+# this project's OTHER privileged, parameterless oneshot unit. "rollback" always
 # means "whatever the LATEST dependency snapshot on this host recorded as the
 # most recent dnf/yum transaction id, re-verified fresh at run time against
 # this host's actual current history" -- depcheck/edy-rdp-depsnapshot.py
@@ -17,7 +17,11 @@ Description=edy-rdp dependency tracking: undo the most recent dnf/yum transactio
 [Service]
 Type=oneshot
 ExecStart=@LIBEXEC@/edy-rdp-depsnapshot rollback
-# dnf/yum history undo can legitimately take a while (dependency resolution +
-# package transactions); generous but bounded, matching
-# edy-rdp-selfupdate-rollback.service.in's own TimeoutStartSec=120.
-TimeoutStartSec=150
+# No TimeoutStartSec cap: depcheck/edy-rdp-depsnapshot.py's own
+# run_history_undo() already bounds the underlying `dnf/yum history undo`
+# subprocess (currently 600s) and always returns instead of hanging. A second,
+# shorter timeout here previously drifted out of sync with that one (150s vs.
+# the script's 600s) and could SIGKILL a dnf transaction mid-write, leaving the
+# rpm database half-applied -- the script is the single source of truth for
+# this limit now, so there is only one number to keep correct.
+TimeoutStartSec=infinity
