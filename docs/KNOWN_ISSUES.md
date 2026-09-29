@@ -962,3 +962,47 @@ console output at all. Verified with a jsdom smoke test (scratch project, not a 
 after use) loading the real `index.html` + `guac-rdp.js`: the checkbox exists and starts unchecked,
 toggling it on/off emits/withholds the enabled/disabled marker, and the Clipboard/Sound toggles' own
 trace lines appear only while tracing is on. `run_tests.sh` green throughout.
+
+### I51 · Dependency tracking + native-rollback-where-available admin tab · Sev N/A · SHIPPED (1.7.0.20260929)
+Not a bug fix — a new diagnostic/recovery capability, recorded here in the same spirit as I47/I49/I50.
+Tracks this project's own OS prerequisites (the 9-package `requires.txt` set, read from the file — never
+hardcoded separately) TOGETHER with a full installed-package inventory (name/version/arch, every
+package), in ONE snapshot per `deploy.sh` run, appended to an append-only history under
+`<install-root>/dep-history/` (never overwritten) so drift is visible across many deploys, not just a
+single before/after pair. For the tracked set specifically, each snapshot also captures a bounded
+dependency graph — what each tracked package itself requires, and which OTHER installed packages
+require it (a "blast radius") — plus a compliance flag against `requires.txt`'s own stated minimum,
+reusing `lib/edy-rdp-requires.sh`'s existing `req_version_ge()` comparison logic rather than a second
+copy of it. New Python module `relay/depcheck.py` (stdlib only, mirrors `relay/selfupdate.py`'s
+philosophy) serves this read-only, from JSON already on disk — no package-manager query ever runs in the
+unprivileged relay; the actual host inspection lives entirely in the new, root-run
+`depcheck/edy-rdp-depsnapshot.py` (`snapshot`/`rollback` subcommands), invoked twice, unconditionally,
+by `deploy.sh` itself (right after the payload swap, and again at the very end) — best-effort: a
+snapshot failure never fails an actual deployment.
+
+**Rollback, scoped deliberately:** of the five package managers this project already supports
+(`apt-get`/`dnf`/`yum`/`pacman`/`zypper`), only `dnf`/`yum` have a real, safe, built-in
+transaction-undo primitive (`dnf history undo <id>`). The new `edy-rdp-depcheck-rollback.service`
+(parameterless, like the self-update units — zero caller-influenced data crosses that boundary) uses it
+there, ONLY after re-verifying at run time that the transaction id the snapshot recorded is STILL the
+most recent one on the host (refuses, rather than guessing, if an unrelated `dnf update` happened in
+between — this could otherwise revert something unrelated, including a security patch). On
+`apt-get`/`pacman`/`zypper` — which have no equivalent primitive — this project deliberately does
+**not** attempt a custom substitute (hand-tracking exact prior versions and force-reinstalling them was
+explicitly rejected as fragile); instead, the snapshot diff shows the exact manual command an operator
+would run to revert one tracked package by hand. Rollback is manual-only in every case: admin-gated,
+with the SAME typed-hostname confirmation `DesktopUI`'s Stop/Disable already use — there is no
+automatic, health-check-triggered rollback here (unlike self-update's design), because reverting SYSTEM
+packages is a materially bigger blast radius than restarting this project's own relay.
+
+**Explicitly out of scope for this pass**, named here rather than attempted: a full all-installed-
+packages dependency GRAPH (bounded to the tracked set only, for cost reasons — the full package
+INVENTORY itself has no such limit); and a periodic/background drift-scanning timer that would also
+catch package changes from OUTSIDE this project's own deploys (an operator's own `dnf update`,
+unattended-upgrades, etc., between two `deploy.sh` runs) — snapshots are taken only when `deploy.sh`
+itself runs, the same intentionally-deferred shape I46 already models for a different gap. Verified:
+`run_tests.sh` green (`relay/test_depcheck.py`, new); snapshot capture smoke-tested end to end against
+this dev host's own live `apt-get`/`dpkg` inventory (2656 packages, all 9 tracked prerequisites
+correctly mapped and compliant, including `freerdp`→`freerdp3-x11` and the `xvfb` Debian-epoch version
+string); `dnf`/`yum`/`pacman`/`zypper` code paths were reviewed against each tool's own command
+reference and unit-tested with mocks, not exercised against a live host of those distros.

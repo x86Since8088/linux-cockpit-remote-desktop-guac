@@ -68,6 +68,7 @@ import uuid as uuidlib
 from session_registry import SessionRegistry
 from control import LiveConnections, handle_control
 import bridge
+from depcheck import DepCheck
 
 log = logging.getLogger("edy-rdp-relay")
 
@@ -549,6 +550,12 @@ class DesktopUI:
 #: module-level singleton, mirrored on SESSION_TOKENS; write_enabled is set in main()
 #: from the --deskui-write flag so the control server's closure can reach it.
 DESKTOP_UI = DesktopUI()
+
+#: module-level singleton for the deps-* control ops (KNOWN_ISSUES I51). No
+#: opt-in flag (unlike DESKTOP_UI) -- the four reads are open to any
+#: authenticated caller by product decision, and the one write is admin +
+#: typed-hostname-confirm gated in handle_control() itself.
+DEPCHECK = DepCheck()
 
 
 def ensure_waylandvnc_session(uid):
@@ -1384,7 +1391,8 @@ def control_server(srv, table, live, admin_group, path_label=""):
                 resp = {"ok": False, "error": "invalid JSON"}
             else:
                 resp = handle_control(req, uid, table, live, admin, SESSION_TOKENS,
-                                      unlock=unlock_seat_session, deskui=DESKTOP_UI)
+                                      unlock=unlock_seat_session, deskui=DESKTOP_UI,
+                                      depcheck=DEPCHECK)
             conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
         except OSError:
             pass

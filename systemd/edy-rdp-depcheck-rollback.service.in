@@ -1,0 +1,23 @@
+[Unit]
+Description=edy-rdp dependency tracking: undo the most recent dnf/yum transaction (native rollback; dnf/yum only)
+# Deliberately NOT templated -- no %i, no instance argument at all, the same
+# stronger property systemd/edy-rdp-selfupdate-rollback.service.in established
+# for this project's OTHER privileged, parameterless unit. "rollback" always
+# means "whatever the LATEST dependency snapshot on this host recorded as the
+# most recent dnf/yum transaction id, re-verified fresh at run time against
+# this host's actual current history" -- depcheck/edy-rdp-depsnapshot.py
+# re-detects the package manager and re-reads that snapshot itself; it trusts
+# NOTHING from any caller. Zero caller-influenced data crosses this
+# `systemctl start` boundary. Refuses cleanly (see the script's own exit-code
+# docstring) on any package manager other than dnf/yum, on a snapshot with no
+# transaction id recorded, or when a NEWER transaction than the recorded one
+# has since happened on this host (an operator's own unrelated dnf update in
+# between) -- it never guesses.
+
+[Service]
+Type=oneshot
+ExecStart=@LIBEXEC@/edy-rdp-depsnapshot rollback
+# dnf/yum history undo can legitimately take a while (dependency resolution +
+# package transactions); generous but bounded, matching
+# edy-rdp-selfupdate-rollback.service.in's own TimeoutStartSec=120.
+TimeoutStartSec=150

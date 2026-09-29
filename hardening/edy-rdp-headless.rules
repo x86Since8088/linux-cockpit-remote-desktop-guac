@@ -8,7 +8,12 @@ polkit.addRule(function(action, subject) {
         if (unit && (unit.indexOf("edy-rdp-headless@") === 0 ||
                      unit.indexOf("edy-rdp-waylandvnc@") === 0 ||
                      unit.indexOf("edy-rdp-deskui@") === 0 ||
-                       unit.indexOf("edy-rdp-unlock@") === 0)) {
+                       unit.indexOf("edy-rdp-unlock@") === 0 ||
+                     // Dependency-tracking rollback: EXACT name, not a prefix
+                     // match -- this unit is deliberately NOT templated (no %i
+                     // instance at all), the same stronger property the
+                     // self-update units elsewhere in this project use.
+                     unit === "edy-rdp-depcheck-rollback.service")) {
             return polkit.Result.YES;
         }
     }

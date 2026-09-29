@@ -1,3 +1,45 @@
+## 1.7.0.20260929 - 2026-09-29
+
+Adds a new "Dependencies" tab: tracking of this project's own OS prerequisites against a
+full package inventory, an append-only snapshot history across deploys, and native
+rollback where the host's package manager genuinely supports one.
+
+- **New (I51): dependency tracking + native-rollback-where-available.** Every
+  `deploy.sh` run now captures ONE snapshot (before the payload swap, and again at the
+  end) covering BOTH the 9-package `requires.txt` set (flagged `tracked: true`) and a
+  full installed-package inventory (name/version/arch, every package) — appended,
+  never overwritten, to `<install-root>/dep-history/`, so drift is visible across many
+  deploys. For the tracked set, each snapshot also records a bounded dependency graph
+  (what it requires, and what else on the host requires it — a "blast radius", scoped
+  to the tracked set for cost reasons) and a compliance flag against `requires.txt`'s
+  own stated minimum, reusing `lib/edy-rdp-requires.sh`'s existing version-comparison
+  logic rather than a second copy of it.
+- **Rollback is real only on dnf/yum** (`dnf history undo`, the one package manager
+  family with a safe built-in transaction-undo), and only after re-verifying at
+  rollback time that no OTHER transaction has happened on the host since the snapshot
+  was taken — refusing rather than guessing if one has (an unrelated `dnf update` in
+  between must never be blindly undone). `apt-get`/`pacman`/`zypper` get an
+  informational manual command per changed tracked package instead — never executed
+  by any part of this project. Rollback is always manual: admin-gated, with the same
+  typed-hostname confirmation the Desktop UI tab's Stop/Disable already use, never
+  automatic.
+- **New backend:** `relay/depcheck.py` (stdlib, read-only — no package-manager query
+  ever runs in the unprivileged relay) and the root-run
+  `depcheck/edy-rdp-depsnapshot.py` (`snapshot`/`rollback`), five new `relay/control.py`
+  ops (`deps-status`/`deps-history`/`deps-list`/`deps-blast-radius`, and the
+  admin-gated `deps-rollback`), and a new parameterless
+  `edy-rdp-depcheck-rollback.service` unit (mirrors this project's self-update units:
+  zero caller-influenced data crosses that privilege boundary).
+- **Explicitly out of scope, named in KNOWN_ISSUES I51:** a full all-packages
+  dependency graph (bounded to the tracked set only), and a periodic background
+  drift scan that would also catch package changes between deploys from outside this
+  project's control — snapshots are taken only when `deploy.sh` itself runs.
+- **Verification:** `run_tests.sh` green (`relay/test_depcheck.py`, new); snapshot
+  capture smoke-tested end to end against this dev host's own live `apt-get`/`dpkg`
+  inventory (2656 packages, all 9 tracked prerequisites correctly mapped and
+  compliant); `dnf`/`yum`/`pacman`/`zypper` paths were code-reviewed and
+  unit-tested with mocks, not exercised against a live host of those distros.
+
 ## 1.6.2.20260929 - 2026-09-29
 
 Fixes a live-reported false-fail in the "guacd build" self-test, and adds opt-in tracing for

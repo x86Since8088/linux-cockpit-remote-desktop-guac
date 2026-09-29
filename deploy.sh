@@ -176,6 +176,48 @@ create_users() {
     ok "$RELAY_USER:$RELAY_GROUP present (uid $(id -u "$RELAY_USER"))"
 }
 
+# ---------------------------------------------------------------------------
+# Dependency tracking (KNOWN_ISSUES I51): a snapshot of this host's full
+# package inventory, plus a bounded dependency graph for the requires.txt
+# tracked set, taken TWICE per deploy.sh run -- once right after the payload
+# swap (the "before" picture: what this host had BEFORE anything below this
+# point touches it) and once at the very end (the "after" picture, including
+# whatever --with-deps/--with-units just did). Both run UNCONDITIONALLY, on
+# every deploy.sh invocation, not just --with-deps ones: a plain deploy
+# showing "nothing changed" is itself a useful, correct data point.
+#
+# Runs the NEWLY-INSTALLED payload's OWN copy of the script (never this
+# checkout's), the same "run the installed copy, not the checkout" principle
+# do_deploy() already applies to install.sh. ALWAYS best-effort: a snapshot
+# failure must never fail an actual deployment (this is diagnostic tooling,
+# not load-bearing) -- warn and continue, matching pull_image()'s own graceful
+# degradation on a pull failure.
+# ---------------------------------------------------------------------------
+run_depsnapshot() {
+    local label=$1 script="$ROOT_D/payload/depcheck/edy-rdp-depsnapshot.py" out rc=0
+    if [[ ! -x "$script" ]]; then
+        warn "dependency snapshot ($label) skipped: $script missing or not executable"
+        return 0
+    fi
+    # depcheck/edy-rdp-depsnapshot.py imports its sibling module (relay/depcheck.py)
+    # the same sys.path.insert(dirname(__file__)) idiom the self-update scripts
+    # already use, which only resolves once install.sh has linked both into the
+    # SAME flattened $LIBEXECDIR. The "before" snapshot runs before install.sh
+    # (see this function's callers), so PYTHONPATH points straight at the
+    # payload's own relay/ directory instead of relying on that flattening.
+    out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" snapshot --root "$ROOT_D" \
+                              --requires "$ROOT_D/payload/$REQUIRES" \
+                              --deploy-version "$VERSION" --label "$label" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+        say snapshot "dependency snapshot ($label) recorded"
+    else
+        warn "dependency snapshot ($label) failed (non-fatal, diagnostic only -- see
+       docs/KNOWN_ISSUES.md I51):
+$(sed 's/^/    /' <<<"$out")"
+    fi
+    return 0
+}
+
 pull_image() {
     local img
     img="$(env_get "$ENVF" GUACD_IMAGE || true)"
@@ -340,6 +382,9 @@ do_deploy() {
     mv -T -- "$ROOT_D/payload.new" "$ROOT_D/payload"
     say swapped "$ROOT_D/payload -> payload-$VERSION"
 
+    STEP="dependency snapshot (before)"
+    run_depsnapshot before
+
     step "configuration"
     migrate_legacy_env
     ((WITH_USERS)) && { step "users"; create_users; }
@@ -407,6 +452,9 @@ do_deploy() {
                 || warn "enable-locked-remote-desktop failed (run it in $au's graphical session)"
         fi
     fi
+
+    STEP="dependency snapshot (after)"
+    run_depsnapshot after
 
     cat <<EOF
 
