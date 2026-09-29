@@ -1061,11 +1061,9 @@ role and must fail OPEN (an undetermined lock state must never block a connectio
 `seated_uids()` feeds an actual authorization decision and must fail CLOSED, the same posture
 `is_admin()` already takes on an unresolvable uid or a missing group. A future reader should
 not "fix" `seated_uids()` to match `physical_session_locked()`'s fail-open behavior — they
-answer different kinds of questions on purpose. A single session's own `show-session` lookup
-racing/erroring between `list-sessions` and its own query is skipped for that one session
-only, matching the pre-existing precedent in `_active_graphical_sessions()`/
-`physical_session_locked()` — a narrow, accepted race, not the categorical failure `None`
-signals.
+answer different kinds of questions on purpose. **A per-session `show-session` lookup
+failure is ALSO a categorical failure here (returns `None`), not a skip-and-continue** — see
+the follow-up below for why the first version of this function got that distinction wrong.
 
 **Deliberately un-hardened at install time, and that is the correct default.** Unlike
 `EDY_RDP_ADMIN_GROUP` (which must exist on the host — `sudo` does, on essentially every real
@@ -1100,3 +1098,42 @@ without shadow-group membership, and `EDY_RDP_SHADOW_GROUP=` empty disabling the
 entirely. `run_tests.sh` green throughout (187 relay unit tests across all four suites, up
 from 175; no regression in the untouched admin gate, remote-allow, credential-injection, or
 any other existing suite).
+
+**Follow-up (same 1.8.0.20260929): two real bugs found by adversarial review, before this
+ever reached edt1.** A multi-agent review (four dimensions in parallel, each candidate
+finding independently re-checked by a skeptic on a different model) confirmed 3 of 7
+candidate findings and refuted the other 4 — including a claim that uid 0 unconditionally
+bypasses the gate, which is real but not a bypass (root already has every capability this
+gate could possibly restrict, and Cockpit's own shipped default, `/etc/cockpit/disallowed-
+users`, refuses a root login in the first place). The two confirmed:
+
+- **The one that mattered: `seated_uids()`'s original per-session failure handling was
+  exactly backwards for an authorization function.** It treated a `show-session` call that
+  RAISED or returned NON-ZERO the same as "that session doesn't exist" — `continue`, drop it,
+  keep going — following `_active_graphical_sessions()`'s existing precedent for a narrow
+  session-ended-mid-query race. But that precedent's function is cosmetic (a miscounted
+  desktop-in-use tally); this one decides who may watch whom. A reviewer reproduced it
+  directly: `list-sessions` reporting two real, seated uids while every `show-session` call
+  failed (a plausible transient logind/D-Bus hiccup, not something a requester can trigger on
+  demand) made `seated_uids()` return an EMPTY set instead of `None` — silently skipping the
+  gate for an admin who was never checked against `rdp-shadow`, in precisely the situation
+  the `None` path exists to catch. Fixed: any `show-session` failure (exception, non-zero
+  exit, or a seated session with an unparseable `User=`) now fails the WHOLE call closed
+  (`None`), not just that one session — there is no reliable way to tell "session ended
+  benignly" apart from "logind errored" from the command's output alone, so this trades a
+  narrow, rare false "someone might be seated" against ever again silently reporting an empty
+  seat that was not. New `SeatedUidsSubprocessHandling` tests drive the REAL function against
+  a fake `subprocess.run` (every prior test monkey-patched `seated_uids()` itself away
+  entirely, so this exact regression had zero coverage) — a clean success case, a greeter
+  correctly excluded, and every failure mode above asserted to return `None`.
+- **Two integration tests used uid 0 (root) to prove the gate does NOT apply when it
+  shouldn't** — but `is_admin()` returns `True` unconditionally for uid 0 regardless of which
+  group is asked about, so those tests could not distinguish "the exemption logic correctly
+  skipped the gate" from "the gate ran and trivially passed because the caller is root." A
+  mutation test proved it: hard-coding the shadow gate to apply unconditionally to every
+  console connect still left the whole relay suite green. Fixed by switching both tests to a
+  non-root, non-shadow-group admin uid with `is_admin()` mocked explicitly — the mutation now
+  fails both tests, as it should.
+
+`run_tests.sh` green throughout (63 tests in `relay/test_edy_rdp_relay.py` alone, up from
+55).

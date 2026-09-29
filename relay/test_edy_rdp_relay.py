@@ -548,22 +548,30 @@ class ConsoleShadowGate(unittest.TestCase):
                 R.BRIDGE_COUNTER.release(c.uid)
 
     def test_nobody_seated_admin_only_gate_applies(self):
-        c = self._conn(0)   # root: admin gate's uid==0 shortcut, no patching needed
-        orig = R.seated_uids
+        # uid 0 would pass is_admin() unconditionally regardless of the shadow
+        # gate's own exemption logic, so a non-root admin (not a shadow-group
+        # member) is used here -- this actually proves the gate was SKIPPED,
+        # not merely that it ran and trivially passed because the caller is
+        # root (found by review: the original version of this test used uid 0
+        # and could not tell the two apart).
+        c = self._conn(4242)
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
         R.seated_uids = lambda: set()
+        R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, NOT a shadow member
         try:
-            self._connect_console(c)   # must not raise
+            self._connect_console(c)   # must not raise: nobody seated, gate does not apply
         finally:
-            R.seated_uids = orig
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
 
     def test_same_user_seated_allowed_without_shadow_membership(self):
-        c = self._conn(0)
-        orig = R.seated_uids
-        R.seated_uids = lambda: {0}
+        c = self._conn(4242)   # see test_nobody_seated_admin_only_gate_applies for why not uid 0
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {4242}
+        R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, NOT a shadow member
         try:
-            self._connect_console(c)   # must not raise
+            self._connect_console(c)   # must not raise: requester is the one seated
         finally:
-            R.seated_uids = orig
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
 
     def test_different_user_seated_and_not_in_shadow_group_refused(self):
         c = self._conn(4242)
@@ -611,6 +619,83 @@ class ConsoleShadowGate(unittest.TestCase):
             self._connect_console(c)   # feature off -> admin gate alone is enough
         finally:
             R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+
+class SeatedUidsSubprocessHandling(unittest.TestCase):
+    """Drives the REAL seated_uids() against a fake subprocess.run -- the one
+    thing every ConsoleShadowGate test above deliberately bypasses by
+    monkey-patching seated_uids() itself away. This is what actually catches a
+    regression in the parsing/error-handling glue, not just the gate's policy
+    given a canned seated-uid result."""
+
+    class _Result:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def _run_with(self, fake_run):
+        orig = R.subprocess.run
+        R.subprocess.run = fake_run
+        try:
+            return R.seated_uids()
+        finally:
+            R.subprocess.run = orig
+
+    def test_list_sessions_nonzero_is_categorical_failure(self):
+        self.assertIsNone(self._run_with(lambda *a, **k: self._Result(returncode=1)))
+
+    def test_list_sessions_raises_is_categorical_failure(self):
+        def fake_run(*a, **k):
+            raise OSError("no loginctl")
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_clean_success_returns_seated_uid(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            return self._Result(returncode=0, stdout=(
+                "Type=wayland\nActive=yes\nSeat=seat0\nClass=user\nUser=1001\n"))
+        self.assertEqual(self._run_with(fake_run), {1001})
+
+    def test_show_session_exception_is_categorical_not_skipped(self):
+        # Found by review: an earlier version of this function treated a
+        # show-session FAILURE the same as "that session doesn't exist" and
+        # silently returned an empty set -- exactly the fail-open this guards.
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            raise OSError("logind hiccup")
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_show_session_nonzero_is_categorical_not_skipped(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            return self._Result(returncode=1, stdout="")
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_unparseable_user_is_categorical_not_skipped(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="2 1001 seat0\n")
+            return self._Result(returncode=0, stdout=(
+                "Type=wayland\nActive=yes\nSeat=seat0\nClass=user\nUser=notanumber\n"))
+        self.assertIsNone(self._run_with(fake_run))
+
+    def test_greeter_session_excluded_but_others_still_seen(self):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._Result(returncode=0, stdout="1 0 seat0\n2 1001 seat0\n")
+            sid = argv[2]
+            if sid == "1":
+                return self._Result(returncode=0, stdout=(
+                    "Type=wayland\nActive=yes\nSeat=seat0\nClass=greeter\nUser=0\n"))
+            return self._Result(returncode=0, stdout=(
+                "Type=wayland\nActive=yes\nSeat=seat0\nClass=user\nUser=1001\n"))
+        self.assertEqual(self._run_with(fake_run), {1001})
+
+    def test_no_sessions_at_all_returns_empty_set(self):
+        self.assertEqual(self._run_with(lambda *a, **k: self._Result(returncode=0, stdout="")), set())
 
 
 if __name__ == "__main__":

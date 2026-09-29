@@ -1,3 +1,38 @@
+## 1.8.1.20260929 - 2026-09-29
+
+Fixes two real bugs in 1.8.0's shadow-group gate, both found by a multi-agent adversarial
+review (four dimensions in parallel — seat-identity detection correctness, whether the
+fail-closed design is actually fail-closed everywhere, config/deploy safety, test/doc
+accuracy — each candidate finding independently re-checked by a skeptic on a different
+model) before this ever reached edt1 or was pushed. 3 of 7 candidate findings confirmed; the
+other 4 — including a claim that uid 0 unconditionally bypasses the gate — refuted (root
+already has every capability this gate could restrict, and cannot log into this project's
+Cockpit at all under its own shipped `disallowed-users` default).
+
+- **`seated_uids()`'s per-session failure handling was exactly backwards for an
+  authorization function.** It treated a `loginctl show-session` call that raised or
+  returned non-zero the same as "that session doesn't exist" (skip and continue), copying
+  `_active_graphical_sessions()`'s existing precedent for a narrow session-ended-mid-query
+  race — but that precedent's function is cosmetic (a miscounted desktop-in-use tally),
+  while this one decides who may watch whom. Reproduced: `list-sessions` reporting two real
+  seated uids while every `show-session` call failed made the function return an EMPTY set
+  instead of `None`, silently skipping the shadow-group check for an admin who was never
+  actually verified against it — in precisely the situation the fail-closed `None` path
+  exists to catch. Fixed: any `show-session` failure now fails the WHOLE call closed
+  (`None`), not just that one session.
+- **Two integration tests used uid 0 (root) to prove the gate correctly does not apply**
+  when nobody else is seated or the requester is the one seated — but `is_admin()` exempts
+  uid 0 unconditionally regardless of group, so those tests could not tell "the exemption
+  logic worked" apart from "the gate ran and trivially passed because the caller is root." A
+  mutation test proved it: hard-coding the gate to apply unconditionally still left the whole
+  suite green. Fixed by switching both to a non-root admin uid with `is_admin()` mocked
+  explicitly.
+- **Verification:** `run_tests.sh` green throughout. A new `SeatedUidsSubprocessHandling`
+  test class drives the real `seated_uids()` against a fake `subprocess.run` (every prior
+  test monkey-patched `seated_uids()` itself away entirely, so this exact regression had zero
+  coverage) — clean success, a greeter correctly excluded, and every categorical-failure mode
+  asserted to return `None`. `relay/test_edy_rdp_relay.py` now has 63 tests (up from 55).
+
 ## 1.8.0.20260929 - 2026-09-29
 
 New capability: a shadow-group gate for the console (mirror) scenario, on top of the

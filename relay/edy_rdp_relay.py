@@ -384,11 +384,22 @@ def seated_uids():
     This feeds an authorization decision (the shadow-group gate), not a
     cosmetic error relabeling like physical_session_locked() above — so unlike
     that function it FAILS CLOSED: None means "cannot rule out someone else
-    being seated", never "nobody is seated". A single session's own
-    show-session lookup racing/erroring (e.g. it ended between list and show)
-    is skipped for that session only, matching _active_graphical_sessions()'s
-    existing precedent — that is a narrow pre-existing race, not the
-    categorical failure this function signals via None."""
+    being seated", never "nobody is seated".
+
+    Deliberately does NOT reuse _active_graphical_sessions()'s "skip a session
+    whose own show-session lookup fails" precedent: that function's failure
+    mode is cosmetic (a miscounted desktop-in-use tally), so treating a lookup
+    error the same as "this session doesn't exist" is harmless there. Here it
+    is not — `loginctl show-session` gives no reliable way to tell "the
+    session ended between list and show" (benign) apart from "logind/D-Bus
+    hiccuped on this one query" (not benign, and NOT something a request
+    should be waved through on) — found by review: the earlier version of
+    this function skipped both alike, which silently turned an authorization
+    gate fail-open exactly when it mattered most. So ANY show-session failure
+    (exception, non-zero exit, or a seated session with an unparseable User=)
+    fails the WHOLE call closed (None) rather than just dropping that one
+    session — trading a narrow, rare false "someone might be seated" against
+    ever silently reporting an empty seat that isn't."""
     try:
         listed = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
                                 capture_output=True, text=True, timeout=3)
@@ -408,9 +419,9 @@ def seated_uids():
                  "-p", "User"],
                 capture_output=True, text=True, timeout=3)
         except (OSError, subprocess.SubprocessError, ValueError):
-            continue
+            return None
         if props.returncode != 0:
-            continue
+            return None
         d = {}
         for pline in props.stdout.splitlines():
             if "=" in pline:
@@ -421,7 +432,7 @@ def seated_uids():
         try:
             uids.add(int(d.get("User", "")))
         except ValueError:
-            continue
+            return None
     return uids
 
 
