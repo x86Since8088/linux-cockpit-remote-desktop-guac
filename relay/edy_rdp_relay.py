@@ -1572,7 +1572,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="edy-rdp guacd relay")
     ap.add_argument("--listen", default="/run/edy-rdp/guacd.sock",
                     help="AF_UNIX path (ignored under systemd socket activation)")
-    ap.add_argument("--group", default="edy-rdp", help="socket group when self-binding")
+    ap.add_argument("--group", default="cockpit-guac-rdp", help="socket group when self-binding")
     ap.add_argument("--mode", default="0660", help="socket mode when self-binding")
     ap.add_argument("--guacd", default="127.0.0.1:4822",
                     help="guacd endpoint: host:port or unix:/path (pod-internal)")

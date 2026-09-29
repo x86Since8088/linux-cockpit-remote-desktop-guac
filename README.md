@@ -1,6 +1,6 @@
 # cockpit-guac-rdp
 
-**Version 1.4.0.20260927** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
+**Version 1.9.0.20260929** ([CHANGELOG](CHANGELOG.md)) · BSD-3-Clause · pinned prerequisites in [requires.txt](requires.txt)
 
 Browser-based RDP into this host's GNOME desktop, from inside Cockpit, with guacd
 **never exposed on a port** and **no session hijacking**.
@@ -131,9 +131,12 @@ I42). The script vets what root is about to mount — no symlinks, a socket owne
 the seat uid — and refuses otherwise. The uid comes from `EDY_RDP_PULSE_SEAT_UID` in
 `.env`; see [docs/AUDIO.md](docs/AUDIO.md).
 
-After deploying: add users to the `edy-rdp` group (`usermod -aG edy-rdp <user>`).
-Cockpit picks up the plugin on the next page load (Ctrl-Shift-R clears the cached
-manifest).
+After deploying: add users to the `cockpit-guac-rdp` group (`usermod -aG cockpit-guac-rdp
+<user>`). Cockpit picks up the plugin on the next page load (Ctrl-Shift-R clears the cached
+manifest). **This is not just a socket permission** — for most scenarios it is the *whole*
+access decision, with no Cockpit-administrator status required. See
+[Who the group actually admits](#who-the-group-actually-admits) below, and
+[docs/GROUP-ACCESS-MODEL.md](docs/GROUP-ACCESS-MODEL.md) for the full analysis.
 
 ### Which install is this host running?
 
@@ -226,6 +229,33 @@ trust model.
 # in /opt/cockpit-guac-rdp/.env
 EDY_RDP_UPDATE_REPO=x86Since8088/linux-cockpit-remote-desktop-guac
 ```
+
+## Who the group actually admits
+
+`usermod -aG cockpit-guac-rdp <user>` is stated above as *the* way to grant access, and for
+most of what this plugin does, it is — not a step toward access, the whole decision.
+Membership in the `cockpit-guac-rdp` group is **necessary** for every scenario (it is the
+socket permission that lets the browser reach the relay at all) and, for **isolated, virtual
+monitor, wayland-vnc and greeter**, it is also **sufficient**: none of those scenarios has an
+`admin_required` path, so a non-admin group member uses them exactly as a Cockpit
+administrator would, with no elevation of any kind. The same is true of **remote host / vnc**
+under their default configuration (`EDY_RDP_REMOTE_ADMIN_ONLY=0`, the shipped default) — group
+membership plus an operator-populated `EDY_RDP_REMOTE_ALLOW` is enough.
+
+Two scenarios need more, and only two:
+- **Console** always requires proven Cockpit-administrator status (I4), on top of group
+  membership — never group membership alone. If a *different* user is currently signed in at
+  the physical seat, console additionally requires membership in `EDY_RDP_SHADOW_GROUP` (I50,
+  see above) — a separate gate layered on top of the admin one, not a replacement for it.
+- **Remote host / vnc** always need an administrator to have populated
+  `EDY_RDP_REMOTE_ALLOW` — an empty allow-list is a deny-all regardless of who connects — and
+  can optionally be restricted further to Cockpit administrators with
+  `EDY_RDP_REMOTE_ADMIN_ONLY=1`.
+
+See [docs/GROUP-ACCESS-MODEL.md](docs/GROUP-ACCESS-MODEL.md) for what this means for an
+operator deciding who to add to the group, including the greeter scenario's specific risk
+(a group member can attempt to sign in as *any* account the host knows, not just their own)
+and concrete hardening recommendations.
 
 ## Layout
 | path | purpose |

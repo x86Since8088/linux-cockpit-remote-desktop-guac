@@ -1,3 +1,99 @@
+## 1.9.1.20260929 - 2026-09-29
+
+Fixes a real, high-severity defect in 1.9.0's group-rename migration, found by a
+multi-agent adversarial review (three dimensions in parallel — rename completeness,
+migration safety, whether the new non-admin-access test/docs actually prove what they
+claim — each candidate finding independently re-checked by a skeptic on a different
+model) before this ever reached edt1 or was pushed. 5 of 6 candidate findings confirmed;
+1 refuted.
+
+- **HIGH: gating the `groupmod` migration behind `--with-users` broke the very redeploy
+  pattern this project uses every day.** `install.sh`'s preflight has always required
+  `$RELAY_GROUP` to exist unconditionally, assuming a fresh host ran `--with-users` once
+  and every plain redeploy since could rely on the group already being there. 1.9.0 gated
+  the *rename* behind that same flag — so a plain `deploy.sh` (the pattern used for every
+  routine update this project makes, and the only one self-update's own `deploy.sh`
+  invocation ever uses) would warn correctly and then immediately hit install.sh's fatal
+  group-missing check anyway, on every host deployed before this rename. Verified against
+  edt1's actual state (`edy-rdp:x:970:cptest,eddie,cpadmin,eddie2` exists;
+  `cockpit-guac-rdp` does not) and reproduced end to end: self-update to 1.9.0 would have
+  failed deterministically on the one real deployment until an operator intervened by
+  hand. Fixed: the rename is now its own `migrate_group_rename()`, run unconditionally in
+  `do_deploy()` — same reasoning as the pre-existing `migrate_legacy_env()` — while
+  `create_users()` (still `--with-users`-gated) goes back to a plain check-and-create for
+  a genuinely fresh host.
+- **A bug the fix itself introduced, caught by this project's own test suite before it
+  shipped:** making the migration unconditional meant it also ran during the staged/
+  DESTDIR roundtrip test, which executes on a real host that may itself have a genuine
+  `edy-rdp` group (this one does) — and attempted `groupmod` against this session's actual
+  system group table during a test that must never touch real host state.
+  `run_tests.sh` caught it immediately; confirmed no mutation actually occurred before
+  fixing it with the same `-z "$D"` guard `preflight()`'s noexec check already uses.
+- Two low-severity doc fixes: the CHANGELOG's own verification paragraph mis-stated the
+  post-rename test count (203 instead of 199), and two stale `relay/selfupdate.py`
+  comments still named the pre-rename group.
+- Refuted: a claim that the new `NonAdminAccess` tests prove nothing (they'd also pass
+  for an admin uid) — true but beside the point; a mutation test confirmed they correctly
+  fail if an admin gate is later added to any of the four scenarios they cover.
+- **Verification:** `run_tests.sh` green throughout, including the previously-failing
+  staged installer/deploy roundtrip test.
+
+## 1.9.0.20260929 - 2026-09-29
+
+Renames the relay's unix group from `edy-rdp` to `cockpit-guac-rdp` (matching the
+project's own name), with a real migration so an already-deployed host — edt1,
+today, with real members in the old group — does not silently lose access; adds an
+automated test that locks in an existing property (non-admin group members already
+have full access to most scenarios); and writes that access model down in one place
+for the first time, along with an honest hardening analysis.
+
+- **Rename.** Every place the group name is a literal — `install.sh`'s manifest
+  (`RELAY_GROUP`), `relay/selfupdate.py`'s hand-kept-in-sync duplicate,
+  `relay/edy_rdp_relay.py`'s `--group` fallback default, the three systemd unit
+  files' `Group=`/`SocketGroup=` lines, `systemd/edy-rdp-tmpfiles.conf`'s GID
+  column, and the legacy `pod/edy-rdp-pod.yaml` — now says `cockpit-guac-rdp`.
+  Unit names, `/run/edy-rdp` paths, `/usr/libexec/edy-rdp`, every `EDY_RDP_*`
+  env-var name (including `EDY_RDP_ADMIN_GROUP`/`EDY_RDP_SHADOW_GROUP`, whose
+  *names* contain `EDY_RDP` but whose *values* are unrelated unix groups), and
+  the nftables table names are all project identifiers, not the group, and are
+  untouched. Prose in README.md and docs/ updated to match.
+- **The migration that makes this safe.** A naive check-and-create
+  (`getent group cockpit-guac-rdp || groupadd`) would have left an existing
+  host's real `edy-rdp` group — GID and members intact — sitting unused while a
+  brand-new, EMPTY `cockpit-guac-rdp` group got created, and every existing
+  member would have silently lost access the moment the relay/sockets picked up
+  the new group name on their next restart. `deploy.sh`'s `create_users()`
+  (still gated behind `--with-users`, like every other host-mutating action in
+  this script) now tries `groupmod -n cockpit-guac-rdp edy-rdp` — same GID, same
+  members, nothing dropped — before ever falling back to a fresh `groupadd`,
+  which now only happens when *neither* name exists (a genuinely new host). A
+  plain `deploy.sh` run (no `--with-users`) cannot perform that rename itself —
+  matching how this script never mutates the host without the flag — so it now
+  warns loudly instead, if the old group exists and the new one does not yet,
+  naming the exact `groupmod` command an operator needs before the next relay
+  restart or unit reload.
+- **New test:** `relay/test_edy_rdp_relay.py`'s `NonAdminAccess` proves, for the
+  first time as an explicit assertion, that isolated / virtual monitor /
+  wayland-vnc / greeter never raise `Refuse` for a non-admin, non-elevated uid —
+  `ADMIN_ONLY_SCENARIOS` is exactly `{"console"}`, so reaching the relay (i.e.
+  group membership) has always been the whole gate for these four. Nothing in
+  the relay's behavior changed; this closes the gap that nothing in the test
+  suite asserted it.
+- **New doc:** `docs/GROUP-ACCESS-MODEL.md` states plainly what the group gate
+  is necessary AND sufficient for, what needs more (console: always admin, plus
+  `EDY_RDP_SHADOW_GROUP` when mirroring a different seated user; remote/vnc:
+  an admin-populated `EDY_RDP_REMOTE_ALLOW`), the greeter scenario's specific
+  risk (a member can attempt to sign in as any account the host knows, not just
+  their own), and concrete operator hardening recommendations. README.md gets a
+  short "Who the group actually admits" section pointing at it; the
+  `usermod -aG $RELAY_GROUP <user>` banner in `deploy.sh`/`install.sh` now
+  points there too, since on its own it reads as a complete instruction when it
+  never was one.
+- **Verification:** `run_tests.sh` green throughout (199 relay unit tests, up
+  from 195 -- 67 of them in `relay/test_edy_rdp_relay.py` alone, up from 63;
+  `install.sh --verify`'s manifest-completeness gate and the staged
+  installer/deploy roundtrip tests unaffected).
+
 ## 1.8.1.20260929 - 2026-09-29
 
 Fixes two real bugs in 1.8.0's shadow-group gate, both found by a multi-agent adversarial

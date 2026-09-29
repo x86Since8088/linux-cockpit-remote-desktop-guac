@@ -698,5 +698,95 @@ class SeatedUidsSubprocessHandling(unittest.TestCase):
         self.assertEqual(self._run_with(lambda *a, **k: self._Result(returncode=0, stdout="")), set())
 
 
+class NonAdminAccess(unittest.TestCase):
+    """Proves an existing property, for docs/GROUP-ACCESS-MODEL.md: isolated, virtual
+    monitor, wayland-vnc and greeter have never had an admin_required path
+    (ADMIN_ONLY_SCENARIOS is exactly {"console"} -- console alone), so reaching the
+    relay at all is already sufficient for a non-admin, non-elevated caller to use
+    them. "Reaching the relay" is modeled here simply as a Connection constructed
+    with a non-admin uid and no session_token_admin -- the real gate is the AF_UNIX
+    socket's group permission (see docs/GROUP-ACCESS-MODEL.md), which is OS-level and
+    out of this module's reach to test directly. Each test just drives
+    _peek_scenario_from_connect and lets an unexpected Refuse fail it naturally,
+    same as the existing success-path tests in Guard above."""
+
+    NONADMIN_UID = 4242   # not in "sudo" on any real host: is_admin() fails closed (KeyError)
+
+    class _FakeProc:
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def poll(self): return None
+        def kill(self): pass
+
+    def _conn(self):
+        c = R.Connection(client=None, uid=self.NONADMIN_UID, table=SR.SessionRegistry(),
+                          guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        c.arg_names = ["hostname", "port", "password"]
+        return c
+
+    def _release(self, c):
+        if c.desktop_id:
+            R.DESKTOP_SLOTS.release(c.desktop_id, c)
+        if c._bridge_counted:
+            R.BRIDGE_COUNTER.release(c.uid)
+
+    def _fake_bridge(self, port):
+        return lambda *a, **k: (
+            {"VNCHOST": "127.0.0.1", "VNCPORT": port, "VNCPASS": "x"}, self._FakeProc())
+
+    def test_isolated_no_admin_required(self):
+        c = self._conn()
+        orig_headless, orig_bridge = R.ensure_headless_session, R.bridge.start_bridge
+        R.ensure_headless_session = lambda uid: {
+            "PORT": "33001", "USER": "isoluser", "CRED": "isolcred",
+            "DESKTOP_ID": "isolated:%d" % uid, "CREATED": None}
+        R.bridge.start_bridge = self._fake_bridge("6001")
+        try:
+            out = c._peek_scenario_from_connect(["connect", "scenario=isolated"])
+        finally:
+            R.ensure_headless_session, R.bridge.start_bridge = orig_headless, orig_bridge
+            self._release(c)
+        self.assertEqual(c.scenario, "isolated")
+        self.assertEqual(out[0], "connect")
+
+    def test_virtual_no_admin_required(self):
+        c = self._conn()
+        orig_bridge = R.bridge.start_bridge
+        R.bridge.start_bridge = self._fake_bridge("6002")
+        try:
+            out = c._peek_scenario_from_connect(
+                ["connect", "scenario=virtual", "rdpcred=u" + "\x1f" + "p"])
+        finally:
+            R.bridge.start_bridge = orig_bridge
+            self._release(c)
+        self.assertEqual(c.scenario, "virtual")
+        self.assertEqual(out[0], "connect")
+
+    def test_wayland_vnc_no_admin_required(self):
+        c = self._conn()
+        orig = R.ensure_waylandvnc_session
+        R.ensure_waylandvnc_session = lambda uid: {"HOST": "127.0.0.1", "PORT": "34001"}
+        try:
+            out = c._peek_scenario_from_connect(["connect", "scenario=wayland-vnc"])
+        finally:
+            R.ensure_waylandvnc_session = orig
+            self._release(c)
+        self.assertEqual(c.scenario, "wayland-vnc")
+        self.assertEqual(out[0], "connect")
+
+    def test_greeter_no_admin_required(self):
+        c = self._conn()
+        orig_bridge = R.bridge.start_bridge
+        R.bridge.start_bridge = self._fake_bridge("6003")
+        try:
+            out = c._peek_scenario_from_connect(
+                ["connect", "scenario=greeter", "rdpcred=u" + "\x1f" + "p"])
+        finally:
+            R.bridge.start_bridge = orig_bridge
+            self._release(c)
+        self.assertEqual(c.scenario, "greeter")
+        self.assertEqual(out[0], "connect")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

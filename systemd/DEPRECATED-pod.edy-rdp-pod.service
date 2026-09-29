@@ -8,7 +8,7 @@ Requires=systemd-tmpfiles-setup.service
 [Service]
 Type=notify
 NotifyAccess=all
-# tmpfiles creates /run/edy-rdp (0750 root:edy-rdp) before we start.
+# tmpfiles creates /run/edy-rdp (0750 root:cockpit-guac-rdp) before we start.
 ExecStartPre=/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/edy-rdp.conf
 ExecStartPre=-/usr/bin/podman kube down /usr/share/cockpit/guac-rdp/pod/edy-rdp-pod.yaml
 ExecStart=/usr/bin/podman kube play --replace --service-container=true /usr/share/cockpit/guac-rdp/pod/edy-rdp-pod.yaml

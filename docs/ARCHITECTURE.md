@@ -10,7 +10,7 @@ protected sessions.
  browser ──wss (Cockpit HTTPS, its own cert)──▶ cockpit-ws ──▶ cockpit-bridge  [runs AS the session user]
     │  Guacamole protocol frames over a stream channel:  { payload:"stream", unix:"/run/edy-rdp/guacd.sock" }
     ▼
- edy-rdp-relay  (runs as the edy-relay uid; AF_UNIX /run/edy-rdp/guacd.sock, 0660 root:edy-rdp)
+ edy-rdp-relay  (runs as the edy-relay uid; AF_UNIX /run/edy-rdp/guacd.sock, 0660 root:cockpit-guac-rdp)
     │  • SO_PEERCRED  → connecting uid (kernel-supplied, unforgeable)   [closes I2/I4]
     │  • guards `select`: `select $uuid` only if uuid∈caller            [closes I2]
     │  • echoes guacd's `sync` as keepalive; blocking sockets (no drop) [I8/I24/I25]
@@ -51,7 +51,8 @@ ownership and the console-admin gate, adds keepalives, and only then relays to g
 ## Trust boundaries
 - **Browser↔Cockpit:** TLS, Cockpit's existing PAM session. Who you are = your Cockpit login.
 - **Cockpit-bridge↔relay:** AF_UNIX; bridge connects as the user, so SO_PEERCRED = that user. Group
-  `edy-rdp` membership is the coarse gate; SO_PEERCRED is the identity.
+  `cockpit-guac-rdp` membership is the coarse gate; SO_PEERCRED is the identity. See
+  [GROUP-ACCESS-MODEL.md](GROUP-ACCESS-MODEL.md) for what that gate does and does not grant.
 - **Relay↔guacd:** host loopback, nftables owner-gated to the relay uid; not reachable by other local uids.
 - **guacd↔grd:** RDP/NLA over TLS; the gate key authenticates the transport, GDM/PAM authenticates the
   real user (isolated scenario).
@@ -71,7 +72,7 @@ ownership and the console-admin gate, adds keepalives, and only then relays to g
 
 ## Session lifecycle & state authority
 The **relay is the single writer/authority** of the session registry, persisted to
-`/run/edy-rdp/state/sessions.json` (tmpfs; relay-owned `edy-relay:edy-rdp`, so it does not survive a
+`/run/edy-rdp/state/sessions.json` (tmpfs; relay-owned `edy-relay:cockpit-guac-rdp`, so it does not survive a
 reboot — correct, since live guacd/greeter sessions do not either). The **reaper** (`edy-rdp-reaper`,
 root, timer-driven) never edits that file; it prunes THROUGH the relay's control-socket `prune` op
 (admin-only) and additionally terminates stale `gdm-greeter` logind sessions via `loginctl`
