@@ -1,3 +1,43 @@
+## 1.9.1.20260929 - 2026-09-29
+
+Fixes a real, high-severity defect in 1.9.0's group-rename migration, found by a
+multi-agent adversarial review (three dimensions in parallel — rename completeness,
+migration safety, whether the new non-admin-access test/docs actually prove what they
+claim — each candidate finding independently re-checked by a skeptic on a different
+model) before this ever reached edt1 or was pushed. 5 of 6 candidate findings confirmed;
+1 refuted.
+
+- **HIGH: gating the `groupmod` migration behind `--with-users` broke the very redeploy
+  pattern this project uses every day.** `install.sh`'s preflight has always required
+  `$RELAY_GROUP` to exist unconditionally, assuming a fresh host ran `--with-users` once
+  and every plain redeploy since could rely on the group already being there. 1.9.0 gated
+  the *rename* behind that same flag — so a plain `deploy.sh` (the pattern used for every
+  routine update this project makes, and the only one self-update's own `deploy.sh`
+  invocation ever uses) would warn correctly and then immediately hit install.sh's fatal
+  group-missing check anyway, on every host deployed before this rename. Verified against
+  edt1's actual state (`edy-rdp:x:970:cptest,eddie,cpadmin,eddie2` exists;
+  `cockpit-guac-rdp` does not) and reproduced end to end: self-update to 1.9.0 would have
+  failed deterministically on the one real deployment until an operator intervened by
+  hand. Fixed: the rename is now its own `migrate_group_rename()`, run unconditionally in
+  `do_deploy()` — same reasoning as the pre-existing `migrate_legacy_env()` — while
+  `create_users()` (still `--with-users`-gated) goes back to a plain check-and-create for
+  a genuinely fresh host.
+- **A bug the fix itself introduced, caught by this project's own test suite before it
+  shipped:** making the migration unconditional meant it also ran during the staged/
+  DESTDIR roundtrip test, which executes on a real host that may itself have a genuine
+  `edy-rdp` group (this one does) — and attempted `groupmod` against this session's actual
+  system group table during a test that must never touch real host state.
+  `run_tests.sh` caught it immediately; confirmed no mutation actually occurred before
+  fixing it with the same `-z "$D"` guard `preflight()`'s noexec check already uses.
+- Two low-severity doc fixes: the CHANGELOG's own verification paragraph mis-stated the
+  post-rename test count (203 instead of 199), and two stale `relay/selfupdate.py`
+  comments still named the pre-rename group.
+- Refuted: a claim that the new `NonAdminAccess` tests prove nothing (they'd also pass
+  for an admin uid) — true but beside the point; a mutation test confirmed they correctly
+  fail if an admin gate is later added to any of the four scenarios they cover.
+- **Verification:** `run_tests.sh` green throughout, including the previously-failing
+  staged installer/deploy roundtrip test.
+
 ## 1.9.0.20260929 - 2026-09-29
 
 Renames the relay's unix group from `edy-rdp` to `cockpit-guac-rdp` (matching the
@@ -49,8 +89,9 @@ for the first time, along with an honest hardening analysis.
   `usermod -aG $RELAY_GROUP <user>` banner in `deploy.sh`/`install.sh` now
   points there too, since on its own it reads as a complete instruction when it
   never was one.
-- **Verification:** `run_tests.sh` green throughout (203 relay unit tests, up
-  from 199; `install.sh --verify`'s manifest-completeness gate and the staged
+- **Verification:** `run_tests.sh` green throughout (199 relay unit tests, up
+  from 195 -- 67 of them in `relay/test_edy_rdp_relay.py` alone, up from 63;
+  `install.sh --verify`'s manifest-completeness gate and the staged
   installer/deploy roundtrip tests unaffected).
 
 ## 1.8.1.20260929 - 2026-09-29

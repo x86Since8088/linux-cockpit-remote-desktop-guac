@@ -172,38 +172,52 @@ install_deps() {
 # check-and-create here would leave THAT group alone and groupadd a brand-new,
 # EMPTY $RELAY_GROUP, so the next unit restart picks up the new group and every
 # existing edy-rdp member silently loses access. groupmod -n renames in place -
-# same GID, same members, nothing dropped - so it is tried FIRST, and a fresh
-# groupadd only happens when neither name exists (a genuinely new host).
+# same GID, same members, nothing dropped.
+#
+# Runs UNCONDITIONALLY in do_deploy(), NOT gated behind --with-users, same
+# reasoning as migrate_legacy_env() above: renaming an EXISTING group to the
+# name this version's units now reference is a compatibility carry-forward for
+# a host that already opted in once, not a new grant of capability. install.sh's
+# own preflight (check 8) requires $RELAY_GROUP to exist UNCONDITIONALLY,
+# regardless of --with-users - it always has, on the assumption that a fresh
+# host ran --with-users exactly once at initial setup and every plain redeploy
+# since has relied on the group already being there. Gating the rename itself
+# behind --with-users broke that assumption for every host deployed before this
+# rename (this project's own edt1 included): a plain, no-flags redeploy - the
+# pattern used for every routine update this project makes, and the ONLY one
+# self-update's own deploy.sh invocation ever uses - would otherwise hit
+# install.sh's fatal group-missing check on every such host until an operator
+# remembered to pass --with-users first. A brand-new host where NEITHER name
+# exists is untouched here (return 0) and still needs --with-users on its
+# first-ever deploy, exactly as it always has - only the RENAME of an existing
+# group is unconditional, not the creation of a new one.
+migrate_group_rename() {
+    # A staged/DESTDIR deploy (the test suite's own roundtrip tests, run on a
+    # real developer/CI host that may itself have a genuine "edy-rdp" group)
+    # exercises the file-copying/rendering logic only and must NEVER touch the
+    # actual host's real system accounts -- unlike create_users(), which is
+    # implicitly protected because no test ever passes --with-users, this
+    # function is unconditional and needs its OWN explicit guard, the same one
+    # preflight's noexec check and the --with-units unit-enabling step already
+    # use. Found by this project's own test suite: without this guard, running
+    # the staged roundtrip test on a host that already has a real "edy-rdp"
+    # group renamed THAT REAL GROUP.
+    [[ -z "$D" ]] || return 0
+    getent group "$RELAY_GROUP" >/dev/null && return 0
+    getent group edy-rdp >/dev/null || return 0
+    groupmod -n "$RELAY_GROUP" edy-rdp \
+        || die "could not rename group edy-rdp -> $RELAY_GROUP. Fix by hand
+    (groupmod -n $RELAY_GROUP edy-rdp) and re-run. Nothing else was changed."
+    say renamed "group edy-rdp -> $RELAY_GROUP (GID and members preserved)"
+}
+
 create_users() {
-    if getent group "$RELAY_GROUP" >/dev/null; then
-        :
-    elif getent group edy-rdp >/dev/null; then
-        groupmod -n "$RELAY_GROUP" edy-rdp
-        say renamed "group edy-rdp -> $RELAY_GROUP (GID and members preserved)"
-    else
-        groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"
-    fi
+    getent group "$RELAY_GROUP" >/dev/null \
+        || { groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"; }
     getent passwd "$RELAY_USER" >/dev/null \
         || { useradd --system --no-create-home --shell /usr/sbin/nologin \
                      -g "$RELAY_GROUP" "$RELAY_USER"; say created "user $RELAY_USER"; }
     ok "$RELAY_USER:$RELAY_GROUP present (uid $(id -u "$RELAY_USER"))"
-}
-
-# A plain deploy.sh run (no --with-users) never mutates the host, so it cannot
-# do the groupmod above - it can only say so. Silence here is exactly the
-# access-loss regression create_users' comment describes: units get rendered
-# with Group=$RELAY_GROUP, nothing ever renames the old group, and members find
-# out only when they are locked out.
-warn_group_rename_pending() {
-    getent group "$RELAY_GROUP" >/dev/null && return 0
-    getent group edy-rdp >/dev/null || return 0
-    warn "this host still has the OLD 'edy-rdp' group (with its existing members)
-       and no '$RELAY_GROUP' group yet. Units now render Group=$RELAY_GROUP /
-       SocketGroup=$RELAY_GROUP - restarting or reloading them before this is
-       fixed will silently drop every edy-rdp member's access. Fix it with
-       --with-users (renames the group in place, preserving GID and members),
-       or by hand before the next restart:
-           groupmod -n $RELAY_GROUP edy-rdp"
 }
 
 pull_image() {
@@ -372,7 +386,8 @@ do_deploy() {
 
     step "configuration"
     migrate_legacy_env
-    if ((WITH_USERS)); then step "users"; create_users; else warn_group_rename_pending; fi
+    migrate_group_rename
+    ((WITH_USERS)) && { step "users"; create_users; }
 
     # install.sh BEFORE the image pull: it places .env, and GUACD_IMAGE is read
     # from that file. (Users before install.sh: its check 8 wants them.)

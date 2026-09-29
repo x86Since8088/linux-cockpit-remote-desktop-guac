@@ -1178,3 +1178,52 @@ prompting anyone to re-audit it.
 suites, up from 195; 67 in `relay/test_edy_rdp_relay.py` alone, up from 63);
 `install.sh --verify`'s manifest-completeness gate and `tests/installer_tests.sh`'s
 staged installer/deploy roundtrip unaffected by the rename.
+
+**Follow-up (1.9.1.20260929): the migration design above was wrong, found by adversarial
+review before this ever reached edt1 or was pushed — and the fix was itself verified live
+against edt1's actual group state.** A multi-agent review (three dimensions in parallel,
+each candidate finding independently re-checked by a skeptic on a different model)
+confirmed 5 of 6 candidate findings. The one that mattered:
+
+- **HIGH: gating the `groupmod` migration behind `--with-users` broke the very
+  redeploy pattern this project uses every day.** `install.sh`'s own preflight has
+  *always* required `$RELAY_GROUP` to exist *unconditionally*, on the assumption that a
+  fresh host ran `--with-users` exactly once at initial setup and every plain redeploy
+  since could rely on the group already being there. The 1.9.0 design gated the *rename*
+  itself behind that same flag — so a plain `deploy.sh` (no flags), the pattern used for
+  every routine update this project makes, and the *only* one self-update's own
+  `deploy.sh` invocation ever uses, would print the correct warning and then immediately
+  hit install.sh's fatal group-missing check anyway, on every host deployed before this
+  rename. Verified directly against edt1's real state (`getent group edy-rdp` →
+  `edy-rdp:x:970:cptest,eddie,cpadmin,eddie2`; `cockpit-guac-rdp` does not exist), and
+  reproduced end to end: self-update to 1.9.0 would have failed deterministically on the
+  one real deployment until an operator stepped in by hand — no access lost (the failure
+  is in `install.sh`'s preflight, before anything is rendered), but the just-shipped
+  self-update feature (I49) broken for this release. **Fixed:** the rename is now its own
+  `migrate_group_rename()`, run *unconditionally* in `do_deploy()` (same reasoning as the
+  pre-existing `migrate_legacy_env()`: renaming an *existing* group to the name this
+  version's units now reference is a compatibility carry-forward, not a new grant of
+  capability) — `create_users()` (still `--with-users`-gated) goes back to a plain
+  check-and-create, since the rename has already happened unconditionally by the time it
+  runs. A genuinely fresh host, where neither group exists, is untouched by the rename
+  step and still needs `--with-users` on its first-ever deploy, exactly as before.
+- **A bug the fix itself introduced, caught by this project's own test suite before it
+  ever shipped:** making the migration unconditional meant it ran during the staged/
+  DESTDIR roundtrip test too — which executes on a real host that may itself have a
+  genuine `edy-rdp` group (this one does). Unlike `create_users()`, which was only ever
+  implicitly protected by no test passing `--with-users`, the now-unconditional function
+  had no guard of its own and attempted `groupmod` against this session's **actual**
+  system group table during a test run that must never touch real host state. Caught
+  immediately by `run_tests.sh` going red; confirmed no actual mutation occurred
+  (`groupmod` failed on privilege first) before fixing it with the same `-z "$D"` guard
+  `preflight()`'s noexec check and the `--with-units` unit-enabling step already use.
+- Two low-severity documentation fixes: the CHANGELOG's own verification paragraph
+  mis-stated the post-rename test count (203 instead of 199); and two comments in
+  `relay/selfupdate.py` still said the relay's default `--group` was `"edy-rdp"` after
+  the rename changed it.
+- **Refuted:** a claim that the new `NonAdminAccess` tests prove nothing because they'd
+  also pass for an admin uid — true, but beside the point: they are positive-path
+  regression guards, and a mutation test confirmed they correctly fail if an admin gate
+  is later added to any of the four scenarios, which is the property that matters.
+
+`run_tests.sh` green throughout after both fixes.

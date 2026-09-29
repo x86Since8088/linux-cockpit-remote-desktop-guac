@@ -49,7 +49,7 @@ INSTALL_CONF = "/etc/cockpit-guac-rdp/install.conf"
 
 # Same account/group install.sh's manifest declares (RELAY_USER/RELAY_GROUP).
 # Not read from there (this module has no shell dependency); kept in sync by
-# hand, same as the relay already hardcodes "edy-rdp" as its default --group.
+# hand, same as the relay already hardcodes "cockpit-guac-rdp" as its default --group.
 RELAY_USER = "edy-relay"
 RELAY_GROUP = "cockpit-guac-rdp"
 
@@ -234,7 +234,7 @@ def rollback_candidate(root):
 # Written by BOTH the unprivileged relay (background/forced checks) and the
 # ROOT-run apply/rollback scripts (recording the outcome in "last_apply").
 # Write-to-temp-then-rename is atomic against a concurrent reader; the chown
-# back to edy-relay:edy-rdp is what lets the relay keep reading (and later
+# back to edy-relay:cockpit-guac-rdp is what lets the relay keep reading (and later
 # rewriting) the file after a ROOT process last touched it. When the relay
 # itself writes, this is a same-uid no-op (it already owns the file); when a
 # root-run script writes it, this is the actual handoff.

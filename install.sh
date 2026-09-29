@@ -468,12 +468,35 @@ $(sed 's/^/    /' <<<"$problems")
         local prereq_bad=0
         getent group "$RELAY_GROUP" >/dev/null || { fail "group $RELAY_GROUP does not exist"; prereq_bad=1; }
         getent passwd "$RELAY_USER" >/dev/null || { fail "user $RELAY_USER does not exist"; prereq_bad=1; }
-        ((prereq_bad)) && die "the relay's dedicated user/group are missing. install.sh does
+        if ((prereq_bad)); then
+            # A host that still carries the pre-rename "edy-rdp" group needs a
+            # RENAME (groupmod -n), never a fresh groupadd: a plain "groupadd
+            # $RELAY_GROUP" here would create a second, EMPTY group and silently
+            # orphan every existing edy-rdp member the next time a unit that
+            # references $RELAY_GROUP restarts. deploy.sh (run with no flags at
+            # all - this migration is NOT gated behind --with-users, see its
+            # migrate_group_rename()) already does this safely; naming BOTH
+            # remedies here is what fixing I51's install.sh gap requires - this
+            # message must never suggest groupadd alone while the old group
+            # might still exist.
+            if getent group edy-rdp >/dev/null; then
+                die "the relay's dedicated group is still named the OLD 'edy-rdp',
+    not '$RELAY_GROUP'. install.sh does not rename it itself: changing a system
+    group is deploy.sh's job. Run:
+        sudo ./deploy.sh            (no flags needed - the rename is unconditional, not
+                                     gated behind --with-users; it also creates the
+                                     $RELAY_USER user if this is a genuinely fresh host)
+    or by hand, preserving the group's GID and every existing member:
+        groupmod -n $RELAY_GROUP edy-rdp"
+            else
+                die "the relay's dedicated user/group are missing. install.sh does
     not create them: creating a system account changes the host, which is
     deploy.sh's job. Run:
         sudo ./deploy.sh --with-users            (or, by hand:)
         groupadd --system $RELAY_GROUP
         useradd --system --no-create-home --shell /usr/sbin/nologin -g $RELAY_GROUP $RELAY_USER"
+            fi
+        fi
         ok "8. $RELAY_USER:$RELAY_GROUP exist (uid $(id -u "$RELAY_USER"))"
 
         # 8b. the OS prerequisites, from the one list (requires.txt), presence and
