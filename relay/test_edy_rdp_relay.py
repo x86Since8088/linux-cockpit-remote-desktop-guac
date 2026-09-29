@@ -475,6 +475,143 @@ class SecurityValuesAreAcceptedByFreeRDP(unittest.TestCase):
         self.assertEqual(sec, "nla")
 
 
+class SeatedSessionPredicate(unittest.TestCase):
+    """_is_seated_graphical_session() is the pure per-session classifier
+    seated_uids() applies to each loginctl show-session property dict --
+    no subprocess involved, same style as LockedScreenHint above."""
+    def test_seated_graphical(self):
+        self.assertTrue(R._is_seated_graphical_session(
+            {"Type": "wayland", "Active": "yes", "Seat": "seat0", "Class": "user"}))
+        self.assertTrue(R._is_seated_graphical_session(
+            {"Type": "x11", "Active": "yes", "Seat": "seat0", "Class": "user"}))
+
+    def test_not_seated(self):
+        for props in (
+            {"Type": "wayland", "Active": "yes", "Seat": "seat0", "Class": "greeter"},
+            {"Type": "tty", "Active": "yes", "Seat": "seat0", "Class": "user"},
+            {"Type": "wayland", "Active": "yes", "Seat": "", "Class": "user"},
+            {"Type": "wayland", "Active": "no", "Seat": "seat0", "Class": "user"},
+            {},
+        ):
+            self.assertFalse(R._is_seated_graphical_session(props))
+
+
+class ShadowGateDecision(unittest.TestCase):
+    """shadow_gate_required() encodes the actual security decision -- pure,
+    no I/O -- so it is exercised directly with literal seated-set/requester
+    combinations, the same way LockedScreenHint drives its pure helper."""
+    def test_not_required_when_nobody_seated(self):
+        self.assertFalse(R.shadow_gate_required(set(), 1000))
+
+    def test_not_required_when_only_requester_seated(self):
+        self.assertFalse(R.shadow_gate_required({1000}, 1000))
+
+    def test_required_when_a_different_uid_seated(self):
+        self.assertTrue(R.shadow_gate_required({1000, 2000}, 1000))
+        self.assertTrue(R.shadow_gate_required({2000}, 1000))
+
+    def test_required_when_undetermined(self):   # fail closed, like is_admin()
+        self.assertTrue(R.shadow_gate_required(None, 1000))
+
+
+class ConsoleShadowGate(unittest.TestCase):
+    """Integration-level: drives the real _peek_scenario_from_connect for
+    scenario=console with seated_uids() monkey-patched, the same style Guard
+    already uses for R.bridge.start_bridge."""
+
+    class _FakeProc:
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def poll(self): return None
+        def kill(self): pass
+
+    def _conn(self, uid, admin_group="sudo", shadow_group="rdp-shadow"):
+        c = R.Connection(client=None, uid=uid, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group=admin_group,
+                         shadow_group=shadow_group)
+        c.arg_names = ["hostname", "port", "password"]
+        return c
+
+    def _connect_console(self, c):
+        orig_bridge = R.bridge.start_bridge
+        R.bridge.start_bridge = lambda *a, **k: (
+            {"VNCHOST": "127.0.0.1", "VNCPORT": "6001", "VNCPASS": "secret"},
+            self._FakeProc())
+        try:
+            return c._peek_scenario_from_connect(
+                ["connect", "scenario=console", "rdpcred=u" + "\x1f" + "p"])
+        finally:
+            R.bridge.start_bridge = orig_bridge
+            if c.desktop_id:
+                R.DESKTOP_SLOTS.release(c.desktop_id, c)
+            if c._bridge_counted:
+                R.BRIDGE_COUNTER.release(c.uid)
+
+    def test_nobody_seated_admin_only_gate_applies(self):
+        c = self._conn(0)   # root: admin gate's uid==0 shortcut, no patching needed
+        orig = R.seated_uids
+        R.seated_uids = lambda: set()
+        try:
+            self._connect_console(c)   # must not raise
+        finally:
+            R.seated_uids = orig
+
+    def test_same_user_seated_allowed_without_shadow_membership(self):
+        c = self._conn(0)
+        orig = R.seated_uids
+        R.seated_uids = lambda: {0}
+        try:
+            self._connect_console(c)   # must not raise
+        finally:
+            R.seated_uids = orig
+
+    def test_different_user_seated_and_not_in_shadow_group_refused(self):
+        c = self._conn(4242)
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {1000}
+        # admin (so the EXISTING admin gate passes) but not a shadow-group member
+        R.is_admin = lambda uid, group="sudo": group == "sudo"
+        try:
+            with self.assertRaises(R.Refuse):
+                self._connect_console(c)
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_different_user_seated_and_in_shadow_group_allowed(self):
+        c = self._conn(4242)
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {1000}
+        R.is_admin = lambda uid, group="sudo": True   # admin AND shadow-group member
+        try:
+            self._connect_console(c)   # must not raise
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_seated_undetermined_fails_closed_unless_shadow_member(self):
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: None   # categorical failure -- cannot rule out someone else
+        try:
+            R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, not shadow member
+            c = self._conn(4242)
+            with self.assertRaises(R.Refuse):
+                self._connect_console(c)
+
+            R.is_admin = lambda uid, group="sudo": True   # admin AND shadow member
+            c = self._conn(4242)
+            self._connect_console(c)   # must not raise
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
+    def test_shadow_group_empty_disables_gate(self):
+        c = self._conn(4242, shadow_group="")
+        orig_seated, orig_admin = R.seated_uids, R.is_admin
+        R.seated_uids = lambda: {1000}   # a different uid IS seated
+        R.is_admin = lambda uid, group="sudo": group == "sudo"   # admin, not a shadow member
+        try:
+            self._connect_console(c)   # feature off -> admin gate alone is enough
+        finally:
+            R.seated_uids, R.is_admin = orig_seated, orig_admin
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

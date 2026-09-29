@@ -1024,3 +1024,79 @@ that `_safe_extract()` did not catch, so it would have crashed the privileged sc
 traceback instead of the intended, accurate "nothing was touched" refusal — fixed by catching
 `tarfile.TarError` and wrapping it as `SelfUpdateError`. `run_tests.sh` green throughout (82 tests now
 in `relay/test_selfupdate.py` alone).
+
+### I50 · New capability: shadow-group gate for mirroring a DIFFERENT signed-in user's console session · Sev N/A · SHIPPED (1.8.0.20260929)
+
+Not a bug fix — a new capability, recorded here in the same spirit as I47/I49. The console
+scenario's existing gate (I4, above) answers one question: is the caller a Cockpit
+administrator? That is the right question for "may this person use the mirror at all," but
+it is silent on a genuinely separate one — if a *different* user is currently signed in at
+the physical seat, may this admin secretly watch **that specific person's** active desktop?
+An organization can reasonably want every admin able to mirror an *empty* seat or *their
+own* session, while restricting who may mirror a **co-worker's** live screen to a smaller,
+deliberately-provisioned set — a privacy boundary the old gate had no way to express, since
+it only ever asked "admin or not."
+
+**Mechanics.** `Connection._peek_scenario_from_connect()` now runs a second, additive check
+for `scenario == "console"`, immediately after the existing admin gate and using the exact
+same `is_admin(uid, group)` primitive (I4) against a *different* configured group
+(`EDY_RDP_SHADOW_GROUP`, default `rdp-shadow`) — reused as-is, not reimplemented, since
+`is_admin()` was already a generic "is this uid a member of this named group" check despite
+its name/docstring. A new `seated_uids()` (`relay/edy_rdp_relay.py`) answers "who, if
+anyone, is physically at the seat right now" via `loginctl list-sessions` + `show-session
+-p User` (the same uid space Cockpit sessions run under, since `self.uid` already comes
+from SO_PEERCRED); a new pure `shadow_gate_required(seated, requester_uid)` decides the
+gate applies iff a uid *other than the requester* is seated. Nobody seated, or the
+requester seated alone, needs nothing beyond the existing admin gate — unchanged in every
+respect, same wording, same code path. The gate is evaluated fresh on every console connect
+attempt (never cached), since who is seated can change between connects.
+
+**Fail-closed by design — the opposite of `physical_session_locked()`'s role.**
+`seated_uids()` returns `None`, not an empty set, when it cannot determine who (if anyone)
+is seated at all (`loginctl list-sessions` itself failed or errored); `shadow_gate_required()`
+treats `None` as "cannot rule out someone else," so an admin with no shadow-group membership
+is refused rather than let through on a lookup failure. This is deliberately the mirror image
+of `physical_session_locked()` (above): that function feeds a *cosmetic* message-relabeling
+role and must fail OPEN (an undetermined lock state must never block a connection), while
+`seated_uids()` feeds an actual authorization decision and must fail CLOSED, the same posture
+`is_admin()` already takes on an unresolvable uid or a missing group. A future reader should
+not "fix" `seated_uids()` to match `physical_session_locked()`'s fail-open behavior — they
+answer different kinds of questions on purpose. A single session's own `show-session` lookup
+racing/erroring between `list-sessions` and its own query is skipped for that one session
+only, matching the pre-existing precedent in `_active_graphical_sessions()`/
+`physical_session_locked()` — a narrow, accepted race, not the categorical failure `None`
+signals.
+
+**Deliberately un-hardened at install time, and that is the correct default.** Unlike
+`EDY_RDP_ADMIN_GROUP` (which must exist on the host — `sudo` does, on essentially every real
+Linux install), `lib/edy-rdp-env.sh` validates `EDY_RDP_SHADOW_GROUP` only for shape (empty,
+or a syntactically valid unix group name), never for existence. `rdp-shadow` is a brand-new,
+project-specific name that will not exist on any host until an operator creates it, and
+`install.sh`'s preflight validates the environment *before* copying anything — hard-refusing
+every install and every routine redeploy (this project's own edt1 included) until someone
+pre-creates a custom group would be a deploy-breaking foot-gun for no safety gain, since
+`is_admin()` already turns a nonexistent group into "nobody is a member" (fails closed) with
+no crash risk either way. `EDY_RDP_SHADOW_GROUP` is therefore deliberately **not** in
+`install.sh`'s `REQUIRED_ENV`, mirroring `EDY_RDP_REMOTE_ALLOW`'s precedent: `.envdefault`
+ships it non-empty (`rdp-shadow`) so it is live on every fresh install, but an operator may
+explicitly blank it in their own `.env` as a supported way to turn this extra gate off
+entirely and revert to admin-only console gating. **Operational note: the group is not
+created or populated by any tooling in this project** — an operator runs `groupadd
+rdp-shadow` and `usermod -aG rdp-shadow <user>` themselves (or points the variable at an
+existing group) before anyone can shadow a different user's console session; until then the
+gate's fail-closed default means nobody can.
+
+**Verification.** `relay/test_edy_rdp_relay.py`: `SeatedSessionPredicate` (pure, literal
+`loginctl` property dicts, no subprocess — same style as `LockedScreenHint`) covers the
+seated/graphical/non-greeter classification; `ShadowGateDecision` (pure) covers
+`shadow_gate_required()` for nobody-seated, requester-seated-alone, a-different-uid-seated,
+and the `None` fail-closed case; `ConsoleShadowGate` (integration, `Guard`-style, driving the
+real `_peek_scenario_from_connect` with `seated_uids()` monkey-patched the same way
+`R.bridge.start_bridge` already is) covers nobody seated (admin gate alone suffices), the
+same user seated as the requester (no shadow membership needed), a different user seated
+with the requester out of the shadow group (refused), a different user seated with the
+requester in it (allowed), the `seated_uids() is None` fail-closed path both with and
+without shadow-group membership, and `EDY_RDP_SHADOW_GROUP=` empty disabling the gate
+entirely. `run_tests.sh` green throughout (187 relay unit tests across all four suites, up
+from 175; no regression in the untouched admin gate, remote-allow, credential-injection, or
+any other existing suite).

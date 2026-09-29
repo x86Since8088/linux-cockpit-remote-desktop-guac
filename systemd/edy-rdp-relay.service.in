@@ -33,6 +33,9 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=EDY_RDP_PYTHON=/usr/bin/python3
 Environment=EDY_RDP_GUACD=127.0.0.1:4822
 Environment=EDY_RDP_ADMIN_GROUP=sudo
+# Additional gate for mirroring a DIFFERENT signed-in user's console session
+# (admin-only gating above is unchanged). Empty = this extra gate is off.
+Environment=EDY_RDP_SHADOW_GROUP=rdp-shadow
 Environment=EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
 Environment=EDY_RDP_LOG_LEVEL=INFO
 Environment="EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391"
@@ -64,6 +67,7 @@ EnvironmentFile=-@INSTALL_PATH@/venv.env
 # it is a comma-list, not word-split flags.
 ExecStart=/usr/bin/env ${EDY_RDP_PYTHON} @LIBEXEC@/edy_rdp_relay.py \
     --guacd ${EDY_RDP_GUACD} --admin-group ${EDY_RDP_ADMIN_GROUP} \
+    --shadow-group ${EDY_RDP_SHADOW_GROUP} \
     --state-file ${EDY_RDP_STATE_FILE} \
     $EDY_RDP_ALLOW_ARGS \
     --remote-allow ${EDY_RDP_REMOTE_ALLOW} \

@@ -194,6 +194,28 @@ sudo systemctl restart edy-rdp-relay.service
 ```
 Empty = deny all; `any` = allow any host (use with care). Only IPv4 targets are accepted.
 
+**Shadow-group gate for the console scenario.** Being a Cockpit administrator decides
+whether you may use the console mirror at all (I4); it does not by itself decide whether
+you may point it at a *different* signed-in user's desktop rather than an empty seat or
+your own. When a different user is currently signed in at the physical seat, the relay
+additionally requires membership in a unix group:
+
+```bash
+# in /opt/cockpit-guac-rdp/.env
+EDY_RDP_SHADOW_GROUP=rdp-shadow
+```
+```bash
+sudo groupadd rdp-shadow
+sudo usermod -aG rdp-shadow <your account>
+sudo systemctl restart edy-rdp-relay.service
+```
+This group is **not created for you** — an operator must create it and add members before
+anyone can shadow a different user's console session; a nonexistent or empty group means
+the gate refuses everyone (fail closed), which is the safe default. Set
+`EDY_RDP_SHADOW_GROUP=` (empty) to turn this extra check off entirely and revert to
+admin-only console gating. Does not apply when nobody is signed in at the seat, or when
+the signed-in user is the one requesting the mirror.
+
 **Self-update.** The relay checks `EDY_RDP_UPDATE_REPO` (a GitHub `owner/repo`,
 default this project's own) for a newer tagged Release. Checking and applying are
 available to any Cockpit administrator by default (no separate enable flag) — see
