@@ -799,3 +799,125 @@ here, and fixing it needs its own investigation into how NumLock state interacts
 choice for this specific ambiguity. **Deferred rather than rushed into the I45 fix** — recorded here so
 it isn't lost. Reproduce with `x11vnc -debug_keyboard`: send keysym `0xFFAE` (`KP_Decimal`) and confirm
 which keycode gets XTestFakeKeyEvent'd.
+
+### I47 · A pop-out could only ever show the one scenario it opened with, with no way to recover · Sev M · FIXED (1.5.0.20260929)
+(Also folds in two related UX asks delivered in the same pass: the same "Session…" modal now declutters
+the main Connect panel's bar too, and its tabs reflect in the URL.)
+Reported: after a reboot with nobody logged into the physical seat, Pop-out (hardcoded to the `console`
+mirror, which needs an active per-user desktop session on :3389) can't connect until someone signs in via
+the GDM greeter through the main tab — expected, since nothing is listening on the per-user :3389 grd
+service before a login. Once logged in, Pop-out connects fine. But if the connection carrying that
+greeter sign-in is later disconnected from the main tab, the Pop-out's console mirror drops too, and
+Pop-out had no way to reconnect or switch scenario short of closing the window (it auto-connects exactly
+once, to whatever `enterSeatMode()`/`enterMonitorMode()` hardcoded, and exposed only a small fixed subset
+of controls — a monitor picker and Sound).
+
+The exact reason the console mirror drops when the greeter connection disconnects was not nailed down
+live in this pass — worth confirming against this project's own documented grd/lock-screen interaction:
+a disconnected RDSTLS/greeter-handover connection plausibly locks the physical seat, and a locked seat is
+already known here to make grd kill any active screencast (I39a: "the active grd screencast" is
+terminated and new ones refused while locked). But the practical gap is the same regardless of the exact
+mechanism: **a pop-out is a genuinely separate page load** (`window.open` to the same URL with a
+different hash — not a shared JS context with the opener), so it was never actually tied to the opener
+tab in the code, only by having no UI to exploit that independence.
+
+**Fix (`guac-rdp.js`, `buildSessionCard()` + `addSessionButton()`):** both pop-out types (`#seat` /
+`#monitor`) AND the main Connect panel (`enterConnectMode()`) now get a "Session…" button opening a modal
+— a native `<dialog>`, since this project has no modal component of its own and `<dialog>`/`showModal()`
+is the universal one (free backdrop dimming, Escape-to-close, focus handling) — with the full connect
+controls: Session target (+ host/port for Remote/VNC), Sign-in + credentials, Resolution, Scale,
+Clipboard, Sound, and Connect/Disconnect — by reparenting the EXISTING elements (same ids, same event
+listeners; nothing duplicated or rewired). A pop-out can now try `console`, fail pre-login, switch to
+`greeter` to reach the GDM screen, and switch back to `console` after login — entirely on its own, no
+opener tab required. (First shipped as a dropdown anchored to the button; changed to a modal per a
+follow-up request — a `<dialog>` is simpler than the hand-rolled backdrop-div + outside-click-listener
+the dropdown needed, and was caught losing a `bar.appendChild(b)` during that rewrite by the same jsdom
+smoke test before it ever reached a browser.) The main Connect panel's tabs also now reflect in the URL
+as `tab=<name>` (same `replaceState` pattern as `URL_CONTROLS`), restored on load.
+
+**Live user testing then caught a real gap in the tab/URL sync that jsdom alone could not:** the URL
+appeared to update by every internal check, but the browser's VISIBLE address bar stayed on
+`tab=connect` regardless of which tab was clicked. Root cause: `history.replaceState()` changes this
+document's own `location.hash` but does NOT fire a `hashchange` event — only a real hash-navigation
+does. Decompiling the installed `/usr/share/cockpit/base1/cockpit.js` confirmed Cockpit's shell-sync
+(mirroring the embedded page's location into the actual browser address bar, over the iframe<->parent
+`cockpit1` transport) runs entirely off a `window.addEventListener("hashchange", ...)` listener — with
+no event, the shell never learns anything changed. New shared `writeHash()` keeps `replaceState` (still
+no history-spam per click) and additionally dispatches a `hashchange` event by hand; both `selectTab()`
+and the pre-existing `saveControls()` (Session/Resolution/Scale/Clipboard/Sound persistence) now go
+through it — `saveControls()` had the exact same silent gap since before this release, just never
+reported, since apparently nobody had watched the actual address bar while changing those controls.
+
+Verified via a DOM-level smoke test (jsdom, ad hoc, not part of the repo's Playwright suite; jsdom has no
+`HTMLDialogElement.showModal`/`close` at all, stubbed to toggle the `open` attribute) that the dialog is
+built correctly, opens/closes via the button/close-button/backdrop-click idiom, the pre-existing
+`refreshUi()` show/hide logic still works on the reparented fields, and the tab/URL sync round-trips AND
+fires `hashchange` (simulating the listener Cockpit's shell registers) — for all three modes; not
+live-tested against a real Cockpit/relay session in this pass.
+
+### I48 · Console (mirror) connect with nobody signed in on the seat dead-ended instead of offering the greeter · Sev M · FIXED (1.6.0.20260929)
+Reported as the first hop of the I47 scenario: on a freshly booted host with no local login, connecting
+to the Console mirror (from the main panel, the Pop-out's auto-connect, or the pop-out's monitor-picker
+reconnect) failed opaquely — a bridge transport error, or nothing listening on the per-user :3389 grd at
+all. That is inherent: `mirror-primary` streams the seat's per-user desktop, and pre-login there is no
+desktop; the GDM greeter (a session of its own) is the only thing that can render before someone signs
+in. 1.5.0 made recovery *possible* by hand (open Session…, pick Login screen, sign in, switch back) but
+the user still had to diagnose the dead end themselves first.
+
+This is a **different case from the locked seat** (I38/I39, `LOCKED_SEAT_RE`): there a session exists
+and is worth resuming, which is exactly why that path deliberately does NOT auto-redirect to the greeter
+(a greeter login starts a NEW session and cannot attach to the locked one — it resets the login rather
+than resuming it). With zero local logins there is no session to preserve, so switching loses nothing.
+That handling is untouched.
+
+**Fix (`guac-rdp.js`, `resolveConsoleFallback()` + `showToast()`; `#toast` in `guac-rdp.css`):**
+`connect()` now resolves the effective scenario BEFORE dialling out. For `console` only, it asks the
+relay's existing read-only `deskui-status` control op (the same one the Desktop UI tab renders; any
+authenticated caller, not admin-gated) for `active_graphical_sessions` — computed server-side as
+"active, graphical, seated, non-greeter sessions right now", so `0` means nobody is locally logged in.
+On an explicit `0` it flips the Session selector to `greeter`, runs `refreshUi()` so the dropdown and
+hint reflect it, shows a transient toast ("No one is signed in on the physical console — opening the
+sign-in screen instead.") and connects to the greeter — a seamless fail-over, not a message-and-stop.
+Anything else (a count > 0, a control error, a channel that will not open, a missing field, or no answer
+within 4s) proceeds with `console` exactly as before: the probe **fails open**, like the relay's own
+`physical_session_locked()`, and can never block a normal console connect. Scoped strictly to `console`
+(`virtual` etc. never probe); every caller funnels through `connect()` so all three entry points get it
+without special-casing; no re-entry (the resolved key goes to the split-out `connectAs()`, which never
+calls `connect()`). No relay code changed. The toast is the project's first transient notification
+(there was only the persistent `#status` line): one lazily created `#toast` div, `role="status"`/
+`aria-live="polite"`, `pointer-events:none`, bottom-centre, same `--panel`/`--ink`/`--line` surface as
+the Session… card, fade in/out, self-dismissed after 5s. Known and accepted: like `#status` it sits
+outside the Session… `<dialog>`, so while that modal is open (browser top layer) it renders dimmed
+behind the `::backdrop` — consistent with `#status` today, not worth a second modal.
+
+Verified via a DOM-level smoke test (jsdom, ad hoc, scratch project, not a repo dependency — same
+approach as I47) driving the real `index.html` + `guac-rdp.js` through `connect()` with `cockpit` and
+`Guacamole` stubbed, asserting on the `scenario=` marker in the wire-level `connect` instruction: 0
+sessions → `greeter` + toast; 1 session → `console`, no toast; control reject / synchronous throw /
+no answer (timeout) → `console`; `virtual`/`greeter` never probe; the `#seat` pop-out auto-connect
+takes the same path; toast auto-hides and a second toast resets its clock. Not live-tested against a
+real Cockpit/relay session in this pass — confirm on edt1 against a freshly booted seat.
+
+**Follow-up (1.6.1.20260929), found by a multi-agent adversarial review before this ever reached
+edt1:** the "known and accepted, dimmed behind the `::backdrop`" call above understated the actual
+problem. A native `<dialog>` opened with `showModal()` makes everything OUTSIDE it *inert* per the
+HTML spec — removed from the accessibility tree, not merely dimmed — and since Connect lives inside
+the Session… card, the ordinary path (open Session…, pick Console, click Connect) left the toast
+silently unannounced to assistive tech for the exact message this feature exists to convey.
+Two further, independent bugs in the same function: the 5s auto-hide only removed the `.show` CSS
+class, so `opacity:0` alone left the stale text permanently discoverable in the accessibility tree
+(only `display`/`visibility`/`hidden`/`aria-hidden` actually remove a node from it); and the very
+first toast of a page load skipped its fade-in entirely, because the element's initial (hidden) style
+was never committed to a frame before the `.show` class was applied in the same synchronous call, so
+the browser collapsed both changes into one. Fixed: `showToast()` now reparents `#toast` into
+whichever `<dialog>` is currently open (or back to `<body>` once none is — `position:fixed` keeps it
+viewport-anchored regardless of DOM parent), so it renders above the `::backdrop` and stays reachable
+by assistive tech instead of inert; toggles `aria-hidden` on hide/show so the node actually leaves and
+rejoins the accessibility tree; and forces a style flush (`el.offsetWidth`) right after the element's
+first creation so the very first toast fades in like every later one. All three were confirmed with a
+concrete reproduction (one against a real headless Chromium accessibility-tree dump) before being
+accepted as real, and eight other candidate findings from the same review — including a claimed
+relay-side admin-gate gap on the `greeter` scenario — were independently checked and refuted; see the
+review's own reasoning in the corresponding commit for why. Re-verified with an extended jsdom check:
+reparents into an open dialog and back on close, `aria-hidden` clears on show and is set on hide, and
+the forced-reflow line runs without throwing.

@@ -425,18 +425,77 @@
         wrap.appendChild(b); bar.appendChild(wrap);
         return b;
     }
+    // ---- "Session…" modal -------------------------------------------------------
+    // Packs the full connect controls (Session target, host/port, Sign-in +
+    // credentials, Resolution, Scale, Clipboard, Sound, Connect/Disconnect) into
+    // a modal dialog opened by a "Session…" button -- used on the main Connect
+    // panel AND both pop-out types, so a pop-out (console mirror or virtual
+    // monitor) can pick a DIFFERENT scenario and (re)connect entirely on its
+    // own. Without this, a pop-out could only ever show the one scenario it
+    // auto-connected to on open, with no way to recover if that session ended
+    // except closing the window -- and since a pop-out is a fresh, independent
+    // page load (window.open to the same URL, not a shared JS context with the
+    // opener), it was never actually TIED to the opener tab except by this
+    // missing UI. Every field here KEEPS its existing id and event listeners
+    // (target/authmode change -> refreshUi; go/stop clicks ->
+    // connect()/teardown(); URL_CONTROLS -> saveControls()) -- this only
+    // reparents the existing DOM nodes, it does not rewire anything.
+    // A native <dialog> IS the universal modal wrapper here (checked: this
+    // project has no modal/overlay component of its own -- only ad hoc
+    // hidden/shown fields like #deskui-confirm-wrap). showModal()/close() give
+    // us backdrop dimming (::backdrop, styled in CSS), Escape-to-close, and
+    // focus handling for free, so there is no hand-rolled backdrop element,
+    // keydown listener, or open/closed class to maintain.
+    function buildSessionCard() {
+        var card = document.createElement("dialog"); card.id = "sessioncard";
+        var head = document.createElement("div"); head.className = "row";
+        var title = document.createElement("strong"); title.textContent = "Session";
+        title.style.flex = "1";
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button"; closeBtn.id = "sessionclose"; closeBtn.className = "sec";
+        closeBtn.textContent = "✕"; closeBtn.title = "Close";
+        closeBtn.addEventListener("click", function () { card.close(); });
+        head.appendChild(title); head.appendChild(closeBtn);
+        card.appendChild(head);
+        [ "target", "hostwrap", "portwrap", "authwrap", "credwrap", "passwrap",
+          "resolution", "scale", "opt-clipboard", "opt-audio" ].forEach(function (id) {
+            moveField(card, id);
+        });
+        var btns = document.createElement("div"); btns.className = "row";
+        btns.appendChild($("go")); btns.appendChild($("stop"));
+        card.appendChild(btns);
+        // Clicking the backdrop (a real <dialog>'s ::backdrop, which showModal()
+        // creates): a click that lands on the <dialog> element itself rather
+        // than any of its content is exactly that -- the standard idiom, since
+        // ::backdrop isn't a separately targetable node.
+        card.addEventListener("click", function (e) { if (e.target === card) card.close(); });
+        document.body.appendChild(card);
+        return card;
+    }
+    function addSessionButton(bar, card) {
+        var b = document.createElement("button");
+        b.id = "sessionbtn"; b.type = "button"; b.className = "sec";
+        b.textContent = "Session…";
+        b.title = "Choose a different session (Isolated / Console / Virtual monitor / "
+                + "a remote host…), sign in, or change Resolution/Scale/Clipboard/Sound "
+                + "— all without needing the tab this window was opened from.";
+        b.addEventListener("click", function () { card.showModal(); });
+        bar.appendChild(b);
+        return b;
+    }
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
         document.title = "Virtual Monitor" + (m ? " " + m[1] : "") + " — " + location.hostname;
         window.addEventListener("pagehide", monitorTeardown);
         window.addEventListener("beforeunload", monitorTeardown);
-        // top control strip: Resolution + Sound (grd honours the resolution for a
-        // virtual monitor). Moved out of the hidden main bar.
+        // top control strip, moved out of the hidden main bar. The full connect
+        // controls (Resolution/Scale/Sound included) live in the "Session…" card
+        // so this pop-out can switch scenario and reconnect on its own.
         var bar = document.createElement("div"); bar.id = "seatbar";
         document.body.appendChild(bar);
-        moveField(bar, "resolution");
-        moveField(bar, "opt-audio");
+        var card = buildSessionCard();
+        addSessionButton(bar, card);
         addFullscreenButton(bar);
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
@@ -502,7 +561,13 @@
             if (client) { setStatus("Switching monitor…"); teardown(true); window.setTimeout(function () { connect("console"); }, 80); }
         });
         populateSeatMonitors(sel);
-        moveField(bar, "opt-audio");   // Sound control (resolution N/A: mirror is native)
+        // Full connect controls (Session/Sign-in/Resolution/Scale/Clipboard/Sound
+        // + Connect/Disconnect) live in the "Session…" card -- see buildSessionCard
+        // -- so this pop-out can pick a different scenario (e.g. Isolated, to reach
+        // the GDM greeter, which the console mirror cannot show pre-login) and
+        // reconnect without needing the tab it was opened from.
+        var card = buildSessionCard();
+        addSessionButton(bar, card);
         addFullscreenButton(bar);
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
@@ -512,6 +577,24 @@
         $("target").value = "console";
         refreshUi();
         connect("console");
+    }
+
+    // ---- the main Connect panel -------------------------------------------------
+    // Same consolidation as the pop-outs: the full connect controls move into the
+    // "Session…" modal, leaving the bar to just Session… + the quick-access
+    // action buttons (Num Lock, Add Monitor, Pop-out, Send/Receive clip).
+    function enterConnectMode() {
+        var bar = document.querySelector("#panel-connect .bar");
+        var card = buildSessionCard();
+        var sessionBtn = addSessionButton(bar, card);
+        bar.insertBefore(sessionBtn, bar.firstChild);   // the primary entry point now; lead with it
+        addClipboardButtons(bar);
+        // Restore the active tab from the URL (?tab=sessions etc.), same as a
+        // shared/bookmarked link; default to Connect. Skipped by the pop-out
+        // modes entirely -- they never show tabs and enterConnectMode() only
+        // runs on the plain page.
+        var wantTab = hashParam("tab");
+        selectTab("tab-" + (TAB_NAMES.indexOf(wantTab) >= 0 ? wantTab : "connect"));
     }
 
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
@@ -592,6 +675,45 @@
     }
 
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
+
+    // A transient notice for something the panel did ON ITS OWN (e.g. quietly
+    // switching scenario), as distinct from setStatus(), the persistent
+    // connection-state line: it fades out by itself and takes no pointer events,
+    // so it can neither be missed as "the current state" nor get in the way of
+    // a click. A second toast while one is showing restarts the clock.
+    var TOAST_MS = 5000, toastTimer = null;
+    function showToast(msg, kind) {
+        var el = $("toast");
+        if (!el) {
+            el = document.createElement("div"); el.id = "toast";
+            el.setAttribute("role", "status"); el.setAttribute("aria-live", "polite");
+            document.body.appendChild(el);
+            void el.offsetWidth;   // commit the initial (hidden) style BEFORE .show is ever
+                                    // added, so the very first toast of a page load actually
+                                    // transitions instead of just appearing at full opacity.
+        }
+        // A native <dialog> opened with showModal() (the Session… card) makes
+        // everything OUTSIDE it inert -- removed from the accessibility tree, not
+        // merely dimmed -- so a toast left parented to <body> while that dialog is
+        // open would be both visually stuck under the backdrop AND silently
+        // unannounced to assistive tech, exactly when this feature most needs to
+        // say why the scenario changed. Reparent into whichever dialog is
+        // currently open (or back to <body> once none is) so it stays live either
+        // way -- position:fixed keeps it viewport-anchored regardless of parent.
+        var host = document.querySelector("dialog[open]") || document.body;
+        if (el.parentNode !== host) host.appendChild(el);
+        el.removeAttribute("aria-hidden");
+        el.textContent = msg;
+        el.className = (kind ? kind + " " : "") + "show";
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () {
+            toastTimer = null;
+            el.classList.remove("show");
+            // opacity:0 alone leaves the node (and its stale text) in the
+            // accessibility tree indefinitely; aria-hidden actually removes it.
+            el.setAttribute("aria-hidden", "true");
+        }, TOAST_MS);
+    }
 
     // Unlocking the seat is the ONLY way to resume the session the user left.
     // The greeter starts a new one; Wayland VNC and Isolated are separate
@@ -821,11 +943,39 @@
         }).catch(function () { return { token: null, admin: false }; });
     }
 
+    // Pre-login there is no desktop for grd to mirror, so the console scenario
+    // can only fail until someone signs in on the physical seat -- and the
+    // greeter is the one thing that CAN render before that. When nobody is
+    // logged in locally at all (zero active graphical seat sessions) there is
+    // no session to preserve, so switching to the greeter loses nothing. This
+    // is deliberately NOT the LOCKED_SEAT_RE case: a locked seat still holds a
+    // session worth resuming, and that path stays a manual choice. Resolves to
+    // the key to actually connect. Best-effort and FAIL-OPEN, like the relay's
+    // physical_session_locked(): a probe error, non-answer or timeout means
+    // "connect to console as asked" -- it never blocks a normal connect.
+    var CONSOLE_PROBE_MS = 4000;
+    function resolveConsoleFallback(key) {
+        if (key !== "console") return cockpit.resolve(key);
+        setStatus("Checking who is signed in on the physical console…");
+        var timeout = new Promise(function (resolve) { setTimeout(function () { resolve(null); }, CONSOLE_PROBE_MS); });
+        return Promise.race([controlRequest({ op: "deskui-status" }), timeout])
+            .then(function (r) {
+                if (!r || !r.ok || r.active_graphical_sessions !== 0) return key;
+                $("target").value = "greeter";
+                refreshUi();
+                showToast("No one is signed in on the physical console — opening the sign-in screen instead.");
+                return "greeter";
+            })
+            .catch(function () { return key; });
+    }
+
     function connect(forceKey) {
-        var key = forceKey || $("target").value, t = TARGETS[key];
-        // A user-initiated connect re-arms the one-shot locked-seat fallback; the
-        // fallback itself passes forceKey, so it can never re-arm and loop.
         $("go").disabled = true;
+        resolveConsoleFallback(forceKey || $("target").value).then(connectAs);
+    }
+
+    function connectAs(key) {
+        var t = TARGETS[key];
         // Remote is admin-gated only if the server sets EDY_RDP_REMOTE_ADMIN_ONLY;
         // prove admin when the Cockpit session is already elevated (no polkit prompt
         // for non-admins), otherwise register a plain token and let the relay decide.
@@ -1025,6 +1175,7 @@
             if (s === 3) setStatus(
                 key === "isolated" ? "Connected to your isolated desktop."
                 : key === "console" ? "Connected to the physical console."
+                : key === "greeter" ? "Connected to the sign-in screen."
                 : key === "vnc"     ? ("Connected to VNC at " + $("host").value.trim() + ".")
             : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
                 : "Connected to your virtual monitor.", "ok");
@@ -1552,15 +1703,29 @@
         });
     }
 
+    // Tab names as they appear in the URL hash (?tab=connect etc.) -- the main
+    // page only; pop-outs never show tabs at all (html.monitor .tabs is
+    // display:none), so this never runs there.
+    var TAB_NAMES = ["connect", "sessions", "deskui", "selftests"];
     function selectTab(id) {
-        ["connect", "sessions", "deskui", "selftests"].forEach(function (n) {
+        var name = id.replace(/^tab-/, "");
+        TAB_NAMES.forEach(function (n) {
             var t = $("tab-" + n), pan = $("panel-" + n);
             if (!t || !pan) return;
-            var on = ("tab-" + n) === id;
+            var on = n === name;
             t.classList.toggle("active", on); pan.hidden = !on;
         });
         if (id === "tab-sessions") renderSessions();
         if (id === "tab-deskui") renderDeskUi();
+        // Reflect the active tab in the URL, the same way URL_CONTROLS persists
+        // Session/Resolution/etc: rewritten via writeHash() (replaceState, so no
+        // navigation/history spam) so the tab survives a refresh and is
+        // bookmarkable/shareable, preserving any other hash segment (mode
+        // tokens, controls).
+        var keep = [];
+        _hashSegments().forEach(function (seg) { if (_segKey(seg) !== "tab") keep.push(seg); });
+        keep.push("tab=" + name);
+        writeHash("#" + keep.join("&"));
     }
 
     // ---- toggle/selector persistence -----------------------------------------
@@ -1582,6 +1747,26 @@
         { key: "audio",  id: "opt-audio",     kind: "check"  }
     ];
     var CONTROLS_LS_KEY = "edy-rdp-controls";
+    // history.replaceState() changes location.hash but does NOT fire a
+    // "hashchange" event -- only a real hash-navigation does (a bare
+    // `location.hash = x` assignment, a same-page anchor click, back/forward).
+    // Cockpit's OWN shell-sync depends entirely on that event: decompiling the
+    // installed /usr/share/cockpit/base1/cockpit.js shows its `location`
+    // getter/setter and a `window.addEventListener("hashchange", ...)` handler
+    // that calls `cockpit.hint("location", {hash})` to tell the shell (over
+    // the iframe<->parent "cockpit1" transport) what the embedded page's
+    // current location is, which is what makes the shell mirror it into the
+    // VISIBLE browser address bar. Without firing that event ourselves,
+    // replaceState silently updates this document's own location.hash while
+    // the address bar the user actually sees never moves -- exactly what was
+    // reported ("the url stays on tab=connect"). replaceState is kept (a bare
+    // assignment would push a new history entry per change, the "history
+    // spam" the comment below used to warn against); we just also dispatch
+    // the event by hand so Cockpit's listener notices.
+    function writeHash(newHash) {
+        try { history.replaceState(history.state, "", newHash); } catch (e) { /* ignore */ }
+        try { window.dispatchEvent(new Event("hashchange")); } catch (e) { /* ignore */ }
+    }
     function _hashSegments() {
         var h = location.hash.replace(/^#/, "");
         return h ? h.split("&") : [];
@@ -1630,9 +1815,9 @@
         if ($("scale")) scaleMode = $("scale").value || "fit";
         syncPassthroughFlags();
     }
-    // Persist controls on change: rewrite the hash (preserving any mode token) via
-    // replaceState -- no reload, no history spam, no Cockpit-shell navigation side
-    // effect -- and snapshot to localStorage.
+    // Persist controls on change: rewrite the hash (preserving any mode token)
+    // via writeHash() -- no reload, no history spam, but the Cockpit shell
+    // DOES see it (see writeHash's comment) -- and snapshot to localStorage.
     function saveControls() {
         var keep = [], controlKeys = URL_CONTROLS.map(function (c) { return c.key; }), vals = {};
         _hashSegments().forEach(function (seg) {
@@ -1643,8 +1828,7 @@
             vals[c.key] = v;
             keep.push(c.key + "=" + encodeURIComponent(v));
         });
-        var newHash = "#" + keep.join("&");
-        try { history.replaceState(history.state, "", newHash); } catch (e) { /* ignore */ }
+        writeHash("#" + keep.join("&"));
         try { localStorage.setItem(CONTROLS_LS_KEY, JSON.stringify(vals)); } catch (e) { /* ignore */ }
     }
 
@@ -1737,6 +1921,6 @@
         // #seat = the physical-seat mirror with a monitor picker (disconnect only).
         if (MONITOR_MODE) enterMonitorMode();
         else if (SEAT_MODE) enterSeatMode();
-        else addClipboardButtons(document.querySelector("#panel-connect .bar"));
+        else enterConnectMode();
     });
 })();
