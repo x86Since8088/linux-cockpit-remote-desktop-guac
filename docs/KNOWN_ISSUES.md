@@ -801,6 +801,8 @@ it isn't lost. Reproduce with `x11vnc -debug_keyboard`: send keysym `0xFFAE` (`K
 which keycode gets XTestFakeKeyEvent'd.
 
 ### I47 · A pop-out could only ever show the one scenario it opened with, with no way to recover · Sev M · FIXED (1.5.0.20260929)
+(Also folds in two related UX asks delivered in the same pass: the same "Session…" modal now declutters
+the main Connect panel's bar too, and its tabs reflect in the URL.)
 Reported: after a reboot with nobody logged into the physical seat, Pop-out (hardcoded to the `console`
 mirror, which needs an active per-user desktop session on :3389) can't connect until someone signs in via
 the GDM greeter through the main tab — expected, since nothing is listening on the per-user :3389 grd
@@ -820,11 +822,20 @@ different hash — not a shared JS context with the opener), so it was never act
 tab in the code, only by having no UI to exploit that independence.
 
 **Fix (`guac-rdp.js`, `buildSessionCard()` + `addSessionButton()`):** both pop-out types (`#seat` /
-`#monitor`) now get a "Session…" button opening a floating card with the full connect controls — Session
-target (+ host/port for Remote/VNC), Sign-in + credentials, Resolution, Scale, Clipboard, Sound, and
-Connect/Disconnect — by reparenting the EXISTING elements (same ids, same event listeners; nothing
-duplicated or rewired). A pop-out can now try `console`, fail pre-login, switch to `greeter` to reach the
-GDM screen, and switch back to `console` after login — entirely on its own, no opener tab required.
-Verified via a DOM-level smoke test (jsdom, ad hoc, not part of the repo's Playwright suite) that the card
-is built correctly and the pre-existing `refreshUi()` show/hide logic still works on the reparented
-fields, for both pop-out modes; not live-tested against a real Cockpit/relay session.
+`#monitor`) AND the main Connect panel (`enterConnectMode()`) now get a "Session…" button opening a modal
+— a native `<dialog>`, since this project has no modal component of its own and `<dialog>`/`showModal()`
+is the universal one (free backdrop dimming, Escape-to-close, focus handling) — with the full connect
+controls: Session target (+ host/port for Remote/VNC), Sign-in + credentials, Resolution, Scale,
+Clipboard, Sound, and Connect/Disconnect — by reparenting the EXISTING elements (same ids, same event
+listeners; nothing duplicated or rewired). A pop-out can now try `console`, fail pre-login, switch to
+`greeter` to reach the GDM screen, and switch back to `console` after login — entirely on its own, no
+opener tab required. (First shipped as a dropdown anchored to the button; changed to a modal per a
+follow-up request — a `<dialog>` is simpler than the hand-rolled backdrop-div + outside-click-listener
+the dropdown needed, and was caught losing a `bar.appendChild(b)` during that rewrite by the same jsdom
+smoke test before it ever reached a browser.) The main Connect panel's tabs also now reflect in the URL
+as `tab=<name>` (same `replaceState` pattern as `URL_CONTROLS`), restored on load.
+Verified via a DOM-level smoke test (jsdom, ad hoc, not part of the repo's Playwright suite; jsdom has no
+`HTMLDialogElement.showModal`/`close` at all, stubbed to toggle the `open` attribute) that the dialog is
+built correctly, opens/closes via the button/close-button/backdrop-click idiom, the pre-existing
+`refreshUi()` show/hide logic still works on the reparented fields, and the tab/URL sync round-trips —
+for all three modes; not live-tested against a real Cockpit/relay session in this pass.

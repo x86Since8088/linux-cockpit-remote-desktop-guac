@@ -61,28 +61,31 @@ html.monitor #seatbar label { color:#fff; font-weight:400; font-size:.8rem; }
 html.monitor #seatbar select, html.monitor #seatbar input { font:inherit; padding:.05rem .3rem; }
 html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-space:nowrap; }
 
-/* "Session…" card (#seat / #monitor pop-outs): a drop-down panel holding the
-   full connect controls, toggled by the seatbar's "Session…" button -- see
-   buildSessionCard()/addSessionButton(). Collapsed by default so it never
-   covers the mirror/monitor underneath. top/right are set inline by
-   positionCard() (anchors the card's top-right corner to the button's
-   bottom-right corner, like any other dropdown menu -- the button can be
-   anywhere along the seatbar, which scrolls horizontally); the values below
-   are only a fallback for the instant before that JS runs. */
-#sessioncard { display:none; }
-html.monitor #sessioncard.open {
-  display:flex; flex-direction:column; gap:.6rem;
-  position:fixed; top:calc(var(--seatbar-h) + .4rem); right:.6rem; z-index:21;
+/* "Session…" modal: the full connect controls in a native <dialog> (see
+   buildSessionCard()/addSessionButton() -- this project has no modal
+   component of its own, and <dialog> IS the universal one: showModal() gives
+   free backdrop dimming, Escape-to-close and focus handling, styled here via
+   ::backdrop rather than a hand-rolled overlay element). Used on the main
+   Connect panel AND both pop-out types (#seat/#monitor). The browser centers
+   a <dialog> by default; only the look needs styling. */
+/* [open] (set automatically by showModal()/close()), not a bare #sessioncard
+   rule: an unconditional `display:flex` here is an AUTHOR rule and would beat
+   the UA stylesheet's `dialog:not([open]) { display:none }` regardless of our
+   lower specificity (author origin always wins over user-agent origin,
+   independent of specificity), leaving the dialog visible even when closed. */
+#sessioncard[open] { display:flex; flex-direction:column; gap:.6rem;
   background:var(--panel); color:var(--ink); border:1px solid var(--line);
-  border-radius:4px; box-shadow:0 4px 16px rgba(0,0,0,.4);
-  padding:.8rem 1rem; width:16rem; max-height:calc(100vh - var(--seatbar-h) - 1.4rem);
-  overflow:auto;
+  border-radius:6px; box-shadow:0 8px 32px rgba(0,0,0,.5);
+  padding:1rem 1.2rem; width:20rem; max-width:calc(100vw - 2rem);
+  max-height:calc(100vh - 2rem);
 }
-html.monitor #sessioncard .f { flex-direction:column; align-items:stretch; }
-html.monitor #sessioncard label { color:var(--muted); font-weight:600; font-size:.75rem; }
-html.monitor #sessioncard select, html.monitor #sessioncard input { font:inherit; }
-html.monitor #sessioncard .row { display:flex; gap:.5rem; }
-html.monitor #sessioncard .row button { flex:1; }
+#sessioncard::backdrop { background:rgba(0,0,0,.55); }
+#sessioncard .f { flex-direction:column; align-items:stretch; }
+#sessioncard label { color:var(--muted); font-weight:600; font-size:.75rem; }
+#sessioncard select, #sessioncard input { font:inherit; }
+#sessioncard .row { display:flex; gap:.5rem; align-items:center; }
+#sessioncard .row button { flex:1; }
+#sessioncard #sessionclose { flex:none; padding:.15rem .5rem; }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }

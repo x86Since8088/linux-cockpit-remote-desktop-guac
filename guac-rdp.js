@@ -425,22 +425,38 @@
         wrap.appendChild(b); bar.appendChild(wrap);
         return b;
     }
-    // ---- "Session…" card (pop-out windows only) --------------------------------
+    // ---- "Session…" modal -------------------------------------------------------
     // Packs the full connect controls (Session target, host/port, Sign-in +
     // credentials, Resolution, Scale, Clipboard, Sound, Connect/Disconnect) into
-    // a floating card toggled by a button in the seatbar -- so a pop-out (console
-    // mirror or virtual monitor) can pick a DIFFERENT scenario and (re)connect
-    // entirely on its own. Without this, a pop-out could only ever show the one
-    // scenario it auto-connected to on open, with no way to recover if that
-    // session ended except closing the window -- and since a pop-out is a fresh,
-    // independent page load (window.open to the same URL, not a shared JS
-    // context with the opener), it was never actually TIED to the opener tab
-    // except by this missing UI. Every field here KEEPS its existing id and
-    // event listeners (target/authmode change -> refreshUi; go/stop clicks ->
+    // a modal dialog opened by a "Session…" button -- used on the main Connect
+    // panel AND both pop-out types, so a pop-out (console mirror or virtual
+    // monitor) can pick a DIFFERENT scenario and (re)connect entirely on its
+    // own. Without this, a pop-out could only ever show the one scenario it
+    // auto-connected to on open, with no way to recover if that session ended
+    // except closing the window -- and since a pop-out is a fresh, independent
+    // page load (window.open to the same URL, not a shared JS context with the
+    // opener), it was never actually TIED to the opener tab except by this
+    // missing UI. Every field here KEEPS its existing id and event listeners
+    // (target/authmode change -> refreshUi; go/stop clicks ->
     // connect()/teardown(); URL_CONTROLS -> saveControls()) -- this only
     // reparents the existing DOM nodes, it does not rewire anything.
+    // A native <dialog> IS the universal modal wrapper here (checked: this
+    // project has no modal/overlay component of its own -- only ad hoc
+    // hidden/shown fields like #deskui-confirm-wrap). showModal()/close() give
+    // us backdrop dimming (::backdrop, styled in CSS), Escape-to-close, and
+    // focus handling for free, so there is no hand-rolled backdrop element,
+    // keydown listener, or open/closed class to maintain.
     function buildSessionCard() {
-        var card = document.createElement("div"); card.id = "sessioncard";
+        var card = document.createElement("dialog"); card.id = "sessioncard";
+        var head = document.createElement("div"); head.className = "row";
+        var title = document.createElement("strong"); title.textContent = "Session";
+        title.style.flex = "1";
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button"; closeBtn.id = "sessionclose"; closeBtn.className = "sec";
+        closeBtn.textContent = "✕"; closeBtn.title = "Close";
+        closeBtn.addEventListener("click", function () { card.close(); });
+        head.appendChild(title); head.appendChild(closeBtn);
+        card.appendChild(head);
         [ "target", "hostwrap", "portwrap", "authwrap", "credwrap", "passwrap",
           "resolution", "scale", "opt-clipboard", "opt-audio" ].forEach(function (id) {
             moveField(card, id);
@@ -448,51 +464,22 @@
         var btns = document.createElement("div"); btns.className = "row";
         btns.appendChild($("go")); btns.appendChild($("stop"));
         card.appendChild(btns);
+        // Clicking the backdrop (a real <dialog>'s ::backdrop, which showModal()
+        // creates): a click that lands on the <dialog> element itself rather
+        // than any of its content is exactly that -- the standard idiom, since
+        // ::backdrop isn't a separately targetable node.
+        card.addEventListener("click", function (e) { if (e.target === card) card.close(); });
         document.body.appendChild(card);
         return card;
     }
     function addSessionButton(bar, card) {
         var b = document.createElement("button");
-        b.id = "sessionbtn"; b.type = "button"; b.className = "sec toggle";
+        b.id = "sessionbtn"; b.type = "button"; b.className = "sec";
         b.textContent = "Session…";
         b.title = "Choose a different session (Isolated / Console / Virtual monitor / "
                 + "a remote host…), sign in, or change Resolution/Scale/Clipboard/Sound "
                 + "— all without needing the tab this window was opened from.";
-        b.setAttribute("aria-pressed", "false");
-        // Anchor the card's top-right corner to the button's bottom-right corner
-        // (a normal dropdown-menu placement) instead of a fixed viewport corner --
-        // the button can be anywhere along the seatbar, which scrolls
-        // horizontally. Recomputed on every open (not just once) since the
-        // window can resize or the seatbar can scroll between opens.
-        function positionCard() {
-            var r = b.getBoundingClientRect();
-            card.style.top = (r.bottom + 4) + "px";
-            card.style.right = Math.max(4, window.innerWidth - r.right) + "px";
-            card.style.left = "auto";
-        }
-        function setOpen(open) {
-            if (open) positionCard();
-            card.classList.toggle("open", open);
-            b.setAttribute("aria-pressed", open ? "true" : "false");
-            b.classList.toggle("on", open);
-        }
-        b.addEventListener("click", function (e) {
-            e.stopPropagation();   // don't let the document click-outside handler see this one
-            setOpen(!card.classList.contains("open"));
-        });
-        // Drop-down behavior: dismiss on an outside click or Escape, like any
-        // other menu/popover, instead of staying open until the button is
-        // clicked again.
-        document.addEventListener("click", function (e) {
-            if (card.classList.contains("open") && !card.contains(e.target)) setOpen(false);
-        });
-        card.addEventListener("click", function (e) { e.stopPropagation(); });
-        document.addEventListener("keydown", function (e) {
-            if (e.key === "Escape" && card.classList.contains("open")) setOpen(false);
-        });
-        window.addEventListener("resize", function () {
-            if (card.classList.contains("open")) positionCard();
-        });
+        b.addEventListener("click", function () { card.showModal(); });
         bar.appendChild(b);
         return b;
     }
@@ -590,6 +577,24 @@
         $("target").value = "console";
         refreshUi();
         connect("console");
+    }
+
+    // ---- the main Connect panel -------------------------------------------------
+    // Same consolidation as the pop-outs: the full connect controls move into the
+    // "Session…" modal, leaving the bar to just Session… + the quick-access
+    // action buttons (Num Lock, Add Monitor, Pop-out, Send/Receive clip).
+    function enterConnectMode() {
+        var bar = document.querySelector("#panel-connect .bar");
+        var card = buildSessionCard();
+        var sessionBtn = addSessionButton(bar, card);
+        bar.insertBefore(sessionBtn, bar.firstChild);   // the primary entry point now; lead with it
+        addClipboardButtons(bar);
+        // Restore the active tab from the URL (?tab=sessions etc.), same as a
+        // shared/bookmarked link; default to Connect. Skipped by the pop-out
+        // modes entirely -- they never show tabs and enterConnectMode() only
+        // runs on the plain page.
+        var wantTab = hashParam("tab");
+        selectTab("tab-" + (TAB_NAMES.indexOf(wantTab) >= 0 ? wantTab : "connect"));
     }
 
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
@@ -1630,15 +1635,28 @@
         });
     }
 
+    // Tab names as they appear in the URL hash (?tab=connect etc.) -- the main
+    // page only; pop-outs never show tabs at all (html.monitor .tabs is
+    // display:none), so this never runs there.
+    var TAB_NAMES = ["connect", "sessions", "deskui", "selftests"];
     function selectTab(id) {
-        ["connect", "sessions", "deskui", "selftests"].forEach(function (n) {
+        var name = id.replace(/^tab-/, "");
+        TAB_NAMES.forEach(function (n) {
             var t = $("tab-" + n), pan = $("panel-" + n);
             if (!t || !pan) return;
-            var on = ("tab-" + n) === id;
+            var on = n === name;
             t.classList.toggle("active", on); pan.hidden = !on;
         });
         if (id === "tab-sessions") renderSessions();
         if (id === "tab-deskui") renderDeskUi();
+        // Reflect the active tab in the URL, the same way URL_CONTROLS persists
+        // Session/Resolution/etc: rewritten via replaceState (no navigation, no
+        // history spam) so the tab survives a refresh and is bookmarkable/
+        // shareable, preserving any other hash segment (mode tokens, controls).
+        var keep = [];
+        _hashSegments().forEach(function (seg) { if (_segKey(seg) !== "tab") keep.push(seg); });
+        keep.push("tab=" + name);
+        try { history.replaceState(history.state, "", "#" + keep.join("&")); } catch (e) { /* ignore */ }
     }
 
     // ---- toggle/selector persistence -----------------------------------------
@@ -1815,6 +1833,6 @@
         // #seat = the physical-seat mirror with a monitor picker (disconnect only).
         if (MONITOR_MODE) enterMonitorMode();
         else if (SEAT_MODE) enterSeatMode();
-        else addClipboardButtons(document.querySelector("#panel-connect .bar"));
+        else enterConnectMode();
     });
 })();
