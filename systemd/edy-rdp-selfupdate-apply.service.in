@@ -1,0 +1,21 @@
+[Unit]
+Description=edy-rdp self-update: fetch and apply the latest GitHub Release, with automatic rollback on a failed health check
+# Deliberately NOT templated (no %i, no instance argument at all) -- one step
+# MORE robust than the %i-templated edy-rdp-deskui@/edy-rdp-unlock@ pattern
+# elsewhere in this project. "apply" always means "whatever this host's own
+# fresh GitHub call says is latest right now"; the script re-fetches and
+# re-validates that itself and trusts NO caller-supplied argument, environment
+# variable or file. ZERO caller-influenced data crosses the `systemctl start`
+# privilege boundary through this unit -- there is nothing here for a caller to
+# influence in the first place.
+
+[Service]
+Type=oneshot
+# The repo location (not a secret) comes from the SAME host .env the relay
+# reads, so there is one copy of the setting. '-' keeps the unit startable on a
+# host with no .env yet (the script then refuses cleanly: exit 3, "not set").
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@LIBEXEC@/edy-rdp-selfupdate-apply
+# Network fetch + extract + deploy.sh (copy/link/install.sh) + relay restart +
+# up to ~20s health-check polling + a possible full rollback of the same shape.
+TimeoutStartSec=300

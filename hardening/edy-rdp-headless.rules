@@ -8,7 +8,14 @@ polkit.addRule(function(action, subject) {
         if (unit && (unit.indexOf("edy-rdp-headless@") === 0 ||
                      unit.indexOf("edy-rdp-waylandvnc@") === 0 ||
                      unit.indexOf("edy-rdp-deskui@") === 0 ||
-                       unit.indexOf("edy-rdp-unlock@") === 0)) {
+                       unit.indexOf("edy-rdp-unlock@") === 0 ||
+                     // Self-update: EXACT names, not a prefix match -- these two
+                     // units are deliberately NOT templated (no %i instance at
+                     // all), one step more robust than the %i families above.
+                     // "apply"/"rollback" take no caller-influenced data of any
+                     // kind, so an exact match is both correct and sufficient.
+                     unit === "edy-rdp-selfupdate-apply.service" ||
+                     unit === "edy-rdp-selfupdate-rollback.service")) {
             return polkit.Result.YES;
         }
     }

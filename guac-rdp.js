@@ -627,6 +627,12 @@
         // runs on the plain page.
         var wantTab = hashParam("tab");
         selectTab("tab-" + (TAB_NAMES.indexOf(wantTab) >= 0 ? wantTab : "connect"));
+        // Seed the Update tab's badge on load -- a plain read of the cached
+        // status, never a live GitHub call (see refreshUpdateBadge()) -- so an
+        // available update is visible before the operator ever opens the tab.
+        // Skipped in the pop-out modes entirely, same as the tab restore above:
+        // they never show tabs (html.monitor .tabs is display:none).
+        refreshUpdateBadge();
     }
 
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
@@ -1529,6 +1535,226 @@
         });
     }
 
+    // ---- Self-update panel ---------------------------------------------------
+    // Reads this host's cached update state (docs/SELFUPDATE.md's control-op
+    // contract: update-status/-check/-apply/-rollback) and, for an
+    // administrator, offers Update now (typed-hostname confirmation, exactly
+    // like deskui's Stop/Disable) and Roll back (no confirmation -- the
+    // recovery action stays low-friction, same asymmetry as deskui's plain
+    // "start"). The relay is authoritative on every gate; this only reflects
+    // and re-checks it.
+    var updateState = null;      // last update-status/-check payload, for the button logic
+    var updateHostname = null;   // this host's name, for the typed confirmation -- see below
+
+    function updateRow(label, text, warn) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td"); k.textContent = label;
+        var v = document.createElement("td"); v.textContent = text;
+        if (warn) v.className = "warn";
+        tr.appendChild(k); tr.appendChild(v);
+        return tr;
+    }
+    function updateLinkRow(label, url) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td"); k.textContent = label;
+        var v = document.createElement("td");
+        var a = document.createElement("a");
+        a.href = url; a.textContent = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        v.appendChild(a);
+        tr.appendChild(k); tr.appendChild(v);
+        return tr;
+    }
+    // "not checked yet" (checked_at null, a host that has never run a check) is
+    // distinct from a live check that came back with an error (e.g. this
+    // repository has no GitHub Releases published yet) -- check_error already
+    // reads as a full sentence ("no releases published yet for owner/repo"),
+    // so it is shown verbatim rather than paraphrased. no_releases is its own
+    // typed flag (not string-matched) precisely so THIS calm, expected, day-one
+    // state can be told apart from a real outage -- found by review: both used
+    // to share the untyped check_error field, so this project's own repo (which
+    // has no Releases yet) rendered as a bold red error on a brand-new install.
+    function latestVersionText(r) {
+        if (!r.checked_at) return "not checked yet";
+        if (r.no_releases) return "no releases published on this repository yet";
+        if (r.check_error) return r.check_error;
+        return r.latest_version || "unknown";
+    }
+    // last_apply is {from, to, result: "ok"|"rolled_back"|"rollback_failed",
+    // detail, at} -- built fresh from from/to/result rather than echoing the
+    // stored "detail" verbatim, since the two privileged scripts phrase detail
+    // slightly differently for the same result (e.g. apply's "healthy" vs.
+    // rollback's "manual rollback, healthy") and this is the one line an
+    // operator reads to understand what just happened on this host.
+    function describeLastApply(la) {
+        if (!la) return null;
+        var to = la.to || "an unknown version", from = la.from || "an earlier version";
+        if (la.result === "ok") return "Update to " + to + " completed and is healthy.";
+        if (la.result === "rolled_back")
+            return "Update to " + to + " failed its health check and was automatically rolled back to " + from + ".";
+        if (la.result === "rollback_failed")
+            return "Update to " + to + " failed its health check AND the automatic rollback also failed — this host needs a human right now.";
+        return la.detail || (from + " → " + to);
+    }
+
+    // Enable Update now / Roll back only for an administrator (the same
+    // client-side reflection of the server's admin gate used throughout this
+    // panel -- e.g. connectAs()'s console/remote checks; the relay re-checks
+    // is_admin regardless of what this shows), and only once the typed host
+    // name matches for Update now specifically (Roll back needs no typed
+    // confirmation -- see the comment above the panel setup).
+    function updateSyncButtons() {
+        var st = updateState || {};
+        var confirmEl = $("update-confirm");
+        var confirmOk = isAdmin && !!updateHostname && confirmEl && confirmEl.value === updateHostname;
+        $("update-apply").disabled = !(isAdmin && st.update_available && confirmOk);
+        $("update-rollback").disabled = !(isAdmin && st.rollback_available);
+        $("update-confirm-wrap").hidden = !(isAdmin && st.update_available);
+    }
+
+    function setUpdateBadge(on) {
+        var dot = $("update-badge");
+        if (dot) dot.hidden = !on;
+    }
+
+    function renderUpdate() {
+        var body = $("update-state-body");
+        body.innerHTML = '<tr><td colspan="2" class="muted">Loading…</td></tr>';
+        // update-status/-check never carry this host's name (unlike
+        // deskui-status, which does) -- SelfUpdate.hostname is only ever handed
+        // back inside update-apply's need_confirm refusal. Both controllers
+        // derive it the exact same way (socket.gethostname(), same relay
+        // process -- see relay/selfupdate.py and relay/edy_rdp_relay.py), so
+        // deskui-status's read-only, non-admin-gated hostname is a safe,
+        // already-available stand-in for the confirmation label; the relay
+        // re-derives and checks its OWN value regardless of what this shows.
+        var hostReq = updateHostname ? cockpit.resolve(null)
+            : controlRequest({ op: "deskui-status" }).catch(function () { return null; });
+        Promise.all([controlRequest({ op: "update-status" }), hostReq]).then(function (results) {
+            var r = results[0], hostR = results[1];
+            if (hostR && hostR.ok && hostR.hostname) updateHostname = hostR.hostname;
+            updateState = r || {};
+            setUpdateBadge(!!(r && r.ok && r.update_available));
+            if (!r || !r.ok) {
+                body.innerHTML = '<tr><td colspan="2" class="muted">'
+                    + ((r && r.error) || "Self-update is not available on this host.") + '</td></tr>';
+                $("update-apply").disabled = true; $("update-rollback").disabled = true;
+                $("update-confirm-wrap").hidden = true;
+                $("update-note").textContent = "";
+                return;
+            }
+            $("update-hostname").textContent = updateHostname || "";
+            body.innerHTML = "";
+            body.appendChild(updateRow("Current version", r.current_version || "unknown"));
+            body.appendChild(updateRow("Latest known version", latestVersionText(r),
+                !!r.check_error && !r.no_releases));
+            if (r.release_name) body.appendChild(updateRow("Release", r.release_name));
+            if (r.release_notes_url) body.appendChild(updateLinkRow("Release notes", r.release_notes_url));
+            if (r.published_at) body.appendChild(updateRow("Published", r.published_at));
+            body.appendChild(updateRow("Checked", fmtWhen(r.checked_at)));
+            body.appendChild(updateRow("Roll back available", r.rollback_available
+                ? ("yes, to " + (r.rollback_version || "an earlier version"))
+                : "no earlier version on this host"));
+            $("update-note").textContent = r.update_available
+                ? "An update is available — type the host name below, then Update now."
+                : "This host is on the latest known version.";
+            var lastText = describeLastApply(r.last_apply);
+            var la = $("update-last-apply");
+            if (lastText) {
+                la.hidden = false;
+                la.textContent = lastText;
+                la.className = "status" + (r.last_apply.result === "ok" ? " ok" : " err");
+            } else {
+                la.hidden = true;
+            }
+            updateSyncButtons();
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="2" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    function fmtWhen(ts) {
+        if (!ts) return "never";
+        return fmtAge(ts) + " ago";
+    }
+
+    // A read-only status poll, for the trigger points that just need the badge
+    // (not the whole panel re-rendered): the initial page load. Opening the
+    // Update tab itself goes through renderUpdate(), which sets the badge from
+    // the SAME response it renders from rather than polling twice.
+    function refreshUpdateBadge() {
+        controlRequest({ op: "update-status" }).then(function (r) {
+            setUpdateBadge(!!(r && r.ok && r.update_available));
+        }).catch(function () { /* best effort -- leave the badge as it was */ });
+    }
+
+    function updateCheckAction() {
+        var btn = $("update-check"), s = $("update-status");
+        btn.disabled = true;
+        s.textContent = "Checking GitHub…"; s.className = "status";
+        controlRequest({ op: "update-check" }).then(function (r) {
+            btn.disabled = false;
+            if (r && r.ok) {
+                s.textContent = r.rate_limited
+                    ? "Checked less than a minute ago — showing the cached result."
+                    : (r.update_available ? "An update is available." : "This host is on the latest known version.");
+                s.className = "status ok";
+            } else {
+                s.textContent = "Check failed: " + ((r && r.error) || "unknown error");
+                s.className = "status err";
+            }
+            renderUpdate();
+        }).catch(function (e) {
+            btn.disabled = false;
+            s.textContent = "Check error: " + e; s.className = "status err";
+            renderUpdate();
+        });
+    }
+
+    function updateApplyAction() {
+        var confirm = $("update-confirm") ? $("update-confirm").value : "";
+        var s = $("update-status");
+        s.textContent = "Updating…"; s.className = "status";
+        $("update-apply").disabled = true; $("update-rollback").disabled = true;
+        controlRequest({ op: "update-apply", confirm: confirm }).then(function (r) {
+            if (r && r.ok) {
+                s.textContent = r.detail || "Update completed.";
+                s.className = "status ok";
+                if ($("update-confirm")) $("update-confirm").value = "";
+            } else {
+                var why = (r && (r.detail || r.error)) || "refused";
+                if (r && r.need_confirm) {
+                    if (r.hostname) { updateHostname = r.hostname; $("update-hostname").textContent = updateHostname; }
+                    why = "type the host name (" + (updateHostname || "") + ") to confirm";
+                }
+                s.textContent = "Update failed: " + why;
+                s.className = "status err";
+            }
+            renderUpdate();
+        }).catch(function (e) {
+            s.textContent = "Update error: " + e; s.className = "status err";
+            renderUpdate();
+        });
+    }
+
+    function updateRollbackAction() {
+        var s = $("update-status");
+        s.textContent = "Rolling back…"; s.className = "status";
+        $("update-apply").disabled = true; $("update-rollback").disabled = true;
+        controlRequest({ op: "update-rollback" }).then(function (r) {
+            if (r && r.ok) {
+                s.textContent = r.detail || "Rolled back.";
+                s.className = "status ok";
+            } else {
+                s.textContent = "Rollback failed: " + ((r && (r.detail || r.error)) || "refused");
+                s.className = "status err";
+            }
+            renderUpdate();
+        }).catch(function (e) {
+            s.textContent = "Rollback error: " + e; s.className = "status err";
+            renderUpdate();
+        });
+    }
+
     /* ---------------------------------------------------------------- *
      * Self tests
      *
@@ -1770,7 +1996,7 @@
     // Tab names as they appear in the URL hash (?tab=connect etc.) -- the main
     // page only; pop-outs never show tabs at all (html.monitor .tabs is
     // display:none), so this never runs there.
-    var TAB_NAMES = ["connect", "sessions", "deskui", "selftests"];
+    var TAB_NAMES = ["connect", "sessions", "deskui", "update", "selftests"];
     function selectTab(id) {
         var name = id.replace(/^tab-/, "");
         TAB_NAMES.forEach(function (n) {
@@ -1781,6 +2007,7 @@
         });
         if (id === "tab-sessions") renderSessions();
         if (id === "tab-deskui") renderDeskUi();
+        if (id === "tab-update") renderUpdate();
         // Reflect the active tab in the URL, the same way URL_CONTROLS persists
         // Session/Resolution/etc: rewritten via writeHash() (replaceState, so no
         // navigation/history spam) so the tab survives a refresh and is
@@ -1901,6 +2128,7 @@
         $("tab-connect").addEventListener("click", function () { selectTab("tab-connect"); });
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
         $("tab-deskui").addEventListener("click", function () { selectTab("tab-deskui"); });
+        $("tab-update").addEventListener("click", function () { selectTab("tab-update"); });
         $("tab-selftests").addEventListener("click", function () { selectTab("tab-selftests"); });
         $("run-tests").addEventListener("click", runSelfTests);
         $("refresh").addEventListener("click", renderSessions);
@@ -1911,8 +2139,13 @@
         $("deskui-start").addEventListener("click", function () { deskuiAction("start"); });
         $("deskui-disable").addEventListener("click", function () { deskuiAction("disable"); });
         $("deskui-stop").addEventListener("click", function () { deskuiAction("stop"); });
+        // Update panel
+        $("update-check").addEventListener("click", updateCheckAction);
+        $("update-confirm").addEventListener("input", updateSyncButtons);
+        $("update-apply").addEventListener("click", updateApplyAction);
+        $("update-rollback").addEventListener("click", updateRollbackAction);
         var perm = cockpit.permission({ admin: true });
-        perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); });
+        perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); updateSyncButtons(); });
         isAdmin = !!perm.allowed;
         loadControls();   // restore persisted toggles/selectors BEFORE any auto-connect
         $("target").addEventListener("change", refreshUi);

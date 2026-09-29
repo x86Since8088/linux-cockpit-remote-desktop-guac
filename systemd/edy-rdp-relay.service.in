@@ -10,7 +10,7 @@ After=edy-rdp-relay.socket edy-rdp-control.socket edy-rdp-guacd.service
 [Service]
 Type=simple
 User=edy-relay
-Group=edy-rdp
+Group=cockpit-guac-rdp
 # Runs as the dedicated edy-relay uid so the nftables owner-match on 127.0.0.1:4822
 # admits THIS process and drops every other local uid.
 #
@@ -33,6 +33,9 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=EDY_RDP_PYTHON=/usr/bin/python3
 Environment=EDY_RDP_GUACD=127.0.0.1:4822
 Environment=EDY_RDP_ADMIN_GROUP=sudo
+# Additional gate for mirroring a DIFFERENT signed-in user's console session
+# (admin-only gating above is unchanged). Empty = this extra gate is off.
+Environment=EDY_RDP_SHADOW_GROUP=rdp-shadow
 Environment=EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
 Environment=EDY_RDP_LOG_LEVEL=INFO
 Environment="EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391"
@@ -46,6 +49,10 @@ Environment=EDY_RDP_REMOTE_ADMIN_ONLY=0
 # no write verb runs (fail closed). NEVER set this on an operator's own
 # workstation: a Stop there would kill the local session.
 Environment=EDY_RDP_DESKUI_ENABLE=0
+# Self-update: which GitHub repo to check for a newer tagged Release. A
+# location, not a flag -- read straight from the process environment (this
+# EnvironmentFile mechanism), never passed on the ExecStart line below.
+Environment=EDY_RDP_UPDATE_REPO=x86Since8088/linux-cockpit-remote-desktop-guac
 # NOT optional (no leading '-'): a relay running on built-in defaults it was
 # never configured with is worse than a relay that did not start. install.sh
 # places this file from .envdefault, reconciles it on upgrade and validates it
@@ -60,6 +67,7 @@ EnvironmentFile=-@INSTALL_PATH@/venv.env
 # it is a comma-list, not word-split flags.
 ExecStart=/usr/bin/env ${EDY_RDP_PYTHON} @LIBEXEC@/edy_rdp_relay.py \
     --guacd ${EDY_RDP_GUACD} --admin-group ${EDY_RDP_ADMIN_GROUP} \
+    --shadow-group ${EDY_RDP_SHADOW_GROUP} \
     --state-file ${EDY_RDP_STATE_FILE} \
     $EDY_RDP_ALLOW_ARGS \
     --remote-allow ${EDY_RDP_REMOTE_ALLOW} \

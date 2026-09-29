@@ -24,10 +24,11 @@ button:disabled { opacity:.5; cursor:default; }
    is actually armed; a disabled danger button falls back to the neutral look. */
 button.danger:not(:disabled) { background:var(--err); color:#fff; border-color:var(--err); }
 .mono { font-family:ui-monospace,"RedHatMono",monospace; }
-/* Desktop-UI state table: a plain two-column key/value read-out. */
-#deskui-state-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
-#deskui-state-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
-#deskui-state-table td.warn { color:var(--err); font-weight:600; }
+/* Desktop-UI and Update state tables: plain two-column key/value read-outs
+   (same shape, same rule set -- see #update-state-table in index.html). */
+#deskui-state-table td, #update-state-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
+#deskui-state-table td:first-child, #update-state-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
+#deskui-state-table td.warn, #update-state-table td.warn { color:var(--err); font-weight:600; }
 
 /* "Add Monitor" pop-up (index.html opened with #monitor): chromeless — no tabs,
    toolbar or app bar — with the virtual monitor filling the whole window. Only a
@@ -119,8 +120,16 @@ html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-spac
 
 .tabs { display:flex; gap:.25rem; padding:.4rem .6rem 0; background:var(--panel); border-bottom:1px solid var(--line); }
 .tab { background:transparent; color:var(--muted); border:none; border-bottom:2px solid transparent;
-       padding:.5rem .9rem; cursor:pointer; font:inherit; border-radius:0; }
+       padding:.5rem .9rem; cursor:pointer; font:inherit; border-radius:0; position:relative; }
 .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+/* Persistent "an update is available" indicator on the Update tab -- distinct
+   from #toast (which is transient, for one-off events the panel did on its
+   own): this is ongoing STATE, so it stays until the tab is opened or the host
+   is updated, never auto-hides. Refreshed wherever update-status is read
+   (see refreshUpdateBadge()/renderUpdate() in guac-rdp.js), never by its own
+   timer. */
+.badge-dot { display:inline-block; width:.5rem; height:.5rem; margin-left:.4rem;
+             border-radius:50%; background:var(--err); vertical-align:middle; }
 .panel[hidden] { display:none; }
 table.sessions { width:calc(100% - 1.8rem); margin:.6rem .9rem; border-collapse:collapse; font-size:.8125rem; }
 table.sessions th, table.sessions td { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line); }
