@@ -1058,3 +1058,43 @@ in both `load_snapshot()` and `list_snapshots()` against a stray non-snapshot `.
 history directory. Verified: `run_tests.sh` green throughout (188 relay unit tests, up from 185); each
 of the three fixes was mutation-tested by reverting it individually and confirming the corresponding new
 test fails, not just added and left unexercised.
+
+**Round four (an independent cross-model check of round three's own fix, before either had merged):**
+found round three's own `install_deps()` bracket could still misattribute. `depsnapshot_current_tx()`
+returned empty stdout for two different things — "no dnf/yum history yet" (a real answer) and "the
+query itself failed" (timeout, locked history database) — and `install_deps()` compared readings on
+VALUE alone. If the `tx_before` reading failed (empty, indistinguishable from "no history") while the
+`tx_after` reading happened to succeed, an already-existing transaction looked newly created.
+Reproduced live via the reviewer's own harness. Fixed by making `get_latest_transaction_id()` return
+`(ok, tx_id)` instead of a single value that conflated the two states, threading `ok` through a new
+`current-tx` exit code (0 with `CURRENT_TX=` on a genuine answer, 1 with nothing on stdout when the
+query itself failed) — `install_deps()`'s bracket now requires BOTH readings to have exited 0 before
+comparing them at all. Also closed in this round: `cmd_rollback()` refusing only a `"before"`-labeled
+snapshot, rather than anything that isn't `"after"` (an unlabeled/manually-run snapshot was untested);
+the stale-transaction check (exit 4) — a pre-existing safety net from round one, and now the last line
+of defense against any future misattribution bug — had no test of its own; the path-traversal fix from
+round three had no tests at all, confirmed by mutating away each of its four checks and finding the
+suite stayed green for every one — all four now have dedicated, mutation-tested coverage; `TIMESTAMP_RE`
+tightened to `[0-9]` (not `\d`, which also accepts non-ASCII digit scripts under Python 3's default
+Unicode mode) with `fullmatch()` (not `match()` + `$`, which still accepts one trailing newline) —
+neither gap was an actual reachable escape today, but this is the one check standing in front of an
+authenticated caller's own request field; and two refusal messages that didn't match what actually
+happens (the UI's own canned text for rollback's exit code 3 predated this snapshot's `label` check and
+still said "no dnf/yum transaction was recorded", masking the new refusal reason entirely, since the
+canned string is preferred over the script's own live message when one exists for that exit code).
+
+**Explicitly deferred, not fixed:** round four's own bracket can still misattribute in one narrower way
+— if an entirely unrelated dnf/yum transaction (an operator's own command, `dnf-automatic`,
+`PackageKit`) completes while `install_deps()`'s own `dnf install` is waiting on dnf's lock, and that
+install then has nothing left to do, the unrelated transaction is what gets recorded, indistinguishable
+from the outside from a normal install. Closing this fully would mean inspecting the recorded
+transaction's own command line (`dnf history info <id>`) or tagging installs with `--comment <nonce>`
+dnf/yum-only, either of which adds real complexity and version-compatibility risk for a narrow window.
+Named here rather than silently left, per this project's own "no silent caps" convention — not attempted
+in this pass.
+
+Verified (round four): `run_tests.sh` green throughout (198 relay unit tests, up from 188); the exact
+reviewer-reproduced scenario (a failed `tx_before` reading followed by a successful `tx_after` reading
+returning a pre-existing, unrelated transaction) was reproduced standalone in bash and confirmed fixed;
+every one of the round's fixes was mutation-tested by reverting it individually and confirming the
+corresponding new test fails.

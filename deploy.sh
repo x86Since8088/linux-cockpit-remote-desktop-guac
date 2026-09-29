@@ -149,7 +149,7 @@ report_prereqs() {   # always runs; only --with-deps installs
 }
 
 install_deps() {
-    local cmd tx_before tx_after
+    local cmd tx_before tx_after tx_before_ok=0 tx_after_ok=0
     report_prereqs && return 0
     cmd="$(req_fix_command "${MISSING_PREREQS[@]}")"
     [[ "$cmd" != "install manually"* ]] || die "no supported package manager found; $cmd
@@ -161,13 +161,22 @@ install_deps() {
     # deploy (image pull, unit install, config steps), which comparing against
     # a snapshot taken at the very end of the whole run could otherwise
     # misattribute (KNOWN_ISSUES I51 F3). depsnapshot_current_tx() is
-    # best-effort and never fails the deploy on its own.
-    tx_before="$(depsnapshot_current_tx)"
+    # best-effort and never fails the deploy on its own -- but BOTH readings
+    # must have genuinely succeeded before comparing them: depsnapshot_current_tx()
+    # returns empty stdout for "no dnf/yum history yet" (a real answer) AND for
+    # "the query itself failed" (unknown) alike, distinguished only by its own
+    # exit status. Comparing on VALUE alone let a failed tx_before reading
+    # (empty, indistinguishable from "no history") plus a successful tx_after
+    # reading make an already-existing transaction look newly created by this
+    # run (KNOWN_ISSUES I51 follow-up) -- require both exit codes to be 0.
+    tx_before="$(depsnapshot_current_tx)" && tx_before_ok=1
     say installing "$cmd"
     eval "$cmd" || die "prerequisite install failed (docs/COMPATIBILITY.md has the
     per-distro notes)"
-    tx_after="$(depsnapshot_current_tx)"
-    [[ -n "$tx_after" && "$tx_after" != "$tx_before" ]] && DEPSNAPSHOT_INSTALL_TX="$tx_after"
+    tx_after="$(depsnapshot_current_tx)" && tx_after_ok=1
+    if (( tx_before_ok && tx_after_ok )) && [[ -n "$tx_after" && "$tx_after" != "$tx_before" ]]; then
+        DEPSNAPSHOT_INSTALL_TX="$tx_after"
+    fi
     req_freerdp_bin >/dev/null 2>&1 || die "a FreeRDP >= 3 client is still absent.
     Debian 12 and RHEL 8 ship only FreeRDP 2, which lacks RDSTLS - the protocol
     grd's port 3390 handover requires. See docs/COMPATIBILITY.md."
@@ -217,10 +226,17 @@ DEPSNAPSHOT_INSTALL_TX=""
 # detection + one history query, no inventory scan) -- used only to bracket
 # install_deps()'s own package-manager invocation. Best-effort like every
 # other depsnapshot call here: never fails the deploy on its own.
+# Exit 0 with the current dnf/yum transaction id on stdout (possibly empty,
+# meaning "no history yet" -- a real answer) ONLY when the query genuinely
+# completed; exit 1 with nothing on stdout otherwise (script missing, or
+# edy-rdp-depsnapshot.py's own current-tx exited non-zero because the
+# underlying query itself failed). install_deps() MUST check this exit
+# status, not just the printed value -- see its own comment for why
+# conflating "failed" with "no history" is unsafe.
 depsnapshot_current_tx() {
     local script="$ROOT_D/payload/depcheck/edy-rdp-depsnapshot.py" out
-    [[ -x "$script" ]] || return 0
-    out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" current-tx 2>/dev/null)" || return 0
+    [[ -x "$script" ]] || return 1
+    out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" current-tx 2>/dev/null)" || return 1
     sed -n 's/^CURRENT_TX=//p' <<<"$out" | tail -n1
 }
 

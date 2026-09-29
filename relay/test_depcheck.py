@@ -11,7 +11,9 @@
 # importlib, since its filename is not a valid module name) with every real
 # subprocess call mocked out the same way.
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -366,6 +368,42 @@ class SnapshotDirRoundTrip(unittest.TestCase):
         self.assertIn("packages", snap)
         self.assertIn("tracked", snap)
 
+    def test_load_snapshot_rejects_a_non_timestamp_explicit_value(self):
+        # deps-list's control-API op threads an authenticated caller's own
+        # request field straight through to load_snapshot() as
+        # timestamp_or_latest -- these must all resolve to None (never a
+        # path outside dep-history/), not raise, not read anything. A real,
+        # readable file is planted exactly where "../secret" resolves to --
+        # if the check is ever removed or loosened, THAT is what would leak;
+        # a merely-missing path would pass this test for the wrong reason.
+        self._write("20260101T000000Z")
+        secret_path = os.path.join(self.tmp, "..", "secret.json")
+        with open(secret_path, "w") as fh:
+            json.dump({"leaked": True}, fh)
+        try:
+            for attack in ("../secret", "../../etc/passwd", "/etc/passwd",
+                          "notes", "20260101T000000Z\nmalicious", "20260101T000000Z; rm -rf /"):
+                self.assertIsNone(DC.load_snapshot(self.tmp, attack), attack)
+        finally:
+            os.unlink(secret_path)
+        # the legitimate value still works
+        self.assertIsNotNone(DC.load_snapshot(self.tmp, "20260101T000000Z"))
+
+    def test_a_stray_non_snapshot_json_file_is_never_latest_or_listed(self):
+        self._write("20260101T000000Z")
+        # Deliberately snapshot-SHAPED (a real "summary" dict) so it would be
+        # picked up by BOTH load_snapshot("latest") and list_snapshots() if
+        # their own TIMESTAMP_RE filters were ever removed -- not skipped for
+        # the unrelated reason of "not a snapshot at all", which would mask
+        # whether the filter itself is doing anything.
+        with open(os.path.join(self.tmp, "zzz_notes.json"), "w") as fh:
+            json.dump({"timestamp": "zzz_notes", "packages": [], "tracked": {},
+                      "summary": {"timestamp": "zzz_notes"}}, fh)
+        latest = DC.load_snapshot(self.tmp, "latest")
+        self.assertEqual(latest["timestamp"], "20260101T000000Z")
+        hist = DC.list_snapshots(self.tmp)
+        self.assertEqual([h["timestamp"] for h in hist], ["20260101T000000Z"])
+
     def test_corrupt_file_skipped_not_fatal(self):
         self._write("20260101T000000Z")
         with open(os.path.join(self.tmp, "20260201T000000Z.json"), "w") as fh:
@@ -495,7 +533,7 @@ class DepCheckRollback(unittest.TestCase):
     def test_no_transaction_on_record_refusal(self):
         ok, detail = self._failure("3")
         self.assertFalse(ok)
-        self.assertIn("no dnf/yum transaction", detail)
+        self.assertIn("no transaction to roll back", detail)
 
     def test_stale_transaction_refusal(self):
         ok, detail = self._failure("4")
@@ -698,6 +736,73 @@ class RollbackTimeoutAgreement(unittest.TestCase):
         self.assertGreaterEqual(DC.ROLLBACK_TIMEOUT, script_timeout)
 
 
+# --- KNOWN_ISSUES I51 follow-up: "the query failed" must never look like
+# "no history yet" -- both used to render as None/empty, and a failed
+# tx_before reading plus a successful tx_after reading in the same
+# install_deps() bracket made an already-existing transaction look newly
+# created (found by adversarial review, reproduced live). ------------------
+
+
+class GetLatestTransactionIdOkFlag(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_depsnapshot()
+
+    def test_both_queries_failing_is_not_ok(self):
+        with mock.patch.object(self.mod, "_run", return_value=(1, "")):
+            ok, tx = self.mod.get_latest_transaction_id("dnf")
+        self.assertFalse(ok)
+        self.assertIsNone(tx)
+
+    def test_genuinely_empty_history_is_ok_with_none(self):
+        # --json succeeds but parses to zero entries; the plain-table
+        # fallback also succeeds (rc=0) with no matching lines -- a real,
+        # confident answer: "no history", not "unknown".
+        with mock.patch.object(self.mod, "_run", side_effect=[(0, '{"transactions": []}'), (0, "")]):
+            ok, tx = self.mod.get_latest_transaction_id("dnf")
+        self.assertTrue(ok)
+        self.assertIsNone(tx)
+
+    def test_real_transaction_id_is_ok(self):
+        with mock.patch.object(self.mod, "_run", return_value=(0, '{"transactions": [{"id": 41}, {"id": 7}]}')):
+            ok, tx = self.mod.get_latest_transaction_id("dnf")
+        self.assertTrue(ok)
+        self.assertEqual(tx, "41")
+
+
+class CmdCurrentTxExitCode(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_depsnapshot()
+
+    def _run_capturing_stdout(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.mod.cmd_current_tx()
+        return rc, buf.getvalue()
+
+    def test_non_dnf_yum_host_exits_0_with_empty_value(self):
+        with mock.patch.object(self.mod.DC, "detect_pm", return_value="apt-get"):
+            rc, out = self._run_capturing_stdout()
+        self.assertEqual(rc, 0)
+        self.assertIn("CURRENT_TX=\n", out)
+
+    def test_successful_query_exits_0_with_the_value(self):
+        with mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
+             mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(True, "41")):
+            rc, out = self._run_capturing_stdout()
+        self.assertEqual(rc, 0)
+        self.assertIn("CURRENT_TX=41\n", out)
+
+    def test_failed_query_exits_nonzero_and_prints_nothing(self):
+        # This is the exact distinction deploy.sh's install_deps() bracket
+        # depends on: a caller that only looks at printed output (ignoring
+        # the exit code) cannot tell this apart from "no history yet".
+        with mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
+             mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(False, None)):
+            rc, out = self._run_capturing_stdout()
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out, "")
+
+
 # --- KNOWN_ISSUES I51 F2/F3: a rollback tx id must be attributable to THIS
 # run's own install_deps(), precisely -- never inferred from any snapshot's
 # own "current" transaction reading. --------------------------------------
@@ -773,13 +878,13 @@ class CmdSnapshotAttribution(unittest.TestCase):
         return self.mod.DC.load_snapshot(self.mod.DC.snapshot_dir(self.tmp), "latest")
 
     def test_before_snapshot_never_gets_a_dnf_transaction_id(self):
-        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value="41"):
+        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(True, "41")):
             snap = self._snapshot("before")
         self.assertIsNone(snap["dnf_transaction_id"])
         self.assertEqual(snap["baseline_transaction_id"], "41")  # informational only
 
     def test_after_snapshot_with_install_tx_records_exactly_that_value(self):
-        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value="99"):
+        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(True, "99")):
             snap = self._snapshot("after", install_tx="42")
         self.assertEqual(snap["dnf_transaction_id"], "42")
         # baseline_transaction_id is independent -- "whatever is newest right
@@ -788,7 +893,7 @@ class CmdSnapshotAttribution(unittest.TestCase):
         self.assertEqual(snap["baseline_transaction_id"], "99")
 
     def test_after_snapshot_with_no_install_tx_records_nothing_attributable(self):
-        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value="99"):
+        with mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(True, "99")):
             snap = self._snapshot("after", install_tx=None)
         self.assertIsNone(snap["dnf_transaction_id"])
 
@@ -813,10 +918,41 @@ class RollbackRefusesUnattributedSnapshots(unittest.TestCase):
                                      "summary": {"timestamp": "20260101T000000Z"}})
             with mock.patch.object(self.mod.DC, "install_root", return_value=tmp), \
                  mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
-                 mock.patch.object(self.mod, "get_latest_transaction_id", return_value="6"), \
+                 mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(True, "6")), \
                  self.assertRaises(SystemExit) as ctx:
                 self.mod.cmd_rollback()
             self.assertEqual(ctx.exception.code, 3)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _assert_refused_before_undo(self, label, dnf_transaction_id):
+        # Shared by every "must refuse based on label" case below. Mocks
+        # get_latest_transaction_id to SUCCEED with a matching value, so the
+        # stale-transaction check (exit 4) can never be what stops this --
+        # the label check itself must be what fires, and the clean signal is
+        # that run_history_undo is never even called. Without this mock, a
+        # regression that deletes the label check would still refuse on this
+        # dev host (no real dnf/yum binary) for the WRONG reason -- exit 4,
+        # "could not read current transaction history" -- masking whether
+        # the label check itself still does anything.
+        tmp = tempfile.mkdtemp()
+        try:
+            dep_dir = os.path.join(tmp, "dep-history")
+            os.makedirs(dep_dir)
+            self.mod.write_snapshot(dep_dir, "20260101T000000Z",
+                                    {"timestamp": "20260101T000000Z", "label": label,
+                                     "dnf_transaction_id": dnf_transaction_id,
+                                     "packages": [], "tracked": {},
+                                     "summary": {"timestamp": "20260101T000000Z"}})
+            with mock.patch.object(self.mod.DC, "install_root", return_value=tmp), \
+                 mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
+                 mock.patch.object(self.mod, "get_latest_transaction_id",
+                                   return_value=(True, dnf_transaction_id)), \
+                 mock.patch.object(self.mod, "run_history_undo") as undo, \
+                 self.assertRaises(SystemExit) as ctx:
+                self.mod.cmd_rollback()
+            self.assertEqual(ctx.exception.code, 3)
+            undo.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -830,21 +966,37 @@ class RollbackRefusesUnattributedSnapshots(unittest.TestCase):
         # depth on top of attributable_transaction_id() never setting that
         # field for a non-"after" snapshot in real use, in case any future
         # code path ever writes one that does.
+        self._assert_refused_before_undo("before", "41")
+
+    def test_rollback_refuses_an_unlabeled_snapshot_even_with_a_tx_id_on_it(self):
+        # The check is "label != 'after'", not "label == 'before'" -- an
+        # unlabeled/manually-run snapshot must be refused too, not silently
+        # trusted just because it isn't specifically "before".
+        self._assert_refused_before_undo(None, "41")
+
+    def test_rollback_refuses_a_stale_after_snapshot(self):
+        # A pre-existing safety net (bbaafe5), now the last line of defense
+        # against any future misattribution bug: even a genuinely "after"
+        # snapshot with a real tx_id must be refused if the HOST's current
+        # transaction has moved on since -- undoing the WRONG transaction
+        # could otherwise revert something unrelated, including a security
+        # patch.
         tmp = tempfile.mkdtemp()
         try:
             dep_dir = os.path.join(tmp, "dep-history")
             os.makedirs(dep_dir)
             self.mod.write_snapshot(dep_dir, "20260101T000000Z",
-                                    {"timestamp": "20260101T000000Z", "label": "before",
+                                    {"timestamp": "20260101T000000Z", "label": "after",
                                      "dnf_transaction_id": "41",
                                      "packages": [], "tracked": {},
                                      "summary": {"timestamp": "20260101T000000Z"}})
             with mock.patch.object(self.mod.DC, "install_root", return_value=tmp), \
                  mock.patch.object(self.mod.DC, "detect_pm", return_value="dnf"), \
+                 mock.patch.object(self.mod, "get_latest_transaction_id", return_value=(True, "42")), \
                  mock.patch.object(self.mod, "run_history_undo") as undo, \
                  self.assertRaises(SystemExit) as ctx:
                 self.mod.cmd_rollback()
-            self.assertEqual(ctx.exception.code, 3)
+            self.assertEqual(ctx.exception.code, 4)
             undo.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

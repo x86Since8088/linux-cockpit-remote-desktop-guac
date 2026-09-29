@@ -76,6 +76,30 @@ rollback where the host's package manager genuinely supports one.
   throughout (188 relay unit tests, up from 185; mutation-tested by reverting
   each of the round-three fixes individually and confirming the new tests
   fail).
+  Round four, found by an independent cross-model check of round three's own
+  fix: **the `install_deps()` bracket could still misattribute a pre-existing
+  transaction.** `depsnapshot_current_tx()` returned empty stdout for both
+  "no dnf/yum history yet" and "the query itself failed" alike; if the
+  `tx_before` reading failed while `tx_after` happened to succeed, an
+  already-existing transaction looked newly created — reproduced live via the
+  reviewer's own harness. Fixed by making `get_latest_transaction_id()` return
+  `(ok, tx_id)` instead of conflating the two states, with a new `current-tx`
+  exit code `install_deps()`'s bracket now checks before comparing readings at
+  all. Also closed: `cmd_rollback()` refusing only a `"before"`-labeled
+  snapshot rather than anything that isn't `"after"`; the stale-transaction
+  check (exit 4) and the round-three path-traversal fix both had zero test
+  coverage of their own (confirmed by mutating away each check and finding the
+  suite stayed green); `TIMESTAMP_RE` tightened against non-ASCII digits and a
+  trailing newline; and a stale canned UI message for rollback's exit code 3
+  that predated the new label check and masked the real refusal reason.
+  **Explicitly deferred, named rather than silently left:** an unrelated dnf/yum
+  transaction landing while `install_deps()`'s own install waits on dnf's lock,
+  with that install then having nothing left to do, is still indistinguishable
+  from a normal install — closing it needs inspecting the transaction's own
+  command line or a dnf-only tagging scheme, not attempted this pass.
+  `run_tests.sh` green throughout (198 relay unit tests, up from 188); the
+  exact reviewer-reproduced scenario was reproduced standalone in bash and
+  confirmed fixed; every fix mutation-tested individually.
 
 ## 1.6.2.20260929 - 2026-09-29
 

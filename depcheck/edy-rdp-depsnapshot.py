@@ -317,9 +317,19 @@ def make_dep_fns(pm, ctx):
 
 
 def get_latest_transaction_id(pm):
-    """The newest dnf/yum history transaction id on this host RIGHT NOW, or
-    None if it cannot be determined. Tries --json first (modern dnf/yum);
-    falls back to the plain table (older versions do not support --json)."""
+    """(ok, tx_id). ok is False ONLY when the underlying history query itself
+    could not be completed (both the --json and plain-table attempts
+    failed, e.g. a timeout or a locked history database) -- tx_id is None
+    when ok is True but there is genuinely no dnf/yum history yet (a fresh
+    host, or a non-dnf/yum package manager). Callers MUST NOT conflate these
+    two states: install_deps()'s own bracket (see deploy.sh's
+    depsnapshot_current_tx()) needs to fail closed (attribute nothing)
+    specifically on ok=False, not on "no history yet" -- a prior version of
+    this function returned a single Optional[str] for both, and a failed
+    "before" reading standing in for "no history" let an already-existing
+    transaction look newly created by this run (KNOWN_ISSUES I51 follow-up).
+    Tries --json first (modern dnf/yum); falls back to the plain table
+    (older versions do not support --json)."""
     rc, out = _run([pm, "history", "list", "--json"])
     if rc == 0 and out.strip():
         try:
@@ -337,12 +347,12 @@ def get_latest_transaction_id(pm):
                     except (TypeError, ValueError):
                         pass
             if ids:
-                return str(max(ids))
+                return True, str(max(ids))
     rc, out = _run([pm, "history", "list"])
     if rc != 0:
-        return None
+        return False, None
     ids = [int(m.group(1)) for m in (re.match(r'^\s*(\d+)\s*\|', line) for line in out.splitlines()) if m]
-    return str(max(ids)) if ids else None
+    return True, (str(max(ids)) if ids else None)
 
 
 def run_history_undo(pm, tx_id, timeout=600):
@@ -459,8 +469,10 @@ def cmd_snapshot(args):
     prev = DC.load_snapshot(dep_dir, "latest")
     # Purely informational -- "whatever dnf/yum transaction is newest at THIS
     # snapshot's own moment", shown in history/diagnostics. Never used to
-    # decide what rollback may undo; see attributable_transaction_id().
-    baseline_tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
+    # decide what rollback may undo; see attributable_transaction_id(). The
+    # ok/tx_id distinction doesn't matter here -- either a real failure or
+    # genuinely-no-history renders identically as "nothing to show".
+    baseline_tx = (get_latest_transaction_id(pm)[1] if pm in ("dnf", "yum") else None)
     dnf_tx = attributable_transaction_id(pm, args.install_tx, args.label)
     timestamp = DC.now_timestamp()
     noncompliant = sum(1 for t in tracked.values() if not t["compliant"])
@@ -500,9 +512,22 @@ def cmd_current_tx():
     """Cheap, standalone: pm detection + one history query, no inventory
     scan. deploy.sh's install_deps() calls this twice, bracketing its own
     package-manager invocation tightly, to compute --install-tx precisely
-    (see attributable_transaction_id() for why that precision matters)."""
+    (see attributable_transaction_id() for why that precision matters).
+    Exit 0 with CURRENT_TX=<id-or-empty> on a query that actually completed
+    (empty means "no dnf/yum history yet" or "not a dnf/yum host" -- a real
+    answer, not a failure). Exit 1 with nothing on stdout when the
+    underlying query itself could not be completed (timeout, locked history
+    database) -- deploy.sh's bracket must tell these apart: treating a
+    FAILED reading the same as "no history" let an already-existing
+    transaction look newly created by this run when the other reading in
+    the same bracket happened to succeed (KNOWN_ISSUES I51 follow-up)."""
     pm = DC.detect_pm()
-    tx = get_latest_transaction_id(pm) if pm in ("dnf", "yum") else None
+    if pm not in ("dnf", "yum"):
+        print("CURRENT_TX=", flush=True)
+        return 0
+    ok, tx = get_latest_transaction_id(pm)
+    if not ok:
+        return 1
     print("CURRENT_TX=%s" % (tx or ""), flush=True)
     return 0
 
@@ -534,13 +559,14 @@ def cmd_rollback():
     if snap.get("label") != "after":
         die("the latest dependency snapshot on this host is labeled %r, not a completed "
             "'after' snapshot -- refusing to guess what to undo (a deploy may have aborted "
-            "before its 'after' snapshot ran). Let a deploy finish, or take a fresh snapshot, "
-            "before rolling back." % (snap.get("label") or "(none)"), 3)
+            "before its 'after' snapshot ran, or this snapshot was taken by hand rather than "
+            "by deploy.sh itself). Only a complete deploy.sh run produces a rollback-eligible "
+            "'after' snapshot; a manually-run snapshot cannot." % (snap.get("label") or "(none)"), 3)
     tx_id = snap.get("dnf_transaction_id")
     if not tx_id:
         die("the latest snapshot recorded no %s transaction id to undo" % pm, 3)
-    current_tx = get_latest_transaction_id(pm)
-    if current_tx is None:
+    tx_ok, current_tx = get_latest_transaction_id(pm)
+    if not tx_ok or current_tx is None:
         die("could not read this host's current %s transaction history" % pm, 4)
     if str(current_tx) != str(tx_id):
         die("a newer %s transaction (%s) exists on this host than the one recorded in "

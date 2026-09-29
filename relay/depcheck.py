@@ -55,7 +55,15 @@ TIMESTAMP_FMT = "%Y%m%dT%H%M%SZ"      # sorts lexically == chronologically
 # control-API op passes an authenticated caller's own request field straight
 # through to here, and a "../" or absolute value must never be allowed to
 # widen that into an arbitrary read of anything the relay user can see.
-TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
+# [0-9], not \d (which also matches non-ASCII digit scripts under re.UNICODE,
+# Python 3's default) -- and every call site below uses fullmatch(), not
+# match()+anchors, since match() with a trailing "$" still accepts one
+# trailing newline. Neither quirk is reachable as an actual path escape today
+# (no "/" or "." can get through either way, and only root writes to
+# dep-history/), but this is the one gate standing in front of an
+# authenticated caller's own request field -- tighten it now rather than
+# waiting for that to stop being true.
+TIMESTAMP_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z")
 # The small companion file write_snapshot() writes beside each full snapshot,
 # holding ONLY its "summary" dict -- named here, once, so the writer
 # (depcheck/edy-rdp-depsnapshot.py) and the reader (list_snapshots() below)
@@ -277,7 +285,7 @@ def list_snapshots(directory):
     for path in sorted(glob.glob(os.path.join(directory, "*.json")), reverse=True):
         if path.endswith(SUMMARY_SUFFIX):
             continue
-        if not TIMESTAMP_RE.match(os.path.basename(path)[:-len(".json")]):
+        if not TIMESTAMP_RE.fullmatch(os.path.basename(path)[:-len(".json")]):
             continue  # not one of ours (KNOWN_ISSUES I51 F5) -- e.g. a stray notes.json
         summary_path = path[:-len(".json")] + SUMMARY_SUFFIX
         try:
@@ -322,13 +330,13 @@ def load_snapshot(directory, timestamp_or_latest="latest"):
         files = sorted(
             p for p in glob.glob(os.path.join(directory, "*.json"))
             if not p.endswith(SUMMARY_SUFFIX)
-            and TIMESTAMP_RE.match(os.path.basename(p)[:-len(".json")])
+            and TIMESTAMP_RE.fullmatch(os.path.basename(p)[:-len(".json")])
         )
         if not files:
             return None
         path = files[-1]
     else:
-        if not TIMESTAMP_RE.match(timestamp_or_latest or ""):
+        if not TIMESTAMP_RE.fullmatch(timestamp_or_latest or ""):
             return None
         path = _snapshot_path(directory, timestamp_or_latest)
         if not os.path.isfile(path):
@@ -538,7 +546,11 @@ class DepCheck:
         "2": "this host's package manager has no native rollback (only dnf/yum "
              "do) — see the manual command hint recorded for each changed "
              "tracked package instead",
-        "3": "no dnf/yum transaction was recorded in the latest snapshot to undo",
+        "3": "the latest dependency snapshot recorded no transaction to roll back — "
+             "either nothing has been snapshotted yet, install_deps() made no dnf/yum "
+             "change, or the latest snapshot is not a completed post-deploy one (a "
+             "deploy may have aborted before it ran) — let a deploy finish, which "
+             "records a proper post-deploy snapshot",
         "4": "a newer dnf/yum transaction exists on this host than the one "
              "recorded in the snapshot; refusing to guess which one to undo — "
              "take a fresh snapshot and see what changed",
