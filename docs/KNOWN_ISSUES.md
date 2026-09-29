@@ -854,3 +854,46 @@ built correctly, opens/closes via the button/close-button/backdrop-click idiom, 
 `refreshUi()` show/hide logic still works on the reparented fields, and the tab/URL sync round-trips AND
 fires `hashchange` (simulating the listener Cockpit's shell registers) — for all three modes; not
 live-tested against a real Cockpit/relay session in this pass.
+
+### I48 · Console (mirror) connect with nobody signed in on the seat dead-ended instead of offering the greeter · Sev M · FIXED (1.6.0.20260929)
+Reported as the first hop of the I47 scenario: on a freshly booted host with no local login, connecting
+to the Console mirror (from the main panel, the Pop-out's auto-connect, or the pop-out's monitor-picker
+reconnect) failed opaquely — a bridge transport error, or nothing listening on the per-user :3389 grd at
+all. That is inherent: `mirror-primary` streams the seat's per-user desktop, and pre-login there is no
+desktop; the GDM greeter (a session of its own) is the only thing that can render before someone signs
+in. 1.5.0 made recovery *possible* by hand (open Session…, pick Login screen, sign in, switch back) but
+the user still had to diagnose the dead end themselves first.
+
+This is a **different case from the locked seat** (I38/I39, `LOCKED_SEAT_RE`): there a session exists
+and is worth resuming, which is exactly why that path deliberately does NOT auto-redirect to the greeter
+(a greeter login starts a NEW session and cannot attach to the locked one — it resets the login rather
+than resuming it). With zero local logins there is no session to preserve, so switching loses nothing.
+That handling is untouched.
+
+**Fix (`guac-rdp.js`, `resolveConsoleFallback()` + `showToast()`; `#toast` in `guac-rdp.css`):**
+`connect()` now resolves the effective scenario BEFORE dialling out. For `console` only, it asks the
+relay's existing read-only `deskui-status` control op (the same one the Desktop UI tab renders; any
+authenticated caller, not admin-gated) for `active_graphical_sessions` — computed server-side as
+"active, graphical, seated, non-greeter sessions right now", so `0` means nobody is locally logged in.
+On an explicit `0` it flips the Session selector to `greeter`, runs `refreshUi()` so the dropdown and
+hint reflect it, shows a transient toast ("No one is signed in on the physical console — opening the
+sign-in screen instead.") and connects to the greeter — a seamless fail-over, not a message-and-stop.
+Anything else (a count > 0, a control error, a channel that will not open, a missing field, or no answer
+within 4s) proceeds with `console` exactly as before: the probe **fails open**, like the relay's own
+`physical_session_locked()`, and can never block a normal console connect. Scoped strictly to `console`
+(`virtual` etc. never probe); every caller funnels through `connect()` so all three entry points get it
+without special-casing; no re-entry (the resolved key goes to the split-out `connectAs()`, which never
+calls `connect()`). No relay code changed. The toast is the project's first transient notification
+(there was only the persistent `#status` line): one lazily created `#toast` div, `role="status"`/
+`aria-live="polite"`, `pointer-events:none`, bottom-centre, same `--panel`/`--ink`/`--line` surface as
+the Session… card, fade in/out, self-dismissed after 5s. Known and accepted: like `#status` it sits
+outside the Session… `<dialog>`, so while that modal is open (browser top layer) it renders dimmed
+behind the `::backdrop` — consistent with `#status` today, not worth a second modal.
+
+Verified via a DOM-level smoke test (jsdom, ad hoc, scratch project, not a repo dependency — same
+approach as I47) driving the real `index.html` + `guac-rdp.js` through `connect()` with `cockpit` and
+`Guacamole` stubbed, asserting on the `scenario=` marker in the wire-level `connect` instruction: 0
+sessions → `greeter` + toast; 1 session → `console`, no toast; control reject / synchronous throw /
+no answer (timeout) → `console`; `virtual`/`greeter` never probe; the `#seat` pop-out auto-connect
+takes the same path; toast auto-hides and a second toast resets its clock. Not live-tested against a
+real Cockpit/relay session in this pass — confirm on edt1 against a freshly booted seat.

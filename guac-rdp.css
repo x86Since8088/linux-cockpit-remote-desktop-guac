@@ -86,6 +86,23 @@ html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-spac
 #sessioncard .row { display:flex; gap:.5rem; align-items:center; }
 #sessioncard .row button { flex:1; }
 #sessioncard #sessionclose { flex:none; padding:.15rem .5rem; }
+/* Transient toast (showToast()): a small self-dismissing notice for something the
+   panel did on its own, e.g. switching to the greeter because nobody is signed in
+   on the seat. Not a persistent line like .status: it floats bottom-centre, fades
+   in/out, and takes no pointer events so it can never sit under a click. Same
+   surface treatment as the Session… card. Like #status it lives OUTSIDE that
+   <dialog>, so while the modal is open (browser top layer) it renders dimmed
+   behind the ::backdrop -- accepted, same as #status already does. */
+#toast { position:fixed; left:50%; bottom:1.5rem; z-index:30;
+  transform:translate(-50%, .5rem); opacity:0; pointer-events:none;
+  max-width:calc(100vw - 2rem); box-sizing:border-box;
+  padding:.6rem 1rem; font-size:.8125rem;
+  background:var(--panel); color:var(--ink); border:1px solid var(--line);
+  border-radius:6px; box-shadow:0 8px 32px rgba(0,0,0,.5);
+  transition:opacity .25s ease, transform .25s ease; }
+#toast.show { opacity:1; transform:translate(-50%, 0); }
+#toast.err { background:var(--err-bg); color:var(--err); }
+#toast.ok  { background:var(--ok-bg);  color:var(--ok); }
 .hint { padding:.5rem .9rem; font-size:.75rem; color:var(--muted);
         background:var(--panel); border-bottom:1px solid var(--line); }
 .status { padding:.5rem .9rem; font-size:.8125rem; background:var(--panel); border-bottom:1px solid var(--line); }

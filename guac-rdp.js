@@ -676,6 +676,25 @@
 
     function setStatus(msg, kind) { var e = $("status"); e.textContent = msg; e.className = "status" + (kind ? " " + kind : ""); }
 
+    // A transient notice for something the panel did ON ITS OWN (e.g. quietly
+    // switching scenario), as distinct from setStatus(), the persistent
+    // connection-state line: it fades out by itself and takes no pointer events,
+    // so it can neither be missed as "the current state" nor get in the way of
+    // a click. A second toast while one is showing restarts the clock.
+    var TOAST_MS = 5000, toastTimer = null;
+    function showToast(msg, kind) {
+        var el = $("toast");
+        if (!el) {
+            el = document.createElement("div"); el.id = "toast";
+            el.setAttribute("role", "status"); el.setAttribute("aria-live", "polite");
+            document.body.appendChild(el);
+        }
+        el.textContent = msg;
+        el.className = (kind ? kind + " " : "") + "show";
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toastTimer = null; el.classList.remove("show"); }, TOAST_MS);
+    }
+
     // Unlocking the seat is the ONLY way to resume the session the user left.
     // The greeter starts a new one; Wayland VNC and Isolated are separate
     // desktops; grd refuses console/virtual outright while locked. So when that
@@ -904,11 +923,39 @@
         }).catch(function () { return { token: null, admin: false }; });
     }
 
+    // Pre-login there is no desktop for grd to mirror, so the console scenario
+    // can only fail until someone signs in on the physical seat -- and the
+    // greeter is the one thing that CAN render before that. When nobody is
+    // logged in locally at all (zero active graphical seat sessions) there is
+    // no session to preserve, so switching to the greeter loses nothing. This
+    // is deliberately NOT the LOCKED_SEAT_RE case: a locked seat still holds a
+    // session worth resuming, and that path stays a manual choice. Resolves to
+    // the key to actually connect. Best-effort and FAIL-OPEN, like the relay's
+    // physical_session_locked(): a probe error, non-answer or timeout means
+    // "connect to console as asked" -- it never blocks a normal connect.
+    var CONSOLE_PROBE_MS = 4000;
+    function resolveConsoleFallback(key) {
+        if (key !== "console") return cockpit.resolve(key);
+        setStatus("Checking who is signed in on the physical console…");
+        var timeout = new Promise(function (resolve) { setTimeout(function () { resolve(null); }, CONSOLE_PROBE_MS); });
+        return Promise.race([controlRequest({ op: "deskui-status" }), timeout])
+            .then(function (r) {
+                if (!r || !r.ok || r.active_graphical_sessions !== 0) return key;
+                $("target").value = "greeter";
+                refreshUi();
+                showToast("No one is signed in on the physical console — opening the sign-in screen instead.");
+                return "greeter";
+            })
+            .catch(function () { return key; });
+    }
+
     function connect(forceKey) {
-        var key = forceKey || $("target").value, t = TARGETS[key];
-        // A user-initiated connect re-arms the one-shot locked-seat fallback; the
-        // fallback itself passes forceKey, so it can never re-arm and loop.
         $("go").disabled = true;
+        resolveConsoleFallback(forceKey || $("target").value).then(connectAs);
+    }
+
+    function connectAs(key) {
+        var t = TARGETS[key];
         // Remote is admin-gated only if the server sets EDY_RDP_REMOTE_ADMIN_ONLY;
         // prove admin when the Cockpit session is already elevated (no polkit prompt
         // for non-admins), otherwise register a plain token and let the relay decide.
@@ -1108,6 +1155,7 @@
             if (s === 3) setStatus(
                 key === "isolated" ? "Connected to your isolated desktop."
                 : key === "console" ? "Connected to the physical console."
+                : key === "greeter" ? "Connected to the sign-in screen."
                 : key === "vnc"     ? ("Connected to VNC at " + $("host").value.trim() + ".")
             : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
                 : "Connected to your virtual monitor.", "ok");

@@ -1,3 +1,83 @@
+## 1.6.0.20260929 - 2026-09-29
+
+Connecting to the Console (mirror) while nobody is signed in on the physical
+seat now switches itself to the Login screen (greeter) instead of dialling a
+mirror that has nothing to show, and says so with a small transient toast.
+Locked-seat handling is unchanged.
+
+- **The problem (I48):** the console scenario is a live `mirror-primary`
+  screencast of the seat's per-user desktop. Before anyone has logged in
+  locally there IS no desktop for grd to mirror -- the only thing that can
+  render pre-login is the GDM greeter, in a session of its own (the existing
+  comment in `enterSeatMode()` already spelled this out). So a console connect
+  on a freshly booted host could only ever fail, and it failed opaquely (a
+  bridge transport error, or nothing listening on :3389 at all). 1.5.0 gave
+  the pop-out a "Session…" card precisely so a user could recover from this
+  by hand -- pick `greeter`, sign in, switch back -- but the first hop was
+  still a dead end the user had to diagnose themselves. This is a DIFFERENT
+  case from the existing `LOCKED_SEAT_RE` path (I38/I39): there, a session
+  exists and is worth resuming, which is exactly why that path deliberately
+  does NOT redirect to the greeter (a greeter login starts a NEW session, it
+  cannot attach to the locked one). With zero local logins there is no
+  session to preserve, so switching loses nothing.
+- **The fix (`guac-rdp.js`, `resolveConsoleFallback()`):** `connect()` now
+  resolves the effective scenario BEFORE dialling out. For `console` only, it
+  asks the relay's existing read-only `deskui-status` control op (the same one
+  the Desktop UI tab uses; not admin-gated) for `active_graphical_sessions` --
+  server-side that is "active, graphical, seated, non-greeter sessions right
+  now", so `0` means nobody is locally logged in. On an explicit `0` it flips
+  the Session selector to `greeter`, runs `refreshUi()` so the dropdown and
+  hint visibly reflect it, shows the toast, and connects to the greeter --
+  a seamless fail-over, not a message-and-stop. Anything else (a count > 0,
+  a control error, a channel that will not open, a missing field, or no
+  answer within 4s) proceeds with `console` exactly as before: the probe
+  FAILS OPEN, mirroring the relay's own `physical_session_locked()`, and can
+  never block a normal console connect. Because every caller funnels through
+  `connect()` -- the Connect button, `enterSeatMode()`'s auto-connect and the
+  seat pop-out's monitor-picker reconnect -- all three get it without being
+  special-cased, and it is scoped strictly to `console` (`virtual` and every
+  other scenario never probe). No re-entry is possible: the resolved
+  `greeter` key goes to the split-out `connectAs()`, which never calls
+  `connect()`; a later Sound/Resolution reconnect uses `activeKey`, which is
+  now `greeter`. No relay/control code changed -- the op already existed.
+- **The toast (`showToast()`, `#toast` in `guac-rdp.css`):** this codebase had
+  no transient notification at all -- only the persistent `#status` line,
+  which is the wrong vehicle for "I did something on your behalf" (it reads
+  as the current connection state and is overwritten by the next status a
+  moment later). `showToast(msg, kind)` lazily creates one `#toast` div
+  (`role="status"`, `aria-live="polite"`, `pointer-events:none`), bottom-
+  centre, styled with the same `--panel`/`--ink`/`--line` surface as the
+  Session… card, faded in/out via an opacity+transform transition and
+  self-dismissed after 5s (a second toast resets the clock rather than
+  fighting the first). Deliberately just that one function -- no queue, no
+  positions, no options. Known and accepted: like `#status`, it lives outside
+  the Session… `<dialog>`, so if it fires while that modal is open it renders
+  dimmed behind the `::backdrop` (the browser's top layer beats any z-index);
+  consistent with how `#status` already behaves there, and not worth a second
+  modal to fight.
+- **Copy:** the "Connected…" status had no case for `greeter` and fell through
+  to "Connected to your virtual monitor." -- now more likely to be seen, since
+  the fail-over lands people there without them having picked it. It now
+  reads "Connected to the sign-in screen." Also dropped a stale comment at the
+  top of `connect()` describing a one-shot locked-seat re-arm that no longer
+  exists in the code.
+- **Verification:** `run_tests.sh` green (Python untouched; `node --check`
+  clean). A DOM-level smoke test (ad hoc jsdom, same approach as 1.5.0 -- a
+  scratch npm project, not a repo dependency; the real `index.html` +
+  `guac-proto.js` + `guac-rdp.js` with `cockpit` and `Guacamole` stubbed just
+  far enough to drive `connect()` through registration, the admin challenge,
+  gate-key fetch and `start()`) asserted on the `scenario=` marker in the
+  wire-level `connect` instruction the tunnel actually sends, not on an
+  intermediate variable: 0 sessions -> selector `greeter`, hint refreshed,
+  toast present with the expected text/role/aria-live and hidden again after
+  ~5s, `scenario=greeter` on the wire, exactly one probe; 1 session ->
+  `scenario=console`, no toast; control channel closing with a problem, OR
+  `cockpit.channel()` throwing synchronously, OR never answering (timeout)
+  -> all `scenario=console`; `virtual`/`greeter` never issue the probe; the
+  `#seat` pop-out's auto-connect takes the same fail-over; and the greeter
+  "Connected…" copy. Not live-tested against a real Cockpit/relay session in
+  this pass -- deploy to edt1 and confirm on a freshly booted seat.
+
 ## 1.5.0.20260929 - 2026-09-29
 
 The full connect controls (Session, Sign-in, Resolution, Scale, Clipboard,
