@@ -366,6 +366,88 @@ def physical_session_locked():
         return False
     return False
 
+
+def _is_seated_graphical_session(props):
+    """True iff a PARSED `loginctl show-session` property dict describes an
+    ACTIVE, graphical, SEATED, non-greeter session — i.e. someone is physically
+    at that seat right now. Same field shape as _session_locked_props() (Class
+    instead of LockedHint: a greeter is not a person watching a desktop)."""
+    return (bool(props.get("Seat")) and props.get("Active") == "yes"
+            and props.get("Type") in ("wayland", "x11")
+            and props.get("Class") != "greeter")
+
+
+def seated_uids():
+    """UIDs of everyone with an active, graphical, seated, non-greeter session
+    right now, or None if that could not be determined AT ALL.
+
+    This feeds an authorization decision (the shadow-group gate), not a
+    cosmetic error relabeling like physical_session_locked() above — so unlike
+    that function it FAILS CLOSED: None means "cannot rule out someone else
+    being seated", never "nobody is seated".
+
+    Deliberately does NOT reuse _active_graphical_sessions()'s "skip a session
+    whose own show-session lookup fails" precedent: that function's failure
+    mode is cosmetic (a miscounted desktop-in-use tally), so treating a lookup
+    error the same as "this session doesn't exist" is harmless there. Here it
+    is not — `loginctl show-session` gives no reliable way to tell "the
+    session ended between list and show" (benign) apart from "logind/D-Bus
+    hiccuped on this one query" (not benign, and NOT something a request
+    should be waved through on) — found by review: the earlier version of
+    this function skipped both alike, which silently turned an authorization
+    gate fail-open exactly when it mattered most. So ANY show-session failure
+    (exception, non-zero exit, or a seated session with an unparseable User=)
+    fails the WHOLE call closed (None) rather than just dropping that one
+    session — trading a narrow, rare false "someone might be seated" against
+    ever silently reporting an empty seat that isn't."""
+    try:
+        listed = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                                capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if listed.returncode != 0:
+        return None
+    uids = set()
+    for ln in listed.stdout.splitlines():
+        parts = ln.split()
+        if not parts:
+            continue
+        try:
+            props = subprocess.run(
+                ["loginctl", "show-session", parts[0],
+                 "-p", "Type", "-p", "Active", "-p", "Seat", "-p", "Class",
+                 "-p", "User"],
+                capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if props.returncode != 0:
+            return None
+        d = {}
+        for pline in props.stdout.splitlines():
+            if "=" in pline:
+                k, v = pline.split("=", 1)
+                d[k] = v
+        if not _is_seated_graphical_session(d):
+            continue
+        try:
+            uids.add(int(d.get("User", "")))
+        except ValueError:
+            return None
+    return uids
+
+
+def shadow_gate_required(seated, requester_uid):
+    """True iff the shadow-group gate must be satisfied for a console connect.
+
+    `seated` is seated_uids()'s return value. None (cannot determine who, if
+    anyone, is at the seat) is treated as "someone else might be" — fail
+    closed, the same posture is_admin() takes on a lookup it cannot resolve.
+    Otherwise the gate applies iff a uid OTHER than the requester is seated;
+    nobody seated, or the requester seated alone, needs no extra gate."""
+    if seated is None:
+        return True
+    return bool(seated - {requester_uid})
+
 # Per-user isolated headless sessions (docs/KNOWN_ISSUES I29). The "isolated"
 # scenario routes to the caller's OWN headless GNOME session on a loopback port,
 # brought up on demand by edy-rdp-headless@<uid>.service, avoiding the broken
@@ -760,12 +842,14 @@ SESSION_TOKENS = SessionTokens()
 
 
 class Connection:
-    def __init__(self, client, uid, table, guacd_addr, admin_group):
+    def __init__(self, client, uid, table, guacd_addr, admin_group,
+                 shadow_group="rdp-shadow"):
         self.client = client
         self.uid = uid
         self.table = table
         self.guacd_addr = guacd_addr
         self.admin_group = admin_group
+        self.shadow_group = shadow_group
         self.guacd = None
         self.up_buf = ""    # client -> guacd
         self.down_buf = ""  # guacd -> client
@@ -919,6 +1003,24 @@ class Connection:
                              "Administrative access in Cockpit's header, then reconnect.")
             self.trace("admin gate PASSED for scenario=%s (proven=%s fallback=%s)",
                        scenario, proven, fallback)
+
+        # Separate, ADDITIONAL gate for console: being an admin decides whether you
+        # may use the mirror AT ALL; this decides whether you may point it at a
+        # DIFFERENT signed-in user's desktop rather than your own or an empty seat.
+        # Evaluated on every connect (who is seated can change between connects),
+        # never cached. EDY_RDP_SHADOW_GROUP empty => this gate is off entirely.
+        if scenario == "console" and self.shadow_group:
+            seated = seated_uids()
+            required = shadow_gate_required(seated, self.uid)
+            if required and not is_admin(self.uid, self.shadow_group):
+                self.trace("REFUSE shadow gate: scenario=%s seated=%s requester_uid=%d "
+                           "shadow_group=%r", scenario, seated, self.uid, self.shadow_group)
+                raise Refuse("mirroring another signed-in user's screen needs "
+                             "membership in the '%s' unix group — ask an operator to "
+                             "add your account to it, or have that user sign out "
+                             "first, then reconnect." % self.shadow_group)
+            self.trace("shadow gate PASSED for scenario=%s seated=%s required=%s",
+                       scenario, seated, required)
 
         # A VNC target needs no bridge. The FreeRDP3 bridge exists solely to turn
         # RDP into VNC for guacd; guacd already speaks VNC, so the operator's target
@@ -1209,7 +1311,7 @@ def _send_error_and_close(client, message):
         pass
 
 
-def handle(client, table, live, guacd_addr, admin_group):
+def handle(client, table, live, guacd_addr, admin_group, shadow_group="rdp-shadow"):
     try:
         _pid, uid, _gid = peer_credentials(client)
     except OSError as exc:
@@ -1218,7 +1320,7 @@ def handle(client, table, live, guacd_addr, admin_group):
         return
     log.info("accept uid=%d (%s)", uid, _safe_username(uid))
 
-    conn = Connection(client, uid, table, guacd_addr, admin_group)
+    conn = Connection(client, uid, table, guacd_addr, admin_group, shadow_group)
     conn.allow_targets = ALLOW_TARGETS
     conn.trace("ACCEPT pid=%d user=%s -> guacd %s", _pid, _safe_username(uid), guacd_addr)
     try:
@@ -1470,11 +1572,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="edy-rdp guacd relay")
     ap.add_argument("--listen", default="/run/edy-rdp/guacd.sock",
                     help="AF_UNIX path (ignored under systemd socket activation)")
-    ap.add_argument("--group", default="edy-rdp", help="socket group when self-binding")
+    ap.add_argument("--group", default="cockpit-guac-rdp", help="socket group when self-binding")
     ap.add_argument("--mode", default="0660", help="socket mode when self-binding")
     ap.add_argument("--guacd", default="127.0.0.1:4822",
                     help="guacd endpoint: host:port or unix:/path (pod-internal)")
     ap.add_argument("--admin-group", default="sudo", help="group granting console access")
+    ap.add_argument("--shadow-group", default="rdp-shadow",
+                    help="group additionally required to mirror a DIFFERENT signed-in "
+                         "user's console session (on top of the admin gate above). "
+                         "Empty = this extra gate is off.")
     ap.add_argument("--state-file", default="/run/edy-rdp/sessions.json",
                     help="persistent session registry (pruned by the reaper)")
     ap.add_argument("--control", default="/run/edy-rdp/control.sock",
@@ -1547,7 +1653,8 @@ def main(argv=None):
         except (InterruptedError, BlockingIOError):
             continue
         t = threading.Thread(target=handle,
-                             args=(client, table, live, guacd_addr, args.admin_group),
+                             args=(client, table, live, guacd_addr, args.admin_group,
+                                   args.shadow_group),
                              daemon=True)
         t.start()
 

@@ -5,7 +5,7 @@ Description=edy-rdp guacd relay socket (sole ingress)
 ListenStream=/run/edy-rdp/guacd.sock
 SocketMode=0660
 SocketUser=root
-SocketGroup=edy-rdp
+SocketGroup=cockpit-guac-rdp
 FileDescriptorName=data
 
 [Install]

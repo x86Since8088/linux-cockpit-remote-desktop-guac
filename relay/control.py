@@ -3,7 +3,7 @@
 # control.py — the relay's management API (list / terminate sessions).
 #
 # Exposed on a SECOND AF_UNIX socket (/run/edy-rdp/control.sock, 0660 group
-# edy-rdp), separate from the guacd data socket. The Cockpit plugin's
+# cockpit-guac-rdp), separate from the guacd data socket. The Cockpit plugin's
 # "Active Sessions" tab speaks newline-delimited JSON to it. The caller is
 # identified by SO_PEERCRED (kernel-supplied uid); a user sees and may terminate
 # only their OWN sessions, an admin sees and may terminate all. This is also

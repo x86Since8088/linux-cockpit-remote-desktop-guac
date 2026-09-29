@@ -1,3 +1,196 @@
+## 1.9.1.20260929 - 2026-09-29
+
+Fixes a real, high-severity defect in 1.9.0's group-rename migration, found by a
+multi-agent adversarial review (three dimensions in parallel — rename completeness,
+migration safety, whether the new non-admin-access test/docs actually prove what they
+claim — each candidate finding independently re-checked by a skeptic on a different
+model) before this ever reached edt1 or was pushed. 5 of 6 candidate findings confirmed;
+1 refuted.
+
+- **HIGH: gating the `groupmod` migration behind `--with-users` broke the very redeploy
+  pattern this project uses every day.** `install.sh`'s preflight has always required
+  `$RELAY_GROUP` to exist unconditionally, assuming a fresh host ran `--with-users` once
+  and every plain redeploy since could rely on the group already being there. 1.9.0 gated
+  the *rename* behind that same flag — so a plain `deploy.sh` (the pattern used for every
+  routine update this project makes, and the only one self-update's own `deploy.sh`
+  invocation ever uses) would warn correctly and then immediately hit install.sh's fatal
+  group-missing check anyway, on every host deployed before this rename. Verified against
+  edt1's actual state (`edy-rdp:x:970:cptest,eddie,cpadmin,eddie2` exists;
+  `cockpit-guac-rdp` does not) and reproduced end to end: self-update to 1.9.0 would have
+  failed deterministically on the one real deployment until an operator intervened by
+  hand. Fixed: the rename is now its own `migrate_group_rename()`, run unconditionally in
+  `do_deploy()` — same reasoning as the pre-existing `migrate_legacy_env()` — while
+  `create_users()` (still `--with-users`-gated) goes back to a plain check-and-create for
+  a genuinely fresh host.
+- **A bug the fix itself introduced, caught by this project's own test suite before it
+  shipped:** making the migration unconditional meant it also ran during the staged/
+  DESTDIR roundtrip test, which executes on a real host that may itself have a genuine
+  `edy-rdp` group (this one does) — and attempted `groupmod` against this session's actual
+  system group table during a test that must never touch real host state.
+  `run_tests.sh` caught it immediately; confirmed no mutation actually occurred before
+  fixing it with the same `-z "$D"` guard `preflight()`'s noexec check already uses.
+- Two low-severity doc fixes: the CHANGELOG's own verification paragraph mis-stated the
+  post-rename test count (203 instead of 199), and two stale `relay/selfupdate.py`
+  comments still named the pre-rename group.
+- Refuted: a claim that the new `NonAdminAccess` tests prove nothing (they'd also pass
+  for an admin uid) — true but beside the point; a mutation test confirmed they correctly
+  fail if an admin gate is later added to any of the four scenarios they cover.
+- **Verification:** `run_tests.sh` green throughout, including the previously-failing
+  staged installer/deploy roundtrip test.
+
+## 1.9.0.20260929 - 2026-09-29
+
+Renames the relay's unix group from `edy-rdp` to `cockpit-guac-rdp` (matching the
+project's own name), with a real migration so an already-deployed host — edt1,
+today, with real members in the old group — does not silently lose access; adds an
+automated test that locks in an existing property (non-admin group members already
+have full access to most scenarios); and writes that access model down in one place
+for the first time, along with an honest hardening analysis.
+
+- **Rename.** Every place the group name is a literal — `install.sh`'s manifest
+  (`RELAY_GROUP`), `relay/selfupdate.py`'s hand-kept-in-sync duplicate,
+  `relay/edy_rdp_relay.py`'s `--group` fallback default, the three systemd unit
+  files' `Group=`/`SocketGroup=` lines, `systemd/edy-rdp-tmpfiles.conf`'s GID
+  column, and the legacy `pod/edy-rdp-pod.yaml` — now says `cockpit-guac-rdp`.
+  Unit names, `/run/edy-rdp` paths, `/usr/libexec/edy-rdp`, every `EDY_RDP_*`
+  env-var name (including `EDY_RDP_ADMIN_GROUP`/`EDY_RDP_SHADOW_GROUP`, whose
+  *names* contain `EDY_RDP` but whose *values* are unrelated unix groups), and
+  the nftables table names are all project identifiers, not the group, and are
+  untouched. Prose in README.md and docs/ updated to match.
+- **The migration that makes this safe.** A naive check-and-create
+  (`getent group cockpit-guac-rdp || groupadd`) would have left an existing
+  host's real `edy-rdp` group — GID and members intact — sitting unused while a
+  brand-new, EMPTY `cockpit-guac-rdp` group got created, and every existing
+  member would have silently lost access the moment the relay/sockets picked up
+  the new group name on their next restart. `deploy.sh`'s `create_users()`
+  (still gated behind `--with-users`, like every other host-mutating action in
+  this script) now tries `groupmod -n cockpit-guac-rdp edy-rdp` — same GID, same
+  members, nothing dropped — before ever falling back to a fresh `groupadd`,
+  which now only happens when *neither* name exists (a genuinely new host). A
+  plain `deploy.sh` run (no `--with-users`) cannot perform that rename itself —
+  matching how this script never mutates the host without the flag — so it now
+  warns loudly instead, if the old group exists and the new one does not yet,
+  naming the exact `groupmod` command an operator needs before the next relay
+  restart or unit reload.
+- **New test:** `relay/test_edy_rdp_relay.py`'s `NonAdminAccess` proves, for the
+  first time as an explicit assertion, that isolated / virtual monitor /
+  wayland-vnc / greeter never raise `Refuse` for a non-admin, non-elevated uid —
+  `ADMIN_ONLY_SCENARIOS` is exactly `{"console"}`, so reaching the relay (i.e.
+  group membership) has always been the whole gate for these four. Nothing in
+  the relay's behavior changed; this closes the gap that nothing in the test
+  suite asserted it.
+- **New doc:** `docs/GROUP-ACCESS-MODEL.md` states plainly what the group gate
+  is necessary AND sufficient for, what needs more (console: always admin, plus
+  `EDY_RDP_SHADOW_GROUP` when mirroring a different seated user; remote/vnc:
+  an admin-populated `EDY_RDP_REMOTE_ALLOW`), the greeter scenario's specific
+  risk (a member can attempt to sign in as any account the host knows, not just
+  their own), and concrete operator hardening recommendations. README.md gets a
+  short "Who the group actually admits" section pointing at it; the
+  `usermod -aG $RELAY_GROUP <user>` banner in `deploy.sh`/`install.sh` now
+  points there too, since on its own it reads as a complete instruction when it
+  never was one.
+- **Verification:** `run_tests.sh` green throughout (199 relay unit tests, up
+  from 195 -- 67 of them in `relay/test_edy_rdp_relay.py` alone, up from 63;
+  `install.sh --verify`'s manifest-completeness gate and the staged
+  installer/deploy roundtrip tests unaffected).
+
+## 1.8.1.20260929 - 2026-09-29
+
+Fixes two real bugs in 1.8.0's shadow-group gate, both found by a multi-agent adversarial
+review (four dimensions in parallel — seat-identity detection correctness, whether the
+fail-closed design is actually fail-closed everywhere, config/deploy safety, test/doc
+accuracy — each candidate finding independently re-checked by a skeptic on a different
+model) before this ever reached edt1 or was pushed. 3 of 7 candidate findings confirmed; the
+other 4 — including a claim that uid 0 unconditionally bypasses the gate — refuted (root
+already has every capability this gate could restrict, and cannot log into this project's
+Cockpit at all under its own shipped `disallowed-users` default).
+
+- **`seated_uids()`'s per-session failure handling was exactly backwards for an
+  authorization function.** It treated a `loginctl show-session` call that raised or
+  returned non-zero the same as "that session doesn't exist" (skip and continue), copying
+  `_active_graphical_sessions()`'s existing precedent for a narrow session-ended-mid-query
+  race — but that precedent's function is cosmetic (a miscounted desktop-in-use tally),
+  while this one decides who may watch whom. Reproduced: `list-sessions` reporting two real
+  seated uids while every `show-session` call failed made the function return an EMPTY set
+  instead of `None`, silently skipping the shadow-group check for an admin who was never
+  actually verified against it — in precisely the situation the fail-closed `None` path
+  exists to catch. Fixed: any `show-session` failure now fails the WHOLE call closed
+  (`None`), not just that one session.
+- **Two integration tests used uid 0 (root) to prove the gate correctly does not apply**
+  when nobody else is seated or the requester is the one seated — but `is_admin()` exempts
+  uid 0 unconditionally regardless of group, so those tests could not tell "the exemption
+  logic worked" apart from "the gate ran and trivially passed because the caller is root." A
+  mutation test proved it: hard-coding the gate to apply unconditionally still left the whole
+  suite green. Fixed by switching both to a non-root admin uid with `is_admin()` mocked
+  explicitly.
+- **Verification:** `run_tests.sh` green throughout. A new `SeatedUidsSubprocessHandling`
+  test class drives the real `seated_uids()` against a fake `subprocess.run` (every prior
+  test monkey-patched `seated_uids()` itself away entirely, so this exact regression had zero
+  coverage) — clean success, a greeter correctly excluded, and every categorical-failure mode
+  asserted to return `None`. `relay/test_edy_rdp_relay.py` now has 63 tests (up from 55).
+
+## 1.8.0.20260929 - 2026-09-29
+
+New capability: a shadow-group gate for the console (mirror) scenario, on top of the
+existing admin gate (I4), which is completely unchanged. Being a Cockpit administrator
+already decides whether you may use the console mirror at all; it says nothing about
+whether you may point it at a **different signed-in user's** active desktop rather than
+an empty seat or your own. That is a genuinely separate privacy question, and this
+release gives it its own, separately-provisioned answer.
+
+- **The gate.** When a console connect targets a seat where a DIFFERENT uid than the
+  requester is currently signed in, the requester must also be a member of a
+  configurable unix group (`EDY_RDP_SHADOW_GROUP`, default `rdp-shadow`) — checked with
+  the exact same `is_admin(uid, group)` primitive the admin gate already uses (it was
+  already a generic group-membership check despite its name), reused as-is against a
+  different group. Nobody seated, or the same user seated as the requester, needs
+  nothing beyond the admin gate, exactly as before. Evaluated fresh on every console
+  connect attempt, never cached, since who is seated can change between connects.
+- **`seated_uids()` (new, `relay/edy_rdp_relay.py`)** answers "who, if anyone, is
+  physically at the seat right now" via `loginctl list-sessions` + `show-session -p
+  User`, built on a new pure classifier `_is_seated_graphical_session()` (active,
+  graphical, seated, non-greeter). It is FAIL-CLOSED by design — returns `None`, not an
+  empty set, when it cannot determine this at all — the deliberate opposite of the
+  existing `physical_session_locked()`, which fails OPEN because it only relabels an
+  opaque bridge error and must never block a connection. A new pure
+  `shadow_gate_required(seated, requester_uid)` turns that into the actual yes/no
+  decision, treating `None` as "cannot rule out someone else."
+- **Fail-closed by default, and deliberately not host-validated for existence.**
+  `rdp-shadow` is a brand-new, project-specific group name that will not exist on any
+  host until an operator creates it. Unlike `EDY_RDP_ADMIN_GROUP` (which `lib/edy-rdp-
+  env.sh` requires to already exist — `sudo` does, on essentially every real Linux
+  host), `EDY_RDP_SHADOW_GROUP` is validated only for shape (empty, or a syntactically
+  valid group name), never existence, and is deliberately left out of `install.sh`'s
+  `REQUIRED_ENV` — the same precedent `EDY_RDP_REMOTE_ALLOW` already set. Refusing every
+  install and routine redeploy (this project's own edt1 included) until an operator
+  pre-creates a custom group would be a needless, deploy-breaking foot-gun; `is_admin()`
+  already turns a missing group into "nobody is a member" with no crash risk, which is
+  exactly the safe, fail-closed default this feature ships with. `.envdefault` ships it
+  non-empty (`rdp-shadow`) so the gate is live on every fresh install; an operator may
+  explicitly blank it in their own `.env` to turn this extra check off entirely and
+  revert to admin-only console gating. The group itself is **not** auto-created by any
+  tooling here — `groupadd rdp-shadow` + `usermod -aG rdp-shadow <user>` (or pointing
+  the variable at an existing group) is an operator's own, deliberate step.
+- **Threaded exactly like `EDY_RDP_ADMIN_GROUP`:** `.envdefault` → `Environment=` +
+  `--shadow-group` in `systemd/edy-rdp-relay.service.in` → `--shadow-group` (argparse,
+  default `rdp-shadow`) in `edy_rdp_relay.py`'s `main()` → `handle()`'s args tuple →
+  `Connection.__init__`'s `self.shadow_group`, consumed by `is_admin(self.uid,
+  self.shadow_group)`.
+- Documented in `README.md` (Configuration) and `docs/SCENARIOS.md` (extends the
+  existing Console section); `docs/KNOWN_ISSUES.md` I50 records the design reasoning in
+  full, including why `seated_uids()`'s fail-closed posture must not be "fixed" to match
+  `physical_session_locked()`'s deliberately different fail-open one.
+- **Verification.** `relay/test_edy_rdp_relay.py`: `SeatedSessionPredicate` and
+  `ShadowGateDecision` exercise the two new pure functions directly with literal
+  fixtures (no subprocess, same style as the existing `LockedScreenHint`);
+  `ConsoleShadowGate` drives the real `_peek_scenario_from_connect` end to end with
+  `seated_uids()` monkey-patched (same style already used for `R.bridge.start_bridge`),
+  covering nobody-seated, same-user-seated, a-different-uid-seated with and without
+  shadow-group membership, the `None` fail-closed path with and without membership, and
+  `EDY_RDP_SHADOW_GROUP=` empty disabling the gate. `run_tests.sh` green throughout (187
+  relay unit tests across all four suites, up from 175 (12 new); the existing admin gate
+  and every other suite are unaffected — same wording, same code path, no regression).
+
 ## 1.7.1.20260929 - 2026-09-29
 
 Fixes five real defects in 1.7.0's self-update feature, all found by a multi-agent
