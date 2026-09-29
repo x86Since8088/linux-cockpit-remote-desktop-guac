@@ -48,6 +48,21 @@ the tab it was opened from. Main-panel tabs also now reflect in the URL.
   already uses (no navigation, no history spam), and restored on load --
   bookmarkable/shareable, and a refresh no longer snaps back to the Connect
   tab.
+- **The tab/URL sync didn't actually move the visible address bar** in a real
+  Cockpit session, caught by the user live: `history.replaceState()` changes
+  this document's own `location.hash`, but it does NOT fire a `hashchange`
+  event (only a real hash-navigation does). Decompiling the installed
+  `/usr/share/cockpit/base1/cockpit.js` confirmed Cockpit's shell-sync --
+  mirroring the embedded page's location into the browser's actual address
+  bar over the iframe<->parent "cockpit1" transport -- runs entirely off a
+  `window.addEventListener("hashchange", ...)` listener. Without firing that
+  event ourselves, `replaceState` silently updates the iframe's own internal
+  hash while the visible URL never moves. New shared `writeHash()` keeps
+  `replaceState` (still no history-spam) and additionally dispatches a
+  `hashchange` event by hand; both `selectTab()` and the pre-existing
+  `saveControls()` (Session/Resolution/Scale/Clipboard/Sound persistence) now
+  go through it -- the latter had the exact same silent gap since before this
+  release, just never reported.
 - **Verification:** `run_tests.sh` green (no Python/shell logic touched). A
   DOM-level smoke test (ad hoc, via jsdom against the real `index.html` +
   `guac-rdp.js` -- not part of the repo's own test suite, which uses
@@ -62,9 +77,14 @@ the tab it was opened from. Main-panel tabs also now reflect in the URL.
   correctly, a click on a field inside does not close it, `refreshUi()`'s
   existing show/hide logic still works on the reparented elements, and the
   tab/URL sync round-trips (a `#tab=sessions` URL restores to that tab on
-  load; clicking a different tab updates the hash). Not live-tested against a
-  real Cockpit/relay session in this pass -- deployed to edt1 for the user to
-  verify live before merging.
+  load; clicking a different tab updates the hash AND fires a `hashchange`
+  event, simulating the listener Cockpit's shell registers, confirming it
+  would actually notice). Not live-tested against a real Cockpit/relay
+  session in this pass -- deployed to edt1 for the user to verify live before
+  merging; this specific gap (URL updates internally but the browser's visible
+  address bar doesn't move) is exactly what a jsdom-only pass can't catch on
+  its own, since jsdom has no Cockpit shell to fail to notify -- it took the
+  user's live report to surface it.
 
 ## 1.4.2.20260928 - 2026-09-28
 

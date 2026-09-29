@@ -1650,13 +1650,14 @@
         if (id === "tab-sessions") renderSessions();
         if (id === "tab-deskui") renderDeskUi();
         // Reflect the active tab in the URL, the same way URL_CONTROLS persists
-        // Session/Resolution/etc: rewritten via replaceState (no navigation, no
-        // history spam) so the tab survives a refresh and is bookmarkable/
-        // shareable, preserving any other hash segment (mode tokens, controls).
+        // Session/Resolution/etc: rewritten via writeHash() (replaceState, so no
+        // navigation/history spam) so the tab survives a refresh and is
+        // bookmarkable/shareable, preserving any other hash segment (mode
+        // tokens, controls).
         var keep = [];
         _hashSegments().forEach(function (seg) { if (_segKey(seg) !== "tab") keep.push(seg); });
         keep.push("tab=" + name);
-        try { history.replaceState(history.state, "", "#" + keep.join("&")); } catch (e) { /* ignore */ }
+        writeHash("#" + keep.join("&"));
     }
 
     // ---- toggle/selector persistence -----------------------------------------
@@ -1678,6 +1679,26 @@
         { key: "audio",  id: "opt-audio",     kind: "check"  }
     ];
     var CONTROLS_LS_KEY = "edy-rdp-controls";
+    // history.replaceState() changes location.hash but does NOT fire a
+    // "hashchange" event -- only a real hash-navigation does (a bare
+    // `location.hash = x` assignment, a same-page anchor click, back/forward).
+    // Cockpit's OWN shell-sync depends entirely on that event: decompiling the
+    // installed /usr/share/cockpit/base1/cockpit.js shows its `location`
+    // getter/setter and a `window.addEventListener("hashchange", ...)` handler
+    // that calls `cockpit.hint("location", {hash})` to tell the shell (over
+    // the iframe<->parent "cockpit1" transport) what the embedded page's
+    // current location is, which is what makes the shell mirror it into the
+    // VISIBLE browser address bar. Without firing that event ourselves,
+    // replaceState silently updates this document's own location.hash while
+    // the address bar the user actually sees never moves -- exactly what was
+    // reported ("the url stays on tab=connect"). replaceState is kept (a bare
+    // assignment would push a new history entry per change, the "history
+    // spam" the comment below used to warn against); we just also dispatch
+    // the event by hand so Cockpit's listener notices.
+    function writeHash(newHash) {
+        try { history.replaceState(history.state, "", newHash); } catch (e) { /* ignore */ }
+        try { window.dispatchEvent(new Event("hashchange")); } catch (e) { /* ignore */ }
+    }
     function _hashSegments() {
         var h = location.hash.replace(/^#/, "");
         return h ? h.split("&") : [];
@@ -1726,9 +1747,9 @@
         if ($("scale")) scaleMode = $("scale").value || "fit";
         syncPassthroughFlags();
     }
-    // Persist controls on change: rewrite the hash (preserving any mode token) via
-    // replaceState -- no reload, no history spam, no Cockpit-shell navigation side
-    // effect -- and snapshot to localStorage.
+    // Persist controls on change: rewrite the hash (preserving any mode token)
+    // via writeHash() -- no reload, no history spam, but the Cockpit shell
+    // DOES see it (see writeHash's comment) -- and snapshot to localStorage.
     function saveControls() {
         var keep = [], controlKeys = URL_CONTROLS.map(function (c) { return c.key; }), vals = {};
         _hashSegments().forEach(function (seg) {
@@ -1739,8 +1760,7 @@
             vals[c.key] = v;
             keep.push(c.key + "=" + encodeURIComponent(v));
         });
-        var newHash = "#" + keep.join("&");
-        try { history.replaceState(history.state, "", newHash); } catch (e) { /* ignore */ }
+        writeHash("#" + keep.join("&"));
         try { localStorage.setItem(CONTROLS_LS_KEY, JSON.stringify(vals)); } catch (e) { /* ignore */ }
     }
 

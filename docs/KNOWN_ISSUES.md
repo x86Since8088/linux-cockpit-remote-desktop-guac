@@ -834,8 +834,23 @@ follow-up request — a `<dialog>` is simpler than the hand-rolled backdrop-div 
 the dropdown needed, and was caught losing a `bar.appendChild(b)` during that rewrite by the same jsdom
 smoke test before it ever reached a browser.) The main Connect panel's tabs also now reflect in the URL
 as `tab=<name>` (same `replaceState` pattern as `URL_CONTROLS`), restored on load.
+
+**Live user testing then caught a real gap in the tab/URL sync that jsdom alone could not:** the URL
+appeared to update by every internal check, but the browser's VISIBLE address bar stayed on
+`tab=connect` regardless of which tab was clicked. Root cause: `history.replaceState()` changes this
+document's own `location.hash` but does NOT fire a `hashchange` event — only a real hash-navigation
+does. Decompiling the installed `/usr/share/cockpit/base1/cockpit.js` confirmed Cockpit's shell-sync
+(mirroring the embedded page's location into the actual browser address bar, over the iframe<->parent
+`cockpit1` transport) runs entirely off a `window.addEventListener("hashchange", ...)` listener — with
+no event, the shell never learns anything changed. New shared `writeHash()` keeps `replaceState` (still
+no history-spam per click) and additionally dispatches a `hashchange` event by hand; both `selectTab()`
+and the pre-existing `saveControls()` (Session/Resolution/Scale/Clipboard/Sound persistence) now go
+through it — `saveControls()` had the exact same silent gap since before this release, just never
+reported, since apparently nobody had watched the actual address bar while changing those controls.
+
 Verified via a DOM-level smoke test (jsdom, ad hoc, not part of the repo's Playwright suite; jsdom has no
 `HTMLDialogElement.showModal`/`close` at all, stubbed to toggle the `open` attribute) that the dialog is
 built correctly, opens/closes via the button/close-button/backdrop-click idiom, the pre-existing
-`refreshUi()` show/hide logic still works on the reparented fields, and the tab/URL sync round-trips —
-for all three modes; not live-tested against a real Cockpit/relay session in this pass.
+`refreshUi()` show/hide logic still works on the reparented fields, and the tab/URL sync round-trips AND
+fires `hashchange` (simulating the listener Cockpit's shell registers) — for all three modes; not
+live-tested against a real Cockpit/relay session in this pass.
