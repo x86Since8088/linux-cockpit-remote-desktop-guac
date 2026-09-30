@@ -1268,3 +1268,60 @@ console output at all. Verified with a jsdom smoke test (scratch project, not a 
 after use) loading the real `index.html` + `guac-rdp.js`: the checkbox exists and starts unchecked,
 toggling it on/off emits/withholds the enabled/disabled marker, and the Clipboard/Sound toggles' own
 trace lines appear only while tracing is on. `run_tests.sh` green throughout.
+
+### I54 · Five new Self Tests: guacd digest pin, grd patch integrity, PulseAudio TCP, vendored-lib ownership, group membership · Sev N/A · SHIPPED (1.9.3.20260929)
+Not a bug fix — five new read-only checks added to the existing Self Tests panel (`SELF_TESTS`,
+`guac-rdp.js`), each surfacing something this project had already identified as a real risk but only
+checked at install/deploy time, or only in a design document, never live and on demand.
+- **"guacd image matches the pinned digest"** is the live equivalent of `install.sh --verify`'s own
+  check 2 (same `INSTALL_PATH` → `.env` → `GUACD_IMAGE` lookup, same `podman inspect --format
+  {{.ImageName}}`) — lets an operator check for image drift anytime, not just at deploy time. Needs
+  `superuser:"require"`, same reason as the existing "guacd build" check: `edy-rdp-guacd` runs under
+  ROOT's rootful podman, a separate scope from a logged-in user's own rootless one.
+- **"gnome-remote-desktop patch integrity"** is the live equivalent of `install.sh --verify`'s check 3
+  (`patches/README.md`): the 3390 greeter handover needs a hand-rebuilt daemon installed OVER the stock
+  package path, protected only by an `apt-mark hold` — an upgrade that gets through (a forced reinstall,
+  an OS version bump, the hold being lifted) silently reverts it with nothing else noticing. Compares the
+  live daemon against the `.orig-edt1` stock backup the patch procedure itself leaves (`cmp -s`), and
+  separately flags a patched-but-unheld daemon as its own distinct failure (the patch is still in place
+  today, but the next unattended upgrade will remove it). Read-only; no elevation needed.
+- **"No anonymous PulseAudio TCP (4713)"** turns the still-open KNOWN_ISSUES I44 finding (a stale
+  `~/.config/pipewire/pipewire-pulse.conf.d/20-edy-tcp.conf` drop-in leaving an anonymous-auth TCP
+  listener up, although CHANGELOG 1.2.9 says the TCP approach was removed) into a live, on-demand check
+  instead of something only documented. Same `ss -tln` pattern as the existing "guacd listening on
+  loopback only" check, inverted: here the only correct state is nothing listening at all.
+- **"Vendored client library ownership matches served tree"** turns the DEFENSE-LAYER design review's
+  D-13 finding (`guacamole-common-js/all.min.js` found owned differently from the rest of this plugin's
+  served files — a provenance anomaly from being placed outside the normal install pipeline, not a
+  content problem) into a live check, comparing its ownership against `manifest.json`'s (shipped by the
+  same `install.sh` PAGE manifest entry) as the reference.
+- **"cockpit-guac-rdp group exists with expected membership"** confirms the group the I51 rename
+  produced still exists with `edy-relay` as a member, live and on demand, rather than only at
+  install/deploy time.
+- **Deliberately not added in this pass:** a "Dependency tracking status" check surfacing the
+  dependency-tracking feature's own `deps-status` control op — that feature (I51 follow-up work) is still
+  on its own, separate, not-yet-merged branch; the check will ship as part of that branch instead of being
+  built against a control op that does not exist yet on `main`.
+- **Verification:** `run_tests.sh` green throughout. A jsdom smoke test (scratch project, not a repo
+  dependency, deleted after use) loaded the real `index.html` + `guac-rdp.js`, stubbed `cockpit.spawn`
+  with a per-command fake dispatcher, and drove six scenarios through the real "Run self tests" button:
+  every check passing on a fully-healthy host; every check failing on a fully-broken one; the
+  patch-never-applied-here skip path; the patched-but-unheld failure distinct from the stock failure; a
+  group that exists but is missing the expected member; and the guacd-container-not-running skip path —
+  all six produced the exact expected pass/fail/skip status and detail text.
+  **Also live-tested**, running each check's exact shell command (not the jsdom fake dispatcher) against
+  two real hosts: a full `deploy.sh --with-users` onto the `rockytest` Rocky 9 container (a genuinely
+  fresh RHEL-family host, `apt-mark` absent, no grd patch ever applied there) confirmed the
+  `INSTALL_PATH` → `.env` → `GUACD_IMAGE` lookup, the `stat`-based ownership comparison, and the
+  `getent`/`id -nG` group-membership lookup all parse real dnf-host output correctly and resolve to PASS
+  once the deploy completed (guacd itself correctly SKIPs there, since `--with-image`/`--with-units`
+  were deliberately not passed — Rocky 9 lacks a stock FreeRDP 3 package, a known, pre-existing
+  limitation of this container, unrelated to this change); and edt1 itself (the one real host the grd
+  patch is actually deployed to) confirmed the patch-integrity check's full PASS path
+  (`APTMARK=yes HELD=yes STATE=patched`) against the genuine patched binary. Read-only checks against
+  edt1's OWN current live state (not redeployed there — edt1 is still on an older, pre-group-rename
+  version) incidentally reconfirmed two already-known, real gaps this feature is meant to catch: I44's
+  PulseAudio TCP listener is still live on 127.0.0.1:4713 right now, and edt1's `cockpit-guac-rdp` group
+  does not exist yet (edt1 has not been updated past the pre-rename `edy-rdp` name) — exactly the kind of
+  drift "No anonymous PulseAudio TCP (4713)" and "cockpit-guac-rdp group exists with expected membership"
+  exist to surface once this ships and edt1 is eventually updated.

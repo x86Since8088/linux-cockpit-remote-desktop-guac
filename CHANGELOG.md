@@ -1,3 +1,38 @@
+## 1.9.3.20260929 - 2026-09-29
+
+Adds five new read-only checks to the Self Tests panel (I54), each turning something this
+project had already identified as a real risk — but only checked at install/deploy time, or
+only noted in a design document — into a live, on-demand check.
+
+- **"guacd image matches the pinned digest"** — the live equivalent of `install.sh --verify`'s
+  own check 2, so drift from the pinned `GUACD_IMAGE` is visible anytime, not just at deploy.
+- **"gnome-remote-desktop patch integrity"** — the live equivalent of `install.sh --verify`'s
+  check 3 (`patches/README.md`): flags a reverted-to-stock daemon (the 3390 greeter handover
+  will fail) and, separately, a still-patched daemon whose `apt-mark hold` was lifted (the next
+  unattended upgrade will remove it).
+- **"No anonymous PulseAudio TCP (4713)"** — turns the still-open KNOWN_ISSUES I44 finding into
+  a live check instead of something only documented.
+- **"Vendored client library ownership matches served tree"** — turns the DEFENSE-LAYER design
+  review's D-13 finding (`guacamole-common-js/all.min.js` owned differently from the rest of
+  this plugin's served files) into a live check against `manifest.json` as the reference.
+- **"cockpit-guac-rdp group exists with expected membership"** — confirms the I51 rename's
+  group still exists with `edy-relay` as a member, live and on demand.
+- **Deliberately not added:** a "Dependency tracking status" check for the still-unmerged,
+  separate dependency-tracking feature — it will ship with that branch instead of referencing a
+  control op that doesn't exist on `main` yet.
+- **Verification:** `run_tests.sh` green throughout. A jsdom smoke test (scratch project, not a
+  repo dependency, deleted after use) drove six scenarios through the real "Run self tests"
+  button (fully healthy, fully broken, patch-never-applied skip, patched-but-unheld vs. stock as
+  distinct failures, group-exists-but-wrong-membership, guacd-not-running skip) — every check
+  produced the exact expected status and detail text. Also live-tested: a full `deploy.sh
+  --with-users` onto the `rockytest` Rocky 9 container confirmed every check's real shell command
+  parses genuine dnf-host output correctly and passes once deployed (guacd correctly SKIPs there,
+  since Rocky 9 lacks a stock FreeRDP 3 package — pre-existing, unrelated to this change); edt1
+  confirmed the patch-integrity check's PASS path against the actually-patched daemon; and a
+  read-only check of edt1's own current state incidentally reconfirmed two already-known gaps this
+  feature exists to catch (I44's PulseAudio TCP listener is still live; edt1 has not been updated
+  past the pre-group-rename `edy-rdp` name).
+
 ## 1.9.2.20260929 - 2026-09-29
 
 Fixes a live-reported false-fail in the "guacd build" self-test, and adds opt-in tracing for
