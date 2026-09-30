@@ -1,3 +1,19 @@
+## 1.10.5.20260930 - 2026-09-30
+
+Fixes a bug in I59 found by the user actually using the feature on edt1 (not the adversarial review, not
+this project's own testing): `Seat=seat0` is the wrong signal entirely for "the logged-in user's own
+session". This project's RDP door hands off into an EXISTING desktop rather than a fresh physical login,
+and that handed-off session never carries a `Seat=` — `loginctl show-seat seat0` was confirmed live to
+report `ActiveSession=<the greeter>` permanently, regardless of who is actually logged in. Symptom: the
+user saw "Dummy Output" as the only audio device on the real desktop they were using, while auto-resolution
+kept picking the GDM greeter's own uid (which happens to have real hardware, but isn't the session anyone
+is listening through). Fixed by preferring any `Class=user`, graphical (`wayland`/`x11`), `Active=yes`
+session — regardless of `Seat=`/`Remote=` — over the seat0 greeter, which is now only the fallback when
+nobody is logged into anything. A locked session is still preferred (mirroring one is this project's own
+supported use case). New hermetic test
+`pulse_bind_auto_prefers_active_user_session_over_seat0_greeter` reproduces the exact live topology,
+mutation-tested against the original logic.
+
 ## 1.10.4.20260930 - 2026-09-30
 
 Fixes a bug in I59 found by live testing on edt1 immediately after merge (not the adversarial review):

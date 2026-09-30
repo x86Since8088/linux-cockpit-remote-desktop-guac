@@ -404,22 +404,21 @@ EOF
     chmod +x "$bin/loginctl"
 
     export FAKE_SESSION_IDS="3 c1"
-    # session 3: an active but SEAT-LESS session (e.g. an SSH login, which some
-    # systemd-logind versions also mark Active=yes) - must be skipped by the
-    # seat0 check specifically, independent of the Active check (a session
-    # that is merely inactive would be skipped either way and not exercise
-    # this filter on its own).
-    export FAKE_PROPS_3=$'Seat=\nActive=yes\nUser=1000'
-    export FAKE_PROPS_c1=$'Seat=seat0\nActive=yes\nUser=60578'
+    # session 3: an active but SEAT-LESS, non-"user"-class session (e.g. a
+    # podman-* service account's systemd --user manager) - must be skipped
+    # independent of the Active check (a session that is merely inactive
+    # would be skipped either way and not exercise this filter on its own).
+    export FAKE_PROPS_3=$'Seat=\nActive=yes\nUser=1000\nType=unspecified\nClass=manager'
+    export FAKE_PROPS_c1=$'Seat=seat0\nActive=yes\nUser=60578\nType=wayland\nClass=greeter'
     out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-auto1" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
-    grep -qF 'auto: resolved the active seat0 session to uid 60578' <<<"$out" \
+    grep -qF 'auto: resolved the active session to uid 60578' <<<"$out" \
         || { echo "greeter-active case: no resolution log:"; sed 's/^/  /' <<<"$out"; bad=1; }
     grep -qF '/run/user/60578/pulse/native' <<<"$out" \
         || { echo "greeter-active case: plan does not use the resolved uid:"; sed 's/^/  /' <<<"$out"; bad=1; }
 
     export FAKE_SESSION_IDS="3"
     out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-auto2" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
-    grep -qF 'auto: no session is both on seat0 and active' <<<"$out" \
+    grep -qF 'auto: no active user session and no seat0 session found' <<<"$out" \
         || { echo "no-active-session case: no fallback log:"; sed 's/^/  /' <<<"$out"; bad=1; }
     grep -qF '/run/user/1000/pulse/native' <<<"$out" \
         || { echo "no-active-session case: did not fall back to uid 1000:"; sed 's/^/  /' <<<"$out"; bad=1; }
@@ -431,6 +430,70 @@ EOF
         || { echo "explicit --seat-uid case: plan lost the pinned uid:"; sed 's/^/  /' <<<"$out"; bad=1; }
 
     unset FAKE_SESSION_IDS FAKE_PROPS_3 FAKE_PROPS_c1
+    return $bad
+}
+
+# 10d1b. I59 follow-up, found LIVE on edt1 by the user actually using this
+#      feature (auto-resolved to the GDM greeter's uid, which has real audio
+#      hardware, while the desktop they were actually looking at and hearing
+#      from showed "Dummy Output" as its only device): this project's RDP door
+#      hands off into an EXISTING desktop session rather than a fresh physical
+#      login, and `loginctl show-seat seat0` was confirmed live to report
+#      ActiveSession=<the greeter's own session> PERMANENTLY -- the handed-off
+#      session shows up as a SEPARATE session with Remote=yes and Seat= empty
+#      (gnome-remote-desktop-daemon --handover), invisible to a Seat=seat0
+#      filter no matter who is actually logged in and listening. A real,
+#      active, graphical (wayland/x11) Class=user session must be preferred
+#      over the seat0 greeter regardless of Seat=/Remote=; a Class=user "web"
+#      session (e.g. a Cockpit browser tab) must NOT be treated as a desktop
+#      with its own audio; the seat0 greeter is still the right (only) answer
+#      when no such session exists at all.
+pulse_bind_auto_prefers_active_user_session_over_seat0_greeter() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local bin="$TMP/fakebin-loginctl2" bad=0 out
+    install -d -- "$bin"
+    cat > "$bin/loginctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "list-sessions --no-legend" ]]; then
+    for s in $FAKE_SESSION_IDS; do printf '%s\n' "$s"; done
+elif [[ "$1" == show-session ]]; then
+    var="FAKE_PROPS_$2"; printf '%s\n' "${!var}"
+fi
+EOF
+    chmod +x "$bin/loginctl"
+
+    # Reproduces the exact live edt1 topology: the greeter is listed FIRST
+    # (order must not matter) and IS the only Seat=seat0 session, but a real,
+    # active, remote, unlocked desktop (no Seat=, Remote=yes -- matching
+    # gnome-remote-desktop's handover session exactly) exists for a different
+    # uid and must win.
+    export FAKE_SESSION_IDS="c1 27"
+    export FAKE_PROPS_c1=$'Seat=seat0\nActive=yes\nUser=60578\nType=wayland\nClass=greeter'
+    export FAKE_PROPS_27=$'Seat=\nActive=yes\nUser=1000\nType=wayland\nClass=user'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-prefer1" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 1000' <<<"$out" \
+        || { echo "handed-off-session case: did not prefer the real user session:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF '/run/user/1000/pulse/native' <<<"$out" \
+        || { echo "handed-off-session case: plan does not use uid 1000:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    # A Class=user session that is NOT graphical (a Cockpit "web" session, e.g.
+    # eddie2's own real session on edt1) must not be mistaken for a desktop.
+    export FAKE_SESSION_IDS="c1 54"
+    export FAKE_PROPS_54=$'Seat=\nActive=yes\nUser=1008\nType=web\nClass=user'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-prefer2" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 60578' <<<"$out" \
+        || { echo "web-session case: a non-graphical Class=user session was preferred over the greeter:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    # Locked is still a legitimate mirror target (the whole point of this
+    # project's "Allow Locked Remote Desktop" extension) -- LockedHint must
+    # never exclude a real user session from being preferred.
+    export FAKE_SESSION_IDS="c1 27"
+    export FAKE_PROPS_27=$'Seat=\nActive=yes\nUser=1000\nType=wayland\nClass=user\nLockedHint=yes'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-prefer3" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 1000' <<<"$out" \
+        || { echo "locked-session case: a LOCKED real user session was not preferred:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    unset FAKE_SESSION_IDS FAKE_PROPS_c1 FAKE_PROPS_27 FAKE_PROPS_54
     return $bad
 }
 
@@ -838,6 +901,7 @@ for t in installer_staged_install_completes \
          pulse_bind_check_mode \
          pulse_bind_refuses_unsafe_seat_socket \
          pulse_bind_auto_resolves_seat_uid \
+         pulse_bind_auto_prefers_active_user_session_over_seat0_greeter \
          pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket \
          pulse_bind_auto_resolves_source_preview \
          pulse_bind_reentrant_read_does_not_delete_its_own_resolution \
