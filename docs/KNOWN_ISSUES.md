@@ -1749,3 +1749,34 @@ one hardcoded in `.env`.
   in at the physical console, `EDY_RDP_PULSE_SEAT_UID=auto` correctly resolved to the GDM greeter's uid, and
   `PULSE_SOURCE=auto` correctly resolved to that session's real USB speaker device — exactly the audio the
   fixed, stale `.env` value was missing.
+
+### I60 · New capability: "Logs…" fullscreen viewer for the browser trace log and the server relay/guacd journal · Sev N/A · SHIPPED (1.10.6.20260930)
+Not a bug fix — a diagnostic capability, motivated by this same debugging session: diagnosing a real
+"the guac connection terminated" report meant manually cross-referencing the browser's own trace console
+output against `journalctl -u edy-rdp-relay` and guacd's own container log by hand. A new "Logs…" button
+(main Connect panel and both pop-out types — `addViewLogsButton()`, wired in alongside the existing
+`addClipboardButtons()` call in all three) opens a near-viewport `<dialog>` (same modal idiom as the
+"Session…" card — see `buildSessionCard()`'s own comment for why `<dialog>` is this project's one modal
+component) with:
+- **A source switch**: the browser's own clipboard/sound/keyboard trace log (I53) — now kept in a capped,
+  in-memory array (`traceLog`, `TRACE_LOG_MAX=2000`) as well as printed to the console, so it can be shown
+  as a table instead of scrollback — or the server-side relay + guacd journal.
+- **For the server journal, a scope choice**: "this session" (grepped by the current session's own uuid —
+  the relay mints that uuid and hands it to guacd as the connection id verbatim, so the SAME `--grep` value
+  finds a session's lines in both the relay's own systemd unit and guacd's container log, confirmed by
+  reading `edy_rdp_relay.py`'s own ready/select handling) or "all sessions" (last 6 hours, no grep). Both
+  scopes read via `stSpawn2` (`superuser:"require"`) — the SAME PolicyKit elevation the Self Tests panel's
+  own guacd checks already require: reading a root-run unit's journal needs that regardless of scope, so
+  "this session" is not a lower privilege tier, just a more heavily filtered result once elevated. "All
+  sessions" is additionally disabled in the UI for a non-admin (cosmetic, matching this project's existing
+  `isAdmin`-gated UI elsewhere) — the real enforcement is `superuser:"require"` itself, which Cockpit/
+  PolicyKit refuses for a genuine non-admin regardless of the (bypassable) client-side option state.
+- **Selectable columns** (Time/Category/Message for the trace log; Time/Unit/Message for the server
+  journal), persisted per-source in `localStorage` (`edy-rdp-logs-columns`) independent of the existing
+  `URL_CONTROLS`/hash persistence (a modal display preference, not a connection-launch parameter).
+- **A text filter** across all currently-visible columns.
+- **Verification**: `tests/js/view_logs.test.js` (TESTHOOK-verbatim-extraction, like I45/I56/I58's own
+  tests) covers `parseJournal()` — the one piece of non-trivial, DOM-free logic in this feature (splitting
+  a `journalctl -o short-iso` line into timestamp + message) — including empty/blank input, a line with no
+  whitespace at all (the whole line is kept as the message rather than silently dropped), and a message
+  containing its own internal spaces not being re-split. `run_tests.sh` green throughout.

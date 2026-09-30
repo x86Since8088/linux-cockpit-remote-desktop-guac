@@ -107,8 +107,22 @@
     // two things. Trace lines are diagnostic text only, never the clipboard
     // CONTENTS themselves (byte counts, not the text) -- this toggle is meant
     // to be left on during a support session without exposing what was copied.
+    // Kept in memory (not just printed) so the "Logs…" viewer (see
+    // addViewLogsButton() below) can show it as a filterable table, not just
+    // whatever happens to still be in the DevTools console scrollback. Same
+    // opt-in gate as the console line itself (traceOn) -- this project's own
+    // stated policy is byte counts/categories only, never clipboard CONTENTS,
+    // which trace()'s callers already honor; capturing to this array adds no
+    // new exposure beyond what already goes to the console. Capped so a
+    // long-running session's trace can't grow this without bound.
+    var traceLog = [];
+    var TRACE_LOG_MAX = 2000;
     function trace(category, msg) {
         if (!traceOn) return;
+        try {
+            traceLog.push({ time: Date.now(), category: category, message: String(msg) });
+            if (traceLog.length > TRACE_LOG_MAX) traceLog.shift();
+        } catch (e) { /* ignore */ }
         try {
             (console.debug || console.log).call(console, "[guac-rdp:" + category + "] " + msg);
         } catch (e) { /* no console in this context */ }
@@ -663,6 +677,305 @@
         bar.appendChild(b);
         return b;
     }
+
+    // ---- "Logs…": a fullscreen dialog over the browser trace log and the
+    // server-side relay/guacd journal, filtered with selectable columns -----
+    // Same <dialog> idiom as buildSessionCard() above (see its own comment for
+    // why: no hand-rolled backdrop/Escape/focus handling needed), just sized
+    // near-viewport instead of a fixed width, since a log table needs room.
+    //
+    // The server journal read reuses stSpawn2's superuser:"require" (defined
+    // with the Self Tests below, hoisted so the declaration order here does
+    // not matter): reading a root-run systemd unit's journal needs the SAME
+    // PolicyKit elevation the Self Tests panel's own guacd checks already
+    // require, for EITHER scope -- "this session" is not a lower privilege
+    // tier than "all sessions", just a more heavily filtered result once
+    // elevated, since journalctl itself gates read access to a root-run
+    // unit's log the same way regardless of what the caller filters for
+    // afterward. "All sessions" is additionally disabled in the UI for a
+    // non-admin (cosmetic, matching this project's existing isAdmin-gated
+    // UI elsewhere) -- the actual enforcement is superuser:"require" itself,
+    // which Cockpit/PolicyKit refuses for a real non-admin regardless of
+    // what the (bypassable) client-side option state says.
+    var LOG_COLUMNS = {
+        trace:  [ { key: "time", label: "Time" }, { key: "category", label: "Category" },
+                  { key: "message", label: "Message" } ],
+        server: [ { key: "time", label: "Time" }, { key: "unit", label: "Unit" },
+                  { key: "message", label: "Message" } ]
+    };
+    var LOGS_LS_KEY = "edy-rdp-logs-columns";
+    var logsColumns = {};   // {source: {key: bool}} -- which columns show, persisted
+    function loadLogColumns() {
+        var stored = {};
+        try { stored = JSON.parse(localStorage.getItem(LOGS_LS_KEY) || "{}") || {}; }
+        catch (e) { stored = {}; }
+        Object.keys(LOG_COLUMNS).forEach(function (src) {
+            if (!stored[src]) {
+                stored[src] = {};
+                LOG_COLUMNS[src].forEach(function (c) { stored[src][c.key] = true; });
+            }
+        });
+        logsColumns = stored;
+    }
+    function saveLogColumns() {
+        try { localStorage.setItem(LOGS_LS_KEY, JSON.stringify(logsColumns)); } catch (e) { /* ignore */ }
+    }
+
+    var logsDialog = null, logsData = [], logsSource = "trace";
+    // journalctl's own --grep does the filtering server-side -- cockpit.spawn
+    // execs an argv array (never a shell), so there is no pipeline to build and
+    // no injection risk even though currentUuid ends up as one of that array's
+    // elements. Because the relay mints the session uuid and hands it to guacd
+    // as the connection id verbatim (both directions round-trip the same bare
+    // hex string unchanged -- confirmed against edy_rdp_relay.py's own ready/
+    // select handling), the SAME --grep value finds a session's lines in BOTH
+    // the relay's own unit and guacd's container log.
+    // "-6 hours" for "all sessions": journalctl with no --since would happily
+    // return the ENTIRE unit history, which for a long-lived host is a lot to
+    // pull through a privileged spawn and render in one table. The window is
+    // disclosed in the scope <option>'s own label (buildLogsDialog(), below)
+    // and in the status line whenever a fetch actually completes empty, so an
+    // operator never has to guess whether "0 entries" means "nothing
+    // happened" or "it happened outside the window" -- found missing (a
+    // silent cap) by adversarial review; both disclosures were added because
+    // of that finding, not just the CHANGELOG/KNOWN_ISSUES mention.
+    function fetchServerLogs(scope) {
+        var args = ["-o", "short-iso", "--no-pager"];
+        if (scope === "all") {
+            args = args.concat(["--since", "-6 hours"]);
+        } else {
+            if (!currentUuid) return Promise.reject("connect a session first");
+            args = args.concat(["--grep", currentUuid]);
+        }
+        // Each unit's failure (most plausibly the superuser:"require"
+        // elevation itself being refused) is captured, not discarded: a
+        // caller-visible {rows, error} beats silently resolving to an empty
+        // array, which would make a genuine auth/availability failure
+        // indistinguishable from "this session really has no log lines" --
+        // exactly the one piece of error-reporting an earlier draft of this
+        // function lost, found by adversarial review.
+        function tryUnit(spawnArgs, unit) {
+            return stSpawn2(spawnArgs).then(
+                function (out) { return { rows: parseJournal(out, unit), error: null }; },
+                function (e) { return { rows: [], error: unit + ": " + e }; }
+            );
+        }
+        return Promise.all([
+            tryUnit(["journalctl", "-u", "edy-rdp-relay"].concat(args), "relay"),
+            tryUnit(["journalctl", "CONTAINER_NAME=edy-rdp-guacd"].concat(args), "guacd")
+        ]).then(function (parts) {
+            var rows = parts[0].rows.concat(parts[1].rows);
+            rows.sort(function (a, b) { return b.time - a.time; });   // newest first
+            var errors = parts.map(function (p) { return p.error; }).filter(Boolean);
+            return { rows: rows, error: errors.length ? errors.join("; ") : null };
+        });
+    }
+    // TESTHOOK:PARSEJOURNAL:BEGIN -- tests/js/view_logs.test.js extracts this
+    // exact block (verbatim) and exercises it standalone; keep it self-contained
+    // (no outer-scope references at all).
+    //
+    // journalctl -o short-iso lines start "<iso-timestamp> host proc[pid]: rest",
+    // but that timestamp is only printed once PER JOURNAL ENTRY -- an entry
+    // whose own message contains a literal newline (e.g. a Python traceback
+    // logged in one write) spans several physical lines, and only the first
+    // carries a real timestamp. An earlier draft matched "the first
+    // whitespace-delimited token" against EVERY split line indiscriminately,
+    // which (found by adversarial review, reproduced) fragmented one entry
+    // into several bogus, wrongly-time-sorted rows and silently swallowed a
+    // continuation line's own leading word into the discarded "timestamp"
+    // capture. Fixed by matching an ACTUAL ISO-8601-shaped prefix specifically
+    // (not just any token), and appending any line that does not match one to
+    // the PREVIOUS row's message instead of starting a new row for it. \r is
+    // stripped up front so CRLF-style output (which made the old regex's `$`
+    // fail to match at all, dumping the whole raw line including its real
+    // timestamp into an unparsed, wrongly-sorted message) can't reach the
+    // per-line regex in the first place.
+    function parseJournal(out, unit) {
+        var lines = String(out || "").replace(/\r/g, "").split("\n");
+        var rows = [];
+        lines.forEach(function (line) {
+            if (!line) return;
+            var m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2})\s(.*)$/.exec(line);
+            if (m) {
+                var t = Date.parse(m[1]);
+                rows.push({ time: isNaN(t) ? 0 : t, unit: unit, message: m[2] });
+            } else if (rows.length) {
+                rows[rows.length - 1].message += "\n" + line;
+            } else {
+                // no timestamp match AND nothing yet to attach to (the very
+                // first line itself is unparseable) -- keep the whole line
+                // rather than silently dropping it.
+                rows.push({ time: 0, unit: unit, message: line });
+            }
+        });
+        return rows;
+    }
+    // TESTHOOK:PARSEJOURNAL:END
+
+    function fmtLogCell(key, val) {
+        if (key === "time") return val ? new Date(val).toLocaleString() : "";
+        return val == null ? "" : String(val);
+    }
+    function renderLogsTable() {
+        var cols = LOG_COLUMNS[logsSource].filter(function (c) { return logsColumns[logsSource][c.key]; });
+        var thead = $("logs-thead"), tbody = $("logs-tbody");
+        thead.innerHTML = "";
+        var htr = document.createElement("tr");
+        cols.forEach(function (c) { var th = document.createElement("th"); th.textContent = c.label; htr.appendChild(th); });
+        thead.appendChild(htr);
+
+        // Search matches against EVERY column this source has, not just the
+        // ones currently checked visible -- otherwise toggling a column
+        // checkbox silently changes which rows an unchanged query matches.
+        var allCols = LOG_COLUMNS[logsSource];
+        var q = ($("logs-search") ? $("logs-search").value : "").toLowerCase();
+        tbody.innerHTML = "";
+        var shown = 0;
+        logsData.forEach(function (row) {
+            if (q) {
+                var searchText = allCols.map(function (c) { return fmtLogCell(c.key, row[c.key]); }).join(" ").toLowerCase();
+                if (searchText.indexOf(q) < 0) return;
+            }
+            shown++;
+            var tr = document.createElement("tr");
+            cols.forEach(function (c) { var td = document.createElement("td"); td.textContent = fmtLogCell(c.key, row[c.key]); tr.appendChild(td); });
+            tbody.appendChild(tr);
+        });
+        var sum = $("logs-summary");
+        if (sum) sum.textContent = shown + " of " + logsData.length + " entries" + (q ? " (filtered)" : "");
+    }
+    function renderLogColumnPicker() {
+        var wrap = $("logs-columns"); wrap.innerHTML = "";
+        LOG_COLUMNS[logsSource].forEach(function (c) {
+            var lbl = document.createElement("label"); lbl.className = "colpick";
+            var cb = document.createElement("input"); cb.type = "checkbox";
+            cb.checked = !!logsColumns[logsSource][c.key];
+            cb.addEventListener("change", function () {
+                logsColumns[logsSource][c.key] = cb.checked; saveLogColumns(); renderLogsTable();
+            });
+            lbl.appendChild(cb); lbl.appendChild(document.createTextNode(" " + c.label));
+            wrap.appendChild(lbl);
+        });
+    }
+    function refreshLogsData() {
+        var status = $("logs-status");
+        if (logsSource === "trace") {
+            status.textContent = ""; status.className = "muted";
+            logsData = traceLog.slice().reverse();   // newest first, matching the server view
+            renderLogsTable();
+            return;
+        }
+        var scope = $("logs-scope") ? $("logs-scope").value : "session";
+        status.textContent = "Loading…"; status.className = "muted";
+        fetchServerLogs(scope).then(function (result) {
+            logsData = result.rows;
+            if (result.error) {
+                // A partial (one unit ok, one failed) or total failure is
+                // shown even though rows may still be non-empty -- never
+                // silently downgrade "could not read X" into a plain count.
+                status.textContent = "Could not read the full journal (" + result.error + ")";
+                status.className = "muted err-text";
+            } else if (!result.rows.length && scope === "all") {
+                status.textContent = "No matching entries in the last 6 hours.";
+                status.className = "muted";
+            } else {
+                status.textContent = "";
+                status.className = "muted";
+            }
+            renderLogsTable();
+        }, function (e) {
+            logsData = [];
+            status.textContent = "Could not read the server journal: " + e;
+            status.className = "muted err-text";
+            renderLogsTable();
+        });
+    }
+    function buildLogsDialog() {
+        var dlg = document.createElement("dialog"); dlg.id = "logsdialog";
+        var head = document.createElement("div"); head.className = "row";
+        var title = document.createElement("strong"); title.textContent = "Logs"; title.style.flex = "1";
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button"; closeBtn.className = "sec"; closeBtn.textContent = "✕"; closeBtn.title = "Close";
+        closeBtn.addEventListener("click", function () { dlg.close(); });
+        head.appendChild(title); head.appendChild(closeBtn);
+        dlg.appendChild(head);
+
+        var controls = document.createElement("div"); controls.className = "row";
+        var srcSel = document.createElement("select"); srcSel.id = "logs-source";
+        [["trace", "Browser Trace"], ["server", "Server Journal"]].forEach(function (o) {
+            var opt = document.createElement("option"); opt.value = o[0]; opt.textContent = o[1]; srcSel.appendChild(opt);
+        });
+        var scopeSel = document.createElement("select"); scopeSel.id = "logs-scope";
+        scopeSel.style.display = "none";   // trace (the default source) has no scope
+        [["session", "This session"], ["all", "All sessions (admin, last 6h)"]].forEach(function (o) {
+            var opt = document.createElement("option"); opt.value = o[0]; opt.textContent = o[1]; scopeSel.appendChild(opt);
+        });
+        var refreshBtn = document.createElement("button");
+        refreshBtn.type = "button"; refreshBtn.className = "sec"; refreshBtn.textContent = "Refresh";
+        refreshBtn.addEventListener("click", refreshLogsData);
+        controls.appendChild(srcSel); controls.appendChild(scopeSel); controls.appendChild(refreshBtn);
+        dlg.appendChild(controls);
+
+        var colsBar = document.createElement("div"); colsBar.className = "row"; colsBar.id = "logs-columns";
+        dlg.appendChild(colsBar);
+
+        var searchWrap = document.createElement("div"); searchWrap.className = "row";
+        var search = document.createElement("input"); search.type = "search"; search.id = "logs-search";
+        search.placeholder = "Filter…"; search.style.flex = "1";
+        search.addEventListener("input", renderLogsTable);
+        searchWrap.appendChild(search);
+        dlg.appendChild(searchWrap);
+
+        var tableWrap = document.createElement("div"); tableWrap.id = "logs-tablewrap";
+        var table = document.createElement("table"); table.className = "sessions";
+        var thead = document.createElement("thead"); thead.id = "logs-thead";
+        var tbody = document.createElement("tbody"); tbody.id = "logs-tbody";
+        table.appendChild(thead); table.appendChild(tbody);
+        tableWrap.appendChild(table);
+        dlg.appendChild(tableWrap);
+
+        var footer = document.createElement("div"); footer.className = "row";
+        var summary = document.createElement("span"); summary.id = "logs-summary"; summary.className = "muted";
+        var status = document.createElement("span"); status.id = "logs-status"; status.className = "muted";
+        footer.appendChild(summary); footer.appendChild(status);
+        dlg.appendChild(footer);
+
+        srcSel.addEventListener("change", function () {
+            logsSource = srcSel.value;
+            scopeSel.style.display = (logsSource === "server") ? "" : "none";
+            renderLogColumnPicker();
+            refreshLogsData();
+        });
+        scopeSel.addEventListener("change", refreshLogsData);
+        dlg.addEventListener("click", function (e) { if (e.target === dlg) dlg.close(); });
+        // isAdmin can change live (see the cockpit.permission "changed"
+        // listener elsewhere in this file) while this dialog sits closed, so
+        // re-sync the "All sessions" option's availability every time it
+        // opens rather than only once at build time.
+        dlg.syncAdminGating = function () {
+            var allOpt = scopeSel.querySelector('option[value="all"]');
+            if (allOpt) allOpt.disabled = !isAdmin;
+            if (!isAdmin && scopeSel.value === "all") scopeSel.value = "session";
+        };
+        document.body.appendChild(dlg);
+        return dlg;
+    }
+    function addViewLogsButton(bar) {
+        var b = document.createElement("button");
+        b.id = "viewlogs";
+        b.type = "button"; b.className = "sec"; b.textContent = "Logs…";
+        b.title = "View the browser's clipboard/sound/keyboard trace log, or the "
+                + "server-side relay/guacd journal, in a filterable table.";
+        b.addEventListener("click", function () {
+            if (!logsDialog) { loadLogColumns(); logsDialog = buildLogsDialog(); renderLogColumnPicker(); }
+            logsDialog.syncAdminGating();
+            refreshLogsData();
+            logsDialog.showModal();
+        });
+        bar.appendChild(b);
+        return b;
+    }
+
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
@@ -680,6 +993,7 @@
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
         addClipboardButtons(bar);
+        addViewLogsButton(bar);
         bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
         bar.appendChild($("addmon"));     // open another virtual monitor window
         $("target").value = "virtual";
@@ -752,6 +1066,7 @@
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
         addClipboardButtons(bar);
+        addViewLogsButton(bar);
         bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
         bar.appendChild($("addmon"));     // open another virtual monitor window
         $("target").value = "console";
@@ -769,6 +1084,7 @@
         var sessionBtn = addSessionButton(bar, card);
         bar.insertBefore(sessionBtn, bar.firstChild);   // the primary entry point now; lead with it
         addClipboardButtons(bar);
+        addViewLogsButton(bar);
         // Restore the active tab from the URL (?tab=sessions etc.), same as a
         // shared/bookmarked link; default to Connect. Skipped by the pop-out
         // modes entirely -- they never show tabs and enterConnectMode() only
