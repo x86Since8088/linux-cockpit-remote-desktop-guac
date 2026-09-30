@@ -516,6 +516,57 @@ EOF
     return $bad
 }
 
+# 10f. I59 follow-up, found by LIVE testing on edt1 during this feature's own
+#      rollout (not the adversarial review): edy-rdp-guacd.service loads the
+#      generated $DIR/pulse-source.env as a SECOND EnvironmentFile=, so podman
+#      sees the resolved value -- but that means resolve_and_persist_source()'s
+#      OWN next invocation (guacd's ExecStartPre, moments later, same
+#      restart -- systemd was confirmed live to re-read EnvironmentFile=s
+#      fresh per Exec* step, not once for the whole activation) can inherit
+#      that SAME resolved value as "$PULSE_SOURCE" and mistake it for an
+#      operator pin, deleting the file this project's own comment says a pin
+#      should never touch -- and since that delete can land BEFORE podman's
+#      own fresh environment read, the RUNNING CONTAINER ended up with the
+#      literal string "auto" as PULSE_SOURCE (confirmed on edt1: `podman
+#      inspect edy-rdp-guacd` showed exactly that after a live auto-resolution
+#      restart). Extracts resolve_and_persist_source() (and its two
+#      dependencies) directly by function name -- this function is reachable
+#      hermetically without root: unlike the mount/bind logic elsewhere in
+#      this script, it never touches the real filesystem below $DIR beyond
+#      writing this one text file.
+pulse_bind_reentrant_read_does_not_delete_its_own_resolution() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local src="$SRC/pulse/edy-rdp-pulse-bind.sh" d="$TMP/pulse-reentrant" bad=0
+    install -d -- "$d"
+    for fn in log resolve_default_sink_monitor resolve_and_persist_source; do
+        eval "$(sed -n "/^$fn() {/,/^}/p" "$src")"
+    done
+    DIR="$d"; AUTO_RESTART=0
+    systemctl() { return 0; }   # not exercised (AUTO_RESTART=0); present so a call never errors
+    resolve_default_sink_monitor() { printf '%s\n' 'a-real-sink.monitor'; }
+
+    # First resolution: writes the file.
+    PULSE_SOURCE=auto resolve_and_persist_source /fake/sock
+    [[ -f "$d/pulse-source.env" ]] || { echo "first resolution did not create $d/pulse-source.env"; return 1; }
+    [[ "$(cat -- "$d/pulse-source.env")" == "PULSE_SOURCE=a-real-sink.monitor" ]] \
+        || { echo "unexpected file content: $(cat -- "$d/pulse-source.env")"; bad=1; }
+
+    # Re-entrant read: $PULSE_SOURCE now holds that SAME resolved value (as it
+    # would if this were guacd's own ExecStartPre re-running moments later,
+    # inheriting the generated file as a second EnvironmentFile=) -- the file
+    # must survive, not be deleted as if it were a stale/foreign pin.
+    PULSE_SOURCE='a-real-sink.monitor' resolve_and_persist_source /fake/sock
+    [[ -f "$d/pulse-source.env" ]] \
+        || { echo "a reentrant read of its own resolved value deleted the generated file"; bad=1; }
+
+    # A GENUINE pin (a different value than what's on disk) must still clean up.
+    PULSE_SOURCE='some-other-pinned-sink.monitor' resolve_and_persist_source /fake/sock
+    [[ -f "$d/pulse-source.env" ]] \
+        && { echo "a genuine pin (different from the file's content) did not clean up the stale auto file"; bad=1; }
+
+    return $bad
+}
+
 # 10c. deploy.sh itself, STAGED, end to end: copy, alias swap, the installed
 #      install.sh placing .env and linking, then --verify. Nothing had run this
 #      path to completion anywhere but a host with a masking job wrapper (I41).
@@ -789,6 +840,7 @@ for t in installer_staged_install_completes \
          pulse_bind_auto_resolves_seat_uid \
          pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket \
          pulse_bind_auto_resolves_source_preview \
+         pulse_bind_reentrant_read_does_not_delete_its_own_resolution \
          deploy_staged_completes_and_verifies \
          deploy_refuses_stale_env_before_swap \
          shell_syntax \

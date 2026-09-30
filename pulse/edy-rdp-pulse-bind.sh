@@ -326,8 +326,29 @@ resolve_and_persist_source() {
             fi
         fi
     elif [[ -z "$preview" && -e "$src_file" ]]; then
-        rm -f -- "$src_file"
-        log "removed stale generated $src_file (PULSE_SOURCE is not 'auto')"
+        # A non-"auto" $PULSE_SOURCE here does not necessarily mean an operator
+        # pinned it: edy-rdp-guacd.service ALSO loads $src_file as a second
+        # EnvironmentFile= so podman sees the resolved value, and systemd
+        # re-reads EnvironmentFile=s fresh for EACH Exec* step of the SAME
+        # activation (confirmed live, not merely suspected: a restart THIS
+        # script itself triggered fed its own freshly-written value straight
+        # back into its own next ExecStartPre invocation) -- so immediately
+        # after this script resolves and writes a value, ITS OWN next
+        # invocation (guacd's ExecStartPre, moments later, same activation)
+        # can see that same value as "$PULSE_SOURCE" and mistake it for an
+        # operator pin. Deleting $src_file in that exact window is worse than
+        # a no-op: ExecStart's OWN fresh environment read runs AFTER
+        # ExecStartPre finishes, so a delete here can remove the file before
+        # podman ever reads it, handing the CONTAINER the literal string
+        # "auto" as PULSE_SOURCE instead of a real sink name -- reproduced
+        # live on edt1 during this feature's own rollout. Only clean up when
+        # the value does NOT match what is already on disk -- a genuine
+        # switch to a pin (or back to unset) always changes it; reading back
+        # our own just-written resolution never does.
+        if [[ "PULSE_SOURCE=$PULSE_SOURCE" != "$(cat -- "$src_file" 2>/dev/null)" ]]; then
+            rm -f -- "$src_file"
+            log "removed stale generated $src_file (PULSE_SOURCE is not 'auto')"
+        fi
     fi
 }
 

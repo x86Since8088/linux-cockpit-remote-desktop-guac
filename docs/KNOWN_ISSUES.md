@@ -1648,6 +1648,20 @@ one hardcoded in `.env`.
   review — left running, it would keep re-binding uid 1000's own socket/sink over whatever the new `-auto`
   pair resolves every time uid 1000's own session changes, reintroducing this exact issue non-
   deterministically on precisely the host it targets).
+- **A seventh defect, found by LIVE testing on edt1 immediately after merge (not the adversarial review),
+  fixed the same day:** `edy-rdp-guacd.service` loads the generated `$DIR/pulse-source.env` as a second
+  `EnvironmentFile=` so `podman` sees the resolved value — but systemd was confirmed live to re-read
+  `EnvironmentFile=`s fresh for each `Exec*` step of one activation, not once for the whole activation. That
+  meant `resolve_and_persist_source()`'s own NEXT invocation (guacd's `ExecStartPre`, moments later, same
+  restart) could inherit its own just-written resolved value as `$PULSE_SOURCE`, mistake it for an operator
+  pin, and delete the file — landing before `podman`'s own fresh environment read, so the **running
+  container ended up with the literal string `"auto"` as `PULSE_SOURCE`**, confirmed via `podman inspect
+  edy-rdp-guacd` on edt1. Fixed by only cleaning up the generated file when its content does not already
+  match the current value — a genuine switch to a pin (or back off) always differs; reading back one's own
+  just-written resolution never does. Verified with a new hermetic test extracting
+  `resolve_and_persist_source()` directly by function name, mutation-tested, and by reproducing the exact
+  restart cycle for real on `rockytest` (a fake `loginctl`/`pactl`, a real `systemctl try-restart`, checking
+  the resulting container's actual env) both before and after the fix.
 - **Six real defects found by adversarial review of the first draft, all fixed before merge:**
   - **(High) An oscillating resolved value could take the shared `edy-rdp-guacd.service` down for every
     viewer.** The first draft called `systemctl try-restart` unconditionally on every change with no

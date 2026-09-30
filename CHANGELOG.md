@@ -1,3 +1,16 @@
+## 1.10.4.20260930 - 2026-09-30
+
+Fixes a bug in I59 found by live testing on edt1 immediately after merge (not the adversarial review):
+`edy-rdp-guacd.service` loads the generated `pulse-source.env` as a second `EnvironmentFile=` so podman
+sees the resolved value, but systemd re-reads `EnvironmentFile=`s fresh per `Exec*` step of one activation
+— so `resolve_and_persist_source()`'s own next invocation (guacd's `ExecStartPre`, moments later, same
+restart) could inherit its own just-written value as `$PULSE_SOURCE`, mistake it for an operator pin, and
+delete the file before podman's own fresh read — leaving the running container with the literal string
+`"auto"` as `PULSE_SOURCE` (confirmed via `podman inspect edy-rdp-guacd` on edt1, worse than the original
+bug this feature fixes). Fixed by only cleaning up the generated file when its content doesn't already
+match the current value. New hermetic test `pulse_bind_reentrant_read_does_not_delete_its_own_resolution`,
+mutation-tested; reproduced the exact restart cycle for real on `rockytest` before and after the fix.
+
 ## 1.10.3.20260930 - 2026-09-30
 
 Fixes a live-reported bug (I59): edt1's `PULSE_SOURCE` named a sink that no longer existed on the host at
