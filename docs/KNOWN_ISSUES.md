@@ -1532,3 +1532,36 @@ design, deserving its own careful fix (e.g. a generation counter so a stale `dis
 is no longer current and no-op) rather than a quick patch bolted onto an unrelated keyboard fix. Named
 here rather than silently left, per this project's own convention for a discovered-but-deferred gap (see
 I46 for the shape this takes elsewhere in this file).
+
+### I58 · New capability: "Type Clipboard" — keystroke-injection workaround for the broken native clipboard paste · Sev N/A · SHIPPED (1.10.2.20260930)
+Not a bug fix for the underlying issue (that bug is upstream, in guacd/x11vnc's own VNC clipboard
+handling — see the live-traced root-cause investigation, memory `cockpit-guac-rdp-send-clip-investigation`:
+the browser→remote clipboard push is accepted with no error and never actually applied on the guest, and
+was re-confirmed live on 2026-09-30 by cross-referencing a real browser trace, showing the JS side
+correctly writing to the outbound clipboard stream, against the relay's own per-connection `up={}` opcode
+tally at session close, which showed zero `clipboard` instructions ever reaching the relay from the browser
+across multiple real sessions). Since that path cannot be fixed from this project's side, a new "Type
+Clipboard" button sidesteps it entirely: it reads the local clipboard the same way "Send clip" does, then
+**types** the text into the session one keysym at a time over `sendGuestKeyEvent` — the same key-event
+channel real keystrokes already use reliably, inheriting its existing `KEYCODE_FIX`/`SHIFT_LEVEL`
+corrections (I45) for any punctuation the typed text happens to contain, for free.
+- **Character → keysym** follows the same X11/Guacamole convention the vendored `Guacamole.Keyboard`'s own
+  (unused here) `.type()` uses: Latin-1 code points (0x20–0xFF) are their own keysym; anything higher is
+  the "Unicode keysym" `0x01000000 | code point`. Verified with a standalone `vm` probe against the real
+  vendored library before writing this, rather than assumed from reading the minified source.
+- **One deliberate deviation from the vendored `.type()`**, found by that same probe: it maps `"\n"` to
+  Linefeed (`0xFF0A`), a keysym with no key on the Xvfb "us" keymap at all — typing a bare LF through it
+  would silently do nothing. Both CR and LF are forced here to the real Return keysym (`0xFF0D`, identical
+  to a physical Enter key), with the LF half of a CRLF pair skipped so Windows-sourced clipboard text
+  doesn't send two Enters per line.
+- **Non-ASCII characters need no bridge-side change.** x11vnc's `-add_keysyms` (confirmed, via `x11vnc
+  -help`, to be this build's own *default* — not something the deploy needs to turn on) dynamically adds
+  an unused keycode for any keysym Xvfb's static "us" keymap doesn't already have one for, so accented
+  letters, CJK, emoji, etc. resolve without touching `edy-rdp-bridge-start`.
+- **Verification:** a new `tests/js/type_clipboard.test.js`, following the same TESTHOOK-verbatim-extraction
+  pattern as I45/I56's own tests (`TESTHOOK:TYPECLIP`), covers the code-point→keysym mapping (Latin-1,
+  both C0-control cases, the Unicode plane), plain ASCII typing, a bare LF, a CRLF pair (exactly one
+  Return, not two), a lone trailing CR, an astral-plane character spanning a UTF-16 surrogate pair (typed
+  as one keystroke, not two), and a mixed multi-line/multi-script string end to end — 10 tests, all
+  mutation-tested (reverting the LF→Return override was confirmed to fail the 2 tests that exist
+  specifically to catch it). `run_tests.sh` green throughout (30 JS tests, up from 20).

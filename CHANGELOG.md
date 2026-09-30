@@ -1,3 +1,22 @@
+## 1.10.2.20260930 - 2026-09-30
+
+New capability (I58): a "Type Clipboard" button next to Send/Receive clip, working around the confirmed
+upstream guacd/x11vnc bug where a browser→remote clipboard push is silently dropped (accepted on the wire,
+never applied on the guest — re-confirmed live today by cross-referencing a real browser trace against the
+relay's own per-session opcode tally, which showed zero `clipboard` instructions ever reaching it).
+
+- Reads the local clipboard exactly like "Send clip" does, then **types** the text into the session one
+  keysym at a time over `sendGuestKeyEvent` — the same key-event path real keystrokes already use
+  reliably, so it inherits the existing keycode/Shift corrections (I45) for any punctuation it contains.
+- Character → keysym follows the vendored `Guacamole.Keyboard`'s own X11/Unicode convention, with one
+  deliberate fix: `"\n"`/`"\r"` are forced to the real Return keysym (`0xFF0D`) instead of the vendored
+  library's Linefeed (`0xFF0A`, a keysym with no key on the Xvfb "us" keymap — verified with a standalone
+  `vm` probe — that would otherwise silently type nothing for a newline). CRLF pairs produce one Return.
+- Non-ASCII text needs no server-side change: x11vnc's `-add_keysyms` (already this build's default)
+  dynamically maps any keysym Xvfb doesn't have a key for.
+- New `tests/js/type_clipboard.test.js` (10 tests, TESTHOOK-verbatim-extracted like I45/I56's own tests),
+  mutation-tested. `run_tests.sh` green (30 JS tests, up from 20).
+
 ## 1.10.1.20260929 - 2026-09-29
 
 Fixes a live-reported bug (I56): a held modifier (classically Alt, via Alt+Tab) "sticks" on the

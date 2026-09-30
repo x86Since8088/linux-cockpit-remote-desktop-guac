@@ -179,9 +179,79 @@
             setStatus("Clipboard write was blocked by the browser.", "err");
         });
     }
-    // Append the "Send clipboard" / "Receive clipboard" buttons to a bar (the main
-    // connect bar and each pop-out's control strip). Pop-outs are separate windows/
-    // documents, so the ids never collide across them.
+    // ---- "Type Clipboard": keystroke-injection clipboard workaround -----------
+    // guacd/x11vnc's own VNC clipboard channel silently drops browser->remote
+    // pushes on this bridge (confirmed upstream bug, not this project's --
+    // see docs/KNOWN_ISSUES.md and memory cockpit-guac-rdp-send-clip-investigation):
+    // the wire instruction is accepted with no error, but the guest's clipboard
+    // never actually changes, so "Send clip" LOOKS like it worked (browser trace
+    // shows bytes written to the stream) while nothing arrives. This button
+    // sidesteps that whole path: instead of asking the guest to receive a
+    // clipboard update, it TYPES the local clipboard's text into the session one
+    // keysym at a time over the same key-event channel real keystrokes already
+    // use reliably (sendGuestKeyEvent, with its existing KEYCODE_FIX/SHIFT_LEVEL
+    // corrections applying identically to typed characters).
+    //
+    // Character -> keysym follows the X11/Guacamole convention Guacamole.Keyboard's
+    // own (built-in, vendored) .type() uses: Latin-1 code points (0x20-0xFF) are
+    // their own keysym; anything higher is the "Unicode keysym" 0x01000000 |
+    // code point, which x11vnc resolves via -add_keysyms (the project's x11vnc
+    // build's own default -- confirmed via `x11vnc -help`: "Default: -add_keysyms"),
+    // dynamically adding an unused keycode for any keysym Xvfb's static "us"
+    // keymap doesn't already have one for. ONE deliberate deviation from the
+    // vendored .type(): it maps "\n" to Linefeed (0xFF0A), a keysym with no key
+    // on that keymap at all (verified with a standalone vm probe against the
+    // real vendored library) -- typing a bare LF would silently do nothing. Both
+    // CR and LF are forced to the real Return keysym (0xFF0D, identical to a
+    // physical Enter key) instead, with the LF half of a CRLF pair skipped so a
+    // Windows-sourced clipboard doesn't send two Enters per line.
+    // TESTHOOK:TYPECLIP:BEGIN -- tests/js/type_clipboard.test.js extracts this
+    // exact block (verbatim) and exercises it standalone; keep it self-contained
+    // (only `keyboard` from the outer scope, stubbed with press/release in the test).
+    function keysymForCodePoint(cp) {
+        if (cp === 0x0A || cp === 0x0D) return 0xFF0D;         // LF or CR -> Return
+        if (cp >= 0x20 && cp <= 0xFF) return cp;               // Latin-1: direct
+        if (cp <= 0x1F) return cp | 0xFF00;                    // other C0 controls (Tab=0xFF09, etc.)
+        return 0x01000000 | cp;                                // Unicode keysym plane
+    }
+    function typeTextIntoSession(text) {
+        var i = 0, n = 0;
+        while (i < text.length) {
+            var cp = text.codePointAt(i);
+            i += (cp > 0xFFFF) ? 2 : 1;                        // advance past a surrogate pair too
+            if (cp === 0x0D && text.charCodeAt(i) === 0x0A) i += 1;   // CRLF: one Return, not two
+            var ks = keysymForCodePoint(cp);
+            keyboard.press(ks); keyboard.release(ks);
+            n++;
+        }
+        return n;
+    }
+    // TESTHOOK:TYPECLIP:END
+    function typeClipboardIntoSession() {
+        if (!client || !currentUuid || !keyboard) {
+            trace("clipboard", "type: refused, no live session");
+            setStatus("Connect a session first, then Type clipboard.", "err"); return;
+        }
+        if (!(navigator.clipboard && navigator.clipboard.readText)) {
+            trace("clipboard", "type: no navigator.clipboard.readText in this browser/context");
+            setStatus("This browser will not let the page read the clipboard.", "err"); return;
+        }
+        navigator.clipboard.readText().then(function (text) {
+            if (!client || !keyboard) return;
+            if (!text) { trace("clipboard", "type: local clipboard is empty"); setStatus("Your clipboard is empty."); return; }
+            try {
+                var n = typeTextIntoSession(text);
+                trace("clipboard", "type: injected " + n + " keystrokes for " + text.length + " chars");
+                setStatus("Typed " + text.length + " characters into the session.");
+            } catch (e) { trace("clipboard", "type: threw " + e); setStatus("Could not type into the session.", "err"); }
+        }).catch(function (e) {
+            trace("clipboard", "type: readText() rejected " + e);
+            setStatus("Clipboard read was blocked — click inside the page, then press Type clipboard again.", "err");
+        });
+    }
+    // Append the "Send clipboard" / "Receive clipboard" / "Type clipboard" buttons
+    // to a bar (the main connect bar and each pop-out's control strip). Pop-outs
+    // are separate windows/documents, so the ids never collide across them.
     function addClipboardButtons(bar) {
         if (!bar) return;
         var mk = function (id, label, title, fn) {
@@ -193,6 +263,7 @@
         };
         mk("clip-send", "Send clip", "Send YOUR clipboard to the session (then paste inside the session).", sendClipboardToSession);
         mk("clip-recv", "Receive clip", "Copy the SESSION's clipboard into your browser (then paste locally).", receiveClipboardFromSession);
+        mk("clip-type", "Type Clipboard", "Type YOUR clipboard into the session as keystrokes -- a workaround for when the session's own clipboard paste doesn't take.", typeClipboardIntoSession);
     }
 
     // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
