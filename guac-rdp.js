@@ -1931,6 +1931,142 @@
                     }).join(", ") };
                 });
             }
+        },
+        {
+            name: "guacd image matches the pinned digest",
+            // Live equivalent of install.sh --verify's own check 2 (same
+            // INSTALL_PATH -> .env -> GUACD_IMAGE lookup, same `podman inspect
+            // --format {{.ImageName}}`) -- exposed here so an operator can
+            // check for drift anytime, not just at install/deploy time.
+            // edy-rdp-guacd runs under ROOT's rootful podman (a separate scope
+            // from a logged-in user's own rootless one -- see the guacd-build
+            // check above), so this needs the same superuser:"require".
+            run: function () {
+                return stSpawn2(["/bin/sh", "-c",
+                    'p=$(sed -n "s/^INSTALL_PATH=//p" /etc/cockpit-guac-rdp/install.conf | tr -d \'"\' | head -n1); ' +
+                    'want=$(sed -n "s/^GUACD_IMAGE=//p" "$p/.env" 2>/dev/null | head -n1); ' +
+                    'running=$(podman inspect edy-rdp-guacd --format "{{.ImageName}}" 2>/dev/null); ' +
+                    'printf "WANT=%s\\nRUNNING=%s\\n" "$want" "$running"'
+                ]).then(function (out) {
+                    var want = (/^WANT=(.*)$/m.exec(out) || [])[1] || "";
+                    var running = (/^RUNNING=(.*)$/m.exec(out) || [])[1] || "";
+                    if (!running)
+                        return { status: "skip", detail: "guacd container is not running" };
+                    if (!want)
+                        return { status: "fail", detail: "GUACD_IMAGE is not set in this host's .env" };
+                    if (want !== running)
+                        return { status: "fail", detail: "running '" + running + "', GUACD_IMAGE is '" + want +
+                                 "' (systemctl restart edy-rdp-guacd.service)" };
+                    return { status: "pass", detail: "running image matches GUACD_IMAGE (" + want + ")" };
+                }, function (e) {
+                    return { status: "skip", detail: "needs administrative access: " + e };
+                });
+            }
+        },
+        {
+            name: "gnome-remote-desktop patch integrity",
+            // Live equivalent of install.sh --verify's own check 3
+            // (patches/README.md): the 3390 greeter handover needs a hand-
+            // rebuilt daemon installed OVER the stock package path, protected
+            // only by an apt hold -- an upgrade that gets through (a forced
+            // reinstall, an OS version bump, the hold being lifted) silently
+            // reverts it with nothing else noticing. Read-only (apt-mark
+            // showhold, stat, cmp) -- no elevation needed on a normal host.
+            run: function () {
+                return stSpawn(["/bin/sh", "-c",
+                    'if command -v apt-mark >/dev/null 2>&1; then aptmark=yes; ' +
+                    'apt-mark showhold 2>/dev/null | grep -qx gnome-remote-desktop && held=yes || held=no; ' +
+                    'else aptmark=no; held=n/a; fi; ' +
+                    'daemon=/usr/libexec/gnome-remote-desktop-daemon; backup="$daemon.orig-edt1"; ' +
+                    'if [ ! -e "$backup" ]; then state=no-backup; ' +
+                    'elif cmp -s "$daemon" "$backup"; then state=stock; else state=patched; fi; ' +
+                    'printf "APTMARK=%s\\nHELD=%s\\nSTATE=%s\\n" "$aptmark" "$held" "$state"'
+                ]).then(function (out) {
+                    var aptmark = (/^APTMARK=(.*)$/m.exec(out) || [])[1];
+                    var held = (/^HELD=(.*)$/m.exec(out) || [])[1];
+                    var state = (/^STATE=(.*)$/m.exec(out) || [])[1];
+                    if (state === "no-backup")
+                        return { status: "skip", detail: "no .orig-edt1 stock backup on this host -- " +
+                                 "the handover patch was never applied here (patches/README.md)" };
+                    if (state === "stock")
+                        return { status: "fail", detail: "daemon is STOCK -- the 3390 greeter handover " +
+                                 "will fail; re-apply patches/grd-handover-method-call.patch (see patches/README.md)" };
+                    if (aptmark === "yes" && held !== "yes")
+                        return { status: "fail", detail: "daemon is patched but gnome-remote-desktop is " +
+                                 "NOT apt-mark held -- the next upgrade will silently revert it" };
+                    return { status: "pass", detail: "daemon is patched" +
+                             (aptmark === "yes" ? " and apt-mark held" : "") };
+                }, function (e) {
+                    return { status: "skip", detail: String(e) };
+                });
+            }
+        },
+        {
+            name: "No anonymous PulseAudio TCP (4713)",
+            // KNOWN_ISSUES I44: a stale ~/.config/pipewire/pipewire-pulse.conf.d
+            // drop-in can leave an anonymous-auth TCP listener up although the
+            // TCP approach was removed (CHANGELOG 1.2.9). Same ss-based pattern
+            // as the guacd-loopback check above, inverted: here the only
+            // correct state is nothing listening at all.
+            run: function () {
+                return stSpawn(["ss", "-tln"]).then(function (out) {
+                    var lines = out.split("\n").filter(function (l) { return /:4713(\s|$)/.test(l); });
+                    if (!lines.length)
+                        return { status: "pass", detail: "nothing listening on 4713" };
+                    return { status: "fail", detail: "PulseAudio TCP is exposed on 4713 (KNOWN_ISSUES I44): " +
+                             lines[0].trim() };
+                }, function (e) {
+                    return { status: "skip", detail: "ss unavailable: " + e };
+                });
+            }
+        },
+        {
+            name: "Vendored client library ownership matches served tree",
+            // KNOWN_ISSUES / DEFENSE-LAYER D-13: guacamole-common-js/all.min.js
+            // has been found owned differently from the rest of this plugin's
+            // served files -- a provenance anomaly (an ad hoc placement outside
+            // the normal install pipeline), not a content check. Compares
+            // against manifest.json, shipped by the same install.sh PAGE
+            // manifest entry, as the reference.
+            run: function () {
+                var dir = "/usr/share/cockpit/guac-rdp";
+                return stSpawn(["/bin/sh", "-c",
+                    'printf "LIB=%s\\nREF=%s\\n" ' +
+                    '"$(stat -c %U:%G \'' + dir + '/guacamole-common-js/all.min.js\' 2>/dev/null)" ' +
+                    '"$(stat -c %U:%G \'' + dir + '/manifest.json\' 2>/dev/null)"'
+                ]).then(function (out) {
+                    var lib = (/^LIB=(.*)$/m.exec(out) || [])[1] || "";
+                    var ref = (/^REF=(.*)$/m.exec(out) || [])[1] || "";
+                    if (!lib || !ref)
+                        return { status: "skip", detail: "could not stat the served plugin files" };
+                    if (lib !== ref)
+                        return { status: "fail", detail: "guacamole-common-js/all.min.js is owned " + lib +
+                                 ", the rest of the served tree is " + ref };
+                    return { status: "pass", detail: "owned " + lib + ", matching the served tree" };
+                }, function (e) {
+                    return { status: "skip", detail: String(e) };
+                });
+            }
+        },
+        {
+            name: "cockpit-guac-rdp group exists with expected membership",
+            run: function () {
+                return stSpawn(["/bin/sh", "-c",
+                    'getent group cockpit-guac-rdp >/dev/null 2>&1 && exists=yes || exists=no; ' +
+                    'printf "EXISTS=%s\\nGROUPS=%s\\n" "$exists" "$(id -nG edy-relay 2>/dev/null)"'
+                ]).then(function (out) {
+                    var exists = (/^EXISTS=(.*)$/m.exec(out) || [])[1];
+                    var groups = (/^GROUPS=(.*)$/m.exec(out) || [])[1] || "";
+                    if (exists !== "yes")
+                        return { status: "fail", detail: "the cockpit-guac-rdp group does not exist" };
+                    if ((" " + groups + " ").indexOf(" cockpit-guac-rdp ") === -1)
+                        return { status: "fail", detail: "edy-relay is not a member of cockpit-guac-rdp " +
+                                 "(has: " + (groups || "no groups -- user missing?") + ")" };
+                    return { status: "pass", detail: "group exists; edy-relay is a member" };
+                }, function (e) {
+                    return { status: "skip", detail: String(e) };
+                });
+            }
         }
     ];
 
