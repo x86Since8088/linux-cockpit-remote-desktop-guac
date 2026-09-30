@@ -192,27 +192,61 @@
     // use reliably (sendGuestKeyEvent, with its existing KEYCODE_FIX/SHIFT_LEVEL
     // corrections applying identically to typed characters).
     //
-    // Character -> keysym follows the X11/Guacamole convention Guacamole.Keyboard's
-    // own (built-in, vendored) .type() uses: Latin-1 code points (0x20-0xFF) are
-    // their own keysym; anything higher is the "Unicode keysym" 0x01000000 |
-    // code point, which x11vnc resolves via -add_keysyms (the project's x11vnc
-    // build's own default -- confirmed via `x11vnc -help`: "Default: -add_keysyms"),
-    // dynamically adding an unused keycode for any keysym Xvfb's static "us"
-    // keymap doesn't already have one for. ONE deliberate deviation from the
-    // vendored .type(): it maps "\n" to Linefeed (0xFF0A), a keysym with no key
-    // on that keymap at all (verified with a standalone vm probe against the
-    // real vendored library) -- typing a bare LF would silently do nothing. Both
-    // CR and LF are forced to the real Return keysym (0xFF0D, identical to a
-    // physical Enter key) instead, with the LF half of a CRLF pair skipped so a
-    // Windows-sourced clipboard doesn't send two Enters per line.
+    // Character -> keysym mirrors the vendored Guacamole.Keyboard's own (unused
+    // here) codepoint-to-keysym function EXACTLY -- extracted from
+    // guacamole-common-js/all.min.js and diffed against this implementation
+    // over code points 0-0x400 before shipping, after an adversarial review
+    // caught an earlier draft treating 0x7F-0x9F (DEL + the C1 control range --
+    // easy to miss, and real: it's what a Windows-1252-as-Latin-1 mis-decode or
+    // a terminal copy can leave behind) as direct-value keysyms instead of the
+    // "function key" convention the vendored function actually uses for them.
+    // ONE deliberate deviation from that vendored function, kept from the first
+    // draft: LF and CR are forced to the real Return keysym (0xFF0D) instead of
+    // Linefeed (0xFF0A, what the vendored function -- and its own built-in
+    // .type() -- produces for "\n"), which has no key on the Xvfb "us" keymap
+    // at all (verified with a standalone vm probe: typing a bare LF through it
+    // silently does nothing). x11vnc's -add_keysyms (this build's own default
+    // -- confirmed via `x11vnc -help`: "Default: -add_keysyms") dynamically
+    // adds an unused keycode for any keysym -- including the Unicode-plane
+    // ones below -- Xvfb's static "us" keymap doesn't already have one for.
+    //
+    // Note for anyone pasting TSV/spreadsheet data or indented code: an
+    // embedded Tab/Backspace/Escape/etc. in the clipboard text becomes a REAL
+    // guest keypress here (focus-next, delete-previous-char, ...), same as if
+    // you had typed it yourself -- this button types the text, it doesn't
+    // paste it as inert data. Not a bug, just a consequence of the approach.
+    //
     // TESTHOOK:TYPECLIP:BEGIN -- tests/js/type_clipboard.test.js extracts this
     // exact block (verbatim) and exercises it standalone; keep it self-contained
-    // (only `keyboard` from the outer scope, stubbed with press/release in the test).
+    // (only `sendGuestKeyEvent` from the outer scope, stubbed in the test).
     function keysymForCodePoint(cp) {
-        if (cp === 0x0A || cp === 0x0D) return 0xFF0D;         // LF or CR -> Return
-        if (cp >= 0x20 && cp <= 0xFF) return cp;               // Latin-1: direct
-        if (cp <= 0x1F) return cp | 0xFF00;                    // other C0 controls (Tab=0xFF09, etc.)
-        return 0x01000000 | cp;                                // Unicode keysym plane
+        if (cp === 0x0A || cp === 0x0D) return 0xFF0D;                 // LF or CR -> Return
+        if (cp <= 0x1F || (cp >= 0x7F && cp <= 0x9F)) return cp | 0xFF00;  // C0 + C1 controls
+        if (cp <= 0xFF) return cp;                                     // Latin-1: direct
+        return 0x01000000 | cp;                                        // Unicode keysym plane
+    }
+    // Presses and releases exactly one keysym via sendGuestKeyEvent directly --
+    // deliberately NOT keyboard.press()/keyboard.release(). Those route through
+    // the SAME Guacamole.Keyboard instance real physical keystrokes drive,
+    // sharing its `pressed` map and a single (not per-keysym) key-repeat timer
+    // pair: injecting a keysym that happens to collide with one the user is
+    // physically holding (e.g. holding Enter while a newline in the pasted
+    // text also wants Return) is silently swallowed on the injected press
+    // (Guacamole.Keyboard.prototype.press no-ops when already pressed) while
+    // the immediately-following injected release DOES fire and tells the
+    // guest the physical key was released while the user is still holding it
+    // -- confirmed against the real vendored library and reproduced live by
+    // adversarial review, which also found it can permanently kill a real
+    // key's auto-repeat-to-guest stream even with no keysym collision at all,
+    // via the same shared timer. sendGuestKeyEvent(down, ks) called directly
+    // -- exactly what the existing one-shot sendKeysymTap() helper already
+    // does -- never touches keyboard.pressed or its repeat timers, so injected
+    // typing cannot desync from concurrent real physical typing, while still
+    // getting the same KEYCODE_FIX/SHIFT_LEVEL corrections (I45).
+    function typeOneCodePoint(cp) {
+        var ks = keysymForCodePoint(cp);
+        sendGuestKeyEvent(true, ks);
+        sendGuestKeyEvent(false, ks);
     }
     function typeTextIntoSession(text) {
         var i = 0, n = 0;
@@ -220,14 +254,44 @@
             var cp = text.codePointAt(i);
             i += (cp > 0xFFFF) ? 2 : 1;                        // advance past a surrogate pair too
             if (cp === 0x0D && text.charCodeAt(i) === 0x0A) i += 1;   // CRLF: one Return, not two
-            var ks = keysymForCodePoint(cp);
-            keyboard.press(ks); keyboard.release(ks);
+            typeOneCodePoint(cp);
             n++;
         }
         return n;
     }
     // TESTHOOK:TYPECLIP:END
+    var clipTypeBusy = false;
+    var CLIP_TYPE_CHUNK = 200;   // characters per synchronous burst
+    // Types `chars` (an ARRAY of code-point strings -- from Array.from(text), so
+    // each element is already surrogate-pair-safe) CLIP_TYPE_CHUNK at a time,
+    // yielding to the browser between chunks via setTimeout so a large
+    // paste-by-typing (this feature's whole reason to exist is moving text the
+    // broken native clipboard channel won't carry, which skews toward LARGER
+    // payloads) cannot freeze the tab for the whole operation or block a
+    // mid-paste disconnect from taking effect. If the chunk boundary would
+    // split a CRLF pair, it is pushed one character later to keep the pair
+    // together (typeTextIntoSession's own CRLF collapsing only looks within a
+    // single call's text).
+    function typeClipboardChunked(chars, doneCb) {
+        var pos = 0, total = 0;
+        function step() {
+            if (!client || !keyboard) { doneCb(total, false); return; }
+            var end = Math.min(pos + CLIP_TYPE_CHUNK, chars.length);
+            if (end < chars.length && chars[end - 1] === "\r" && chars[end] === "\n") end += 1;
+            total += typeTextIntoSession(chars.slice(pos, end).join(""));
+            pos = end;
+            if (pos < chars.length) {
+                setStatus("Typing… " + pos + " of " + chars.length + " characters.");
+                setTimeout(step, 0);
+            } else { doneCb(total, true); }
+        }
+        step();
+    }
     function typeClipboardIntoSession() {
+        if (clipTypeBusy) {
+            trace("clipboard", "type: refused, a previous Type Clipboard run is still in progress");
+            setStatus("Still typing the last clipboard — wait for it to finish.", "err"); return;
+        }
         if (!client || !currentUuid || !keyboard) {
             trace("clipboard", "type: refused, no live session");
             setStatus("Connect a session first, then Type clipboard.", "err"); return;
@@ -236,15 +300,27 @@
             trace("clipboard", "type: no navigator.clipboard.readText in this browser/context");
             setStatus("This browser will not let the page read the clipboard.", "err"); return;
         }
+        clipTypeBusy = true;
         navigator.clipboard.readText().then(function (text) {
-            if (!client || !keyboard) return;
-            if (!text) { trace("clipboard", "type: local clipboard is empty"); setStatus("Your clipboard is empty."); return; }
+            if (!client || !keyboard) { clipTypeBusy = false; return; }
+            if (!text) {
+                trace("clipboard", "type: local clipboard is empty"); setStatus("Your clipboard is empty.");
+                clipTypeBusy = false; return;
+            }
             try {
-                var n = typeTextIntoSession(text);
-                trace("clipboard", "type: injected " + n + " keystrokes for " + text.length + " chars");
-                setStatus("Typed " + text.length + " characters into the session.");
-            } catch (e) { trace("clipboard", "type: threw " + e); setStatus("Could not type into the session.", "err"); }
+                typeClipboardChunked(Array.from(text), function (n, completed) {
+                    clipTypeBusy = false;
+                    trace("clipboard", "type: injected " + n + " keystrokes for " + text.length + " chars"
+                        + (completed ? "" : " (stopped early -- session ended)"));
+                    if (completed) setStatus("Typed " + text.length + " characters into the session.");
+                    else setStatus("Session ended before typing finished (" + n + " characters typed).", "err");
+                });
+            } catch (e) {
+                clipTypeBusy = false;
+                trace("clipboard", "type: threw " + e); setStatus("Could not type into the session.", "err");
+            }
         }).catch(function (e) {
+            clipTypeBusy = false;
             trace("clipboard", "type: readText() rejected " + e);
             setStatus("Clipboard read was blocked — click inside the page, then press Type clipboard again.", "err");
         });
@@ -263,7 +339,7 @@
         };
         mk("clip-send", "Send clip", "Send YOUR clipboard to the session (then paste inside the session).", sendClipboardToSession);
         mk("clip-recv", "Receive clip", "Copy the SESSION's clipboard into your browser (then paste locally).", receiveClipboardFromSession);
-        mk("clip-type", "Type Clipboard", "Type YOUR clipboard into the session as keystrokes -- a workaround for when the session's own clipboard paste doesn't take.", typeClipboardIntoSession);
+        mk("clip-type", "Type Clipboard", "Type YOUR clipboard into the session as keystrokes -- a workaround for when the session's own clipboard paste doesn't take. Embedded Tab/Backspace/etc. act as real keys, not literal text.", typeClipboardIntoSession);
     }
 
     // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
