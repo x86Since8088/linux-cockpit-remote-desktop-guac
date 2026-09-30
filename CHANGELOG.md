@@ -8,7 +8,10 @@ group exists instead of leaving it entirely to an operator.
   `rdp-shadow`, chosen before I51's `cockpit-guac-rdp` rename). Updated everywhere the old
   default was a literal: `.envdefault`, `relay/edy_rdp_relay.py`'s three parameter/argparse
   defaults, `relay/test_edy_rdp_relay.py`'s `_conn()` fixture, `README.md`,
-  `docs/SCENARIOS.md`.
+  `docs/SCENARIOS.md`, and (found by adversarial review — missed in the first pass)
+  `systemd/edy-rdp-relay.service.in`'s own `Environment=` fallback line, which `.env` normally
+  shadows but which would otherwise gate console-shadow access on the old group name on any
+  host where `EDY_RDP_SHADOW_GROUP` were ever absent from the effective `.env`.
 - **New migration (I55):** `deploy.sh` gained `migrate_shadow_group_rename()`, run
   unconditionally right after the existing `migrate_group_rename()` on every deploy —
   renames a real `rdp-shadow` group in place (GID and members preserved) unless

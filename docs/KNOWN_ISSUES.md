@@ -1336,7 +1336,13 @@ changed is a narrower, later decision about who creates the group, not why the g
 1.9.0 renamed this project's own relay group `edy-rdp` → `cockpit-guac-rdp`. The default is now
 `cockpit-guac-rdp-shadow`, matching that same convention. `relay/edy_rdp_relay.py`'s three `"rdp-shadow"`
 literal defaults (`Connection.__init__`, `handle()`, `--shadow-group`'s `argparse` default) and
-`.envdefault`'s shipped value all moved together; nothing about the gate's own logic changed.
+`.envdefault`'s shipped value all moved together; nothing about the gate's own logic changed. Found by
+adversarial review, missed in the first pass: `systemd/edy-rdp-relay.service.in`'s own
+`Environment=EDY_RDP_SHADOW_GROUP=` fallback line still named the old default. `.env`'s own value
+normally shadows it, but on any host where `EDY_RDP_SHADOW_GROUP` were ever absent from the effective
+`.env` (a hand-edited file, a future `env_place` regression), the relay would silently fall back to
+gating console-shadow access on the retired group name instead of the new one — fixed in the same
+commit as the rest of the rename, not a separate follow-up.
 
 **The migration — two independent, unconditional, idempotent steps, mirroring I51's own
 `migrate_group_rename()`.** A new `migrate_shadow_group_rename()` in `deploy.sh`, run right after

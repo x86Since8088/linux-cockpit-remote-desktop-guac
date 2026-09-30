@@ -35,7 +35,7 @@ Environment=EDY_RDP_GUACD=127.0.0.1:4822
 Environment=EDY_RDP_ADMIN_GROUP=sudo
 # Additional gate for mirroring a DIFFERENT signed-in user's console session
 # (admin-only gating above is unchanged). Empty = this extra gate is off.
-Environment=EDY_RDP_SHADOW_GROUP=rdp-shadow
+Environment=EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow
 Environment=EDY_RDP_STATE_FILE=/run/edy-rdp/state/sessions.json
 Environment=EDY_RDP_LOG_LEVEL=INFO
 Environment="EDY_RDP_ALLOW_ARGS=--allow-target 127.0.0.1:3389 --allow-target 127.0.0.1:3390 --allow-target 127.0.0.1:3391"
