@@ -27,6 +27,15 @@ Environment=GUACD_IMAGE=ghcr.io/skylark-software/janua@sha256:2279eac000abbe78b8
 # was wrong.
 Environment=GUACD_ENTRYPOINT=/usr/local/sbin/guacd
 EnvironmentFile=@ENV_FILE@
+# I59: when .env's PULSE_SOURCE=auto, this is where the resolved value actually
+# lands. edy-rdp-pulse-bind writes it here (never this unit's own .env) each
+# time it resolves a NEW value, so it takes effect on guacd's NEXT start -
+# an env var, unlike the socket bind two directives below, cannot be pushed
+# into an already-running container, which is why edy-rdp-pulse-rebind-auto.service
+# additionally restarts this unit when the resolved value changes. Absent (no
+# auto run has ever happened, or PULSE_SOURCE is unset/pinned, in which case
+# edy-rdp-pulse-bind actively deletes this file) is a normal, silent no-op: '-'.
+EnvironmentFile=-/run/edy-rdp-pulse/pulse-source.env
 # Desktop audio (the Sound toggle): guacd records the seat's PipeWire/PulseAudio.
 # The seat socket lives under the user's XDG_RUNTIME_DIR (0700), which the container
 # cannot traverse. 1.3.x bind-mounted the socket FILE once, at service start, with

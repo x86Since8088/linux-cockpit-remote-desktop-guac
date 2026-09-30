@@ -82,8 +82,11 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        edy-rdp-unlock@.service edy-rdp-waylandvnc@.service edy-rdp-deskui@.service
        # Audio: a path unit per seat uid that binds the seat's pulse socket into the
        # SHARED /run/edy-rdp-pulse the moment it appears (login), so it propagates into
-       # the running guacd container without a restart (KNOWN_ISSUES I42).
+       # the running guacd container without a restart (KNOWN_ISSUES I42). The -auto
+       # pair (no %i) is what EDY_RDP_PULSE_SEAT_UID=auto (the default, I59) actually
+       # enables; the %i-templated pair stays for a pinned, explicit-uid seat.
        edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service
+       edy-rdp-pulse-seat-auto.path edy-rdp-pulse-rebind-auto.service
        # Self-update: deliberately NOT templated (no %i) -- see
        # systemd/edy-rdp-selfupdate-apply.service.in for why that is a stronger
        # property here than the %i-templated units above.
@@ -639,15 +642,31 @@ verify_host_state() {
     if [[ -z "$D" ]]; then
         uid="$(env_get "$ENV_FILE" EDY_RDP_PULSE_SEAT_UID 2>/dev/null || true)"
         sock="$(env_get "$ENV_FILE" EDY_RDP_PULSE_SEAT_SOCKET 2>/dev/null || true)"
-        seat="${EDY_RDP_PULSE_SEAT_SOCKET:-${sock:-/run/user/${uid:-1000}/pulse/native}}"
-        if [[ ! -S "$seat" ]]; then
+        if [[ "$uid" == auto && -z "$sock" ]]; then
+            # I59: "auto" has no single fixed expected path to stat -- ask the
+            # bind script's OWN --check (read-only, no root needed) for its
+            # already-tested resolution instead of re-deriving "who is the
+            # active seat" a second time here, which could silently drift out
+            # of sync with it. Its plan line's own format is this project's,
+            # not an external tool's, so parsing it is stable.
+            plan="$(EDY_RDP_PULSE_SEAT_SOCKET= EDY_RDP_PULSE_SEAT_UID=auto "$LIBEXECDIR/edy-rdp-pulse-bind" --check 2>&1)"
+            seat="$(sed -n 's/^\[pulse-bind\] plan: dir=[^ ]* seat=\([^ ]*\) (\([a-z]*\)).*/\1|\2/p' <<<"$plan")"
+            state="${seat#*|}"; seat="${seat%%|*}"
+            [[ -n "$seat" && -n "$state" ]] \
+                || fail "could not parse edy-rdp-pulse-bind --check output to verify the audio bind:
+$(sed 's/^/    /' <<<"$plan")"
+        else
+            seat="${sock:-/run/user/${uid:-1000}/pulse/native}"
+            [[ -S "$seat" ]] && state=exists || state=absent
+        fi
+        if [[ "$state" != exists ]]; then
             say skipped "pulse bind (seat socket $seat absent - no seat login)"
         elif ! findmnt -no PROPAGATION /run/edy-rdp-pulse 2>/dev/null | grep -q shared; then
             fail "/run/edy-rdp-pulse is not a SHARED mountpoint (a later bind cannot reach the container; run edy-rdp-pulse-bind)"
         elif mountpoint -q /run/edy-rdp-pulse/native 2>/dev/null; then
             ok "/run/edy-rdp-pulse/native is a mountpoint (seat socket bound)"
         else
-            fail "/run/edy-rdp-pulse/native is not a mountpoint while the seat socket exists (run /usr/libexec/edy-rdp/edy-rdp-pulse-bind, or check edy-rdp-pulse-seat@<uid>.path)"
+            fail "/run/edy-rdp-pulse/native is not a mountpoint while the seat socket exists (run /usr/libexec/edy-rdp/edy-rdp-pulse-bind, or check edy-rdp-pulse-seat-auto.path / edy-rdp-pulse-seat@<uid>.path)"
         fi
     fi
     # 5. venv.env agrees with requirements.txt (the bootstrap rewrites it at

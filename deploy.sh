@@ -253,6 +253,44 @@ migrate_shadow_group_rename() {
     fi
 }
 
+# I59: EDY_RDP_PULSE_SEAT_UID's and PULSE_SOURCE's shipped defaults change from a
+# fixed uid/hand-typed sink name to "auto" (dynamic resolution of whichever seat
+# is actually active, and its actual current default sink). Same idiom, same
+# guard, as migrate_shadow_group_rename() above: unconditional (an already-
+# deployed host must pick this up on its next plain redeploy, not just
+# --with-users), each key rewritten only on an EXACT full-line match against the
+# value that could only have gotten into a deployed .env by inheriting the OLD
+# shipped default verbatim (install.sh's own .envdefault reconciliation) -- an
+# operator who deliberately pinned a specific uid or sink name, even one that
+# happens to equal 1000 or the old example string, is never distinguishable from
+# "never customized" this way and is left alone either way it goes: pinned to
+# THIS host's real value, migrating to "auto" would silently start following
+# whoever else logs in instead, which is the one behavior change this migration
+# must never make on its own.
+migrate_pulse_auto_defaults() {
+    [[ -z "$D" ]] || return 0
+    [[ -f "$ENVF" ]] || return 0
+    if grep -qx 'EDY_RDP_PULSE_SEAT_UID=1000' "$ENVF"; then
+        sed -i 's/^EDY_RDP_PULSE_SEAT_UID=1000$/EDY_RDP_PULSE_SEAT_UID=auto/' "$ENVF"
+        say updated "$ENVF: EDY_RDP_PULSE_SEAT_UID 1000 -> auto (follows whichever seat is active)"
+        # A prior --with-units on THIS host, before this migration, enabled the
+        # OLD per-uid pair for exactly the uid just migrated away from (1000) -
+        # found by adversarial review: left running, it would keep re-binding
+        # uid 1000's own socket/sink over whatever the new -auto pair resolves
+        # every time uid 1000's own session changes, silently reintroducing the
+        # "wrong uid recorded" bug this migration exists to fix, on precisely
+        # the uid it used to be pinned to. Safe unconditionally: disabling/
+        # stopping a unit that was never enabled is a harmless no-op.
+        systemctl disable --now edy-rdp-pulse-seat@1000.path 2>/dev/null \
+            && say disabled "edy-rdp-pulse-seat@1000.path (superseded by edy-rdp-pulse-seat-auto.path)"
+        systemctl stop edy-rdp-pulse-rebind@1000.service 2>/dev/null || true
+    fi
+    if grep -qx 'PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor' "$ENVF"; then
+        sed -i 's/^PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor$/PULSE_SOURCE=auto/' "$ENVF"
+        say updated "$ENVF: PULSE_SOURCE <old default example> -> auto (re-resolves the active seat's own default sink)"
+    fi
+}
+
 create_users() {
     getent group "$RELAY_GROUP" >/dev/null \
         || { groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"; }
@@ -450,6 +488,7 @@ do_deploy() {
     migrate_legacy_env
     migrate_group_rename
     migrate_shadow_group_rename
+    migrate_pulse_auto_defaults
     ((WITH_USERS)) && { step "users"; create_users; }
 
     # install.sh BEFORE the image pull: it places .env, and GUACD_IMAGE is read
@@ -483,17 +522,36 @@ do_deploy() {
         systemctl start edy-rdp-relay.service || true
         # Audio: the path unit for the seat uid binds the pulse socket into the
         # shared dir at every login, so it reaches the running container (I42).
+        # "auto" (I59, the default) means the active seat can be either uid (the
+        # GDM greeter's, or a logged-in user's) and can change at any login/
+        # logout, so it gets the non-templated -auto pair instead, which watches
+        # for ANY login/logout and re-derives who is actually active each time,
+        # rather than one path unit instance per fixed, known-in-advance uid.
         local uid
-        uid="$(env_get "$ENVF" EDY_RDP_PULSE_SEAT_UID || echo 1000)"
-        systemctl enable --now "edy-rdp-pulse-seat@${uid}.path" \
-            && say enabled "edy-rdp-pulse-seat@${uid}.path (audio bind on seat login)"
-        # PathChanged= fires on the NEXT change in the pulse directory, never for a
-        # socket that already exists when the watch starts (and PathExists= would
-        # busy-loop the path unit to death - see the unit). A seat logged in right
-        # now is bound by this one explicit run; the script is idempotent.
-        systemctl start "edy-rdp-pulse-rebind@${uid}.service" \
-            && say bound "seat ${uid} pulse socket, if logged in (edy-rdp-pulse-rebind@${uid}.service)" \
-            || warn "edy-rdp-pulse-rebind@${uid}.service failed: journalctl -t edy-rdp-pulse-bind"
+        uid="$(env_get "$ENVF" EDY_RDP_PULSE_SEAT_UID || echo auto)"
+        if [[ "$uid" == auto ]]; then
+            systemctl enable --now edy-rdp-pulse-seat-auto.path \
+                && say enabled "edy-rdp-pulse-seat-auto.path (audio auto-follows the active seat: GDM greeter or a logged-in user)"
+            # PathChanged= fires on the NEXT change under /run/user, never for a
+            # login already in progress when the watch starts - this one explicit
+            # run covers that (the script is idempotent either way), and also
+            # restarts guacd once if this is the very first resolution (a fresh
+            # PULSE_SOURCE cannot reach the container guacd.service just started
+            # with --with-units above any other way - see edy-rdp-pulse-bind.sh).
+            systemctl start edy-rdp-pulse-rebind-auto.service \
+                && say bound "the active seat's pulse socket + PULSE_SOURCE, restarting guacd if either changed (edy-rdp-pulse-rebind-auto.service)" \
+                || warn "edy-rdp-pulse-rebind-auto.service failed: journalctl -t edy-rdp-pulse-bind"
+        else
+            systemctl enable --now "edy-rdp-pulse-seat@${uid}.path" \
+                && say enabled "edy-rdp-pulse-seat@${uid}.path (audio bind on seat login)"
+            # PathChanged= fires on the NEXT change in the pulse directory, never for a
+            # socket that already exists when the watch starts (and PathExists= would
+            # busy-loop the path unit to death - see the unit). A seat logged in right
+            # now is bound by this one explicit run; the script is idempotent.
+            systemctl start "edy-rdp-pulse-rebind@${uid}.service" \
+                && say bound "seat ${uid} pulse socket, if logged in (edy-rdp-pulse-rebind@${uid}.service)" \
+                || warn "edy-rdp-pulse-rebind@${uid}.service failed: journalctl -t edy-rdp-pulse-bind"
+        fi
         warn "edy-rdp-rotate-rdplogin.timer was NOT enabled. It rotates the 3390
        greeter door credential, which only matters once that door is configured
        at all (docs/KNOWN_ISSUES.md I29). Enable it deliberately:

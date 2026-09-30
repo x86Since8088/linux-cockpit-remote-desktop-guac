@@ -104,7 +104,71 @@ mount failure, stops the unit. The propagation claim is a design argument until 
 is re-tested live on edt1 (**live verification pending**, I42); the script's
 one-line outcome in the journal is the diagnostic either way.
 
-## One-time seat setup
+## Automatic resolution (the default, since I59)
+
+Both "which uid is the seat" and "which sink that uid plays to" used to be a
+one-time, hand-typed operator step: find the sink with `pactl get-default-sink`,
+paste `<name>.monitor` into `.env`, restart guacd. That goes stale the moment the
+audio topology changes — a monitor disconnects, a different sink becomes default —
+and it only ever names ONE fixed uid, so it could reflect a mirrored desktop login
+**or** the GDM greeter but never both, as an operator actually switches between
+them by logging in and out at the console. This is exactly what a live host
+(edt1) was found to be hitting: `PULSE_SOURCE` was still pointing at a monitor
+that no longer existed on the host at all.
+
+`EDY_RDP_PULSE_SEAT_UID=auto` (the default) and `PULSE_SOURCE=auto` (opt-in —
+unset still means "no audio channel", unchanged) instead re-resolve, on every
+seat login/logout and every guacd (re)start:
+
+- **which uid is the seat** — via `loginctl`, whichever session is active on
+  `seat0` right now: the GDM greeter's own session before anyone logs in, a
+  human's after. This covers "GDM and mirroring scenarios" as they actually
+  happen over time, without the relay or an operator needing to know ahead of
+  time which one is current.
+- **which sink that uid plays to** — `pactl get-default-sink` run directly over
+  that uid's own (already vetted, bound) socket, exactly the manual step above,
+  automated.
+
+The resolved `PULSE_SOURCE` is written to a small generated file,
+`/run/edy-rdp-pulse/pulse-source.env`, which `edy-rdp-guacd.service` loads as a
+**second** `EnvironmentFile=` (after the main `.env`, so it can override
+`PULSE_SOURCE` when present). This has to be a *file* guacd reads at its own next
+start, not something pushed live into the running container: unlike the socket
+bind (which reaches a running container through the shared mount with no
+restart — see above), `PULSE_SOURCE` is an ordinary container **start-time**
+environment variable, so a value that changed can only reach guacd by restarting
+it. `edy-rdp-pulse-rebind-auto.service` (triggered by `edy-rdp-pulse-seat-auto.path`
+on any login/logout, watching `/run/user` itself rather than one fixed uid's
+directory, since *which* uid is the seat is exactly what can change) does that
+restart — with `systemctl try-restart`, so a guacd that is not currently running
+is left alone — only when the resolved value actually changed. `edy-rdp-guacd`'s
+own `ExecStartPre` never restarts itself: it re-resolves and re-binds on every
+start regardless, which is what makes a fresh boot or a `deploy.sh` redeploy
+correct immediately, with no separate priming step, once a *prior* run has
+already written the file once (`deploy.sh --with-units` runs the rebind service
+explicitly, once, right after enabling everything, for exactly this reason —
+the very first resolution has no earlier run to have already primed it).
+
+An explicit, pinned value for either — a numeric `EDY_RDP_PULSE_SEAT_UID`, or a
+literal `PULSE_SOURCE=<sink>.monitor` — is never touched or auto-resolved; see
+"Pinning a specific device" below. Leaving `PULSE_SOURCE` unset (commented out,
+the default) still means no audio channel at all, exactly as before I59: a stale
+generated file left over from an *earlier* auto run is actively deleted in this
+case, so "audio off" cannot accidentally start streaming again just because it
+was once turned on.
+
+**Known, accepted gap:** the login/logout-triggered mechanism reacts to the
+*active seat changing*, not to a same-uid, mid-session change (the already-active
+user plugs in a new USB headset, or unplugs the one being recorded). Nothing
+currently re-resolves for that case short of a guacd restart (a reboot, a
+redeploy, or an operator's own `systemctl restart edy-rdp-guacd`) — named here
+rather than silently left, per this project's own convention (see I57 for the
+shape this takes elsewhere).
+
+## Pinning a specific device (opt-out of auto)
+
+To always use one particular seat and sink regardless of who else logs in or
+what else becomes default — the pre-I59 behavior:
 
 1. **Find the sink the desktop plays to** (as the seat user):
 
@@ -127,9 +191,11 @@ one-line outcome in the journal is the diagnostic either way.
    `PULSE_SOURCE` is unset the audio channel simply never connects (the prior
    behaviour).
 
-3. **Name the seat user.** `EDY_RDP_PULSE_SEAT_UID` (default `1000`) is the uid
-   whose `/run/user/<uid>/pulse/native` carries the desktop audio. `deploy.sh
-   --with-units` enables `edy-rdp-pulse-seat@<that uid>.path`; on a host you set
+3. **Name the seat user.** Set `EDY_RDP_PULSE_SEAT_UID` to a specific numeric uid
+   instead of `auto` (the default since I59). `deploy.sh --with-units` then
+   enables the %i-templated `edy-rdp-pulse-seat@<that uid>.path` (instead of the
+   non-templated `-auto` pair `auto` mode uses), which only reacts to THAT one
+   uid's own login/logout — the pre-I59 behavior, unchanged. On a host you set
    up by hand:
 
    ```
@@ -159,6 +225,15 @@ socket (the exact endpoint guacd uses):
 PULSE_SERVER=unix:/run/edy-rdp-pulse/native pactl info
 PULSE_SERVER=unix:/run/edy-rdp-pulse/native parec -d <sink>.monitor >/dev/null
 # while something is playing, parec should stream bytes (Ctrl-C to stop)
+```
+
+With `EDY_RDP_PULSE_SEAT_UID=auto`/`PULSE_SOURCE=auto` (I59):
+
+```
+cat /run/edy-rdp-pulse/pulse-source.env       # the last resolved value guacd actually started with
+systemctl status edy-rdp-pulse-seat-auto.path # active (waiting) - watching /run/user for any login/logout
+journalctl -t edy-rdp-pulse-bind | tail       # "auto: resolved ... to uid N" / "resolved PULSE_SOURCE=..."
+loginctl list-sessions                        # cross-check: which session is Seat=seat0 Active=yes right now
 ```
 
 ## Upgrading from 1.3.x
