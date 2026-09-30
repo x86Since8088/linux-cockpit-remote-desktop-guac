@@ -273,6 +273,17 @@ migrate_pulse_auto_defaults() {
     if grep -qx 'EDY_RDP_PULSE_SEAT_UID=1000' "$ENVF"; then
         sed -i 's/^EDY_RDP_PULSE_SEAT_UID=1000$/EDY_RDP_PULSE_SEAT_UID=auto/' "$ENVF"
         say updated "$ENVF: EDY_RDP_PULSE_SEAT_UID 1000 -> auto (follows whichever seat is active)"
+        # A prior --with-units on THIS host, before this migration, enabled the
+        # OLD per-uid pair for exactly the uid just migrated away from (1000) -
+        # found by adversarial review: left running, it would keep re-binding
+        # uid 1000's own socket/sink over whatever the new -auto pair resolves
+        # every time uid 1000's own session changes, silently reintroducing the
+        # "wrong uid recorded" bug this migration exists to fix, on precisely
+        # the uid it used to be pinned to. Safe unconditionally: disabling/
+        # stopping a unit that was never enabled is a harmless no-op.
+        systemctl disable --now edy-rdp-pulse-seat@1000.path 2>/dev/null \
+            && say disabled "edy-rdp-pulse-seat@1000.path (superseded by edy-rdp-pulse-seat-auto.path)"
+        systemctl stop edy-rdp-pulse-rebind@1000.service 2>/dev/null || true
     fi
     if grep -qx 'PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor' "$ENVF"; then
         sed -i 's/^PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor$/PULSE_SOURCE=auto/' "$ENVF"

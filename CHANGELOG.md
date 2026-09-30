@@ -16,10 +16,20 @@ all, and the fixed seat uid it was bound to (1000) turned out not to be the actu
   before. Leaving `PULSE_SOURCE` unset still means no audio channel at all.
 - `deploy.sh` migrates an already-deployed `.env` to `auto` for either key, but ONLY when it still carries
   the exact old shipped default verbatim — any deliberately customized value is left alone.
-- New `pulse_bind_auto_resolves_seat_uid`, `pulse_bind_auto_resolves_source_preview`, and
-  `deploy_migrate_pulse_auto_defaults` in `tests/installer_tests.sh`, mutation-tested. Live-verified
-  (read-only) against edt1's actual current state: correctly resolved to the GDM greeter's uid and its
-  real USB speaker device.
+- **Adversarial review before merge found and fixed 6 real defects** in the first draft: an oscillating
+  resolved value could restart the shared guacd for every viewer with no cooldown (now debounced 30s);
+  migrating to `auto` never disabled the superseded per-uid unit pair (now does); `install.sh --verify`'s
+  audio-bind check silently stopped checking anything under the new `auto` default (now delegates to
+  `edy-rdp-pulse-bind --check`); `EDY_RDP_PULSE_SEAT_SOCKET` broke under the new uid default (now trusts
+  the override's own owner); a fixed temp filename raced under concurrent invocations (now `mktemp` +
+  checked `mv`); unrelated-account login churn could wedge the new rebind unit into a failed state (now has
+  a generous `StartLimit*=`); and the new `loginctl`/`pactl` calls had no timeout (now 3s, matching this
+  project's own I40 precedent). See I59 for the full detail.
+- New `pulse_bind_auto_resolves_seat_uid`, `pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket`,
+  `pulse_bind_auto_resolves_source_preview`, and `deploy_migrate_pulse_auto_defaults` in
+  `tests/installer_tests.sh`, mutation-tested. Live-tested end to end on `rockytest` via the real
+  `deploy.sh --with-units` flow. Live-verified (read-only) against edt1's actual current state: correctly
+  resolved to the GDM greeter's uid and its real USB speaker device.
 
 ## 1.10.2.20260930 - 2026-09-30
 

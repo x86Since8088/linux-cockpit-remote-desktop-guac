@@ -116,13 +116,26 @@ log() {
 }
 fail() { local rc="${2:-1}"; log "FAIL $1"; exit "$rc"; }
 
+# Every external IPC call in this file (loginctl/pactl, both a round trip to a
+# separate daemon) is timeout-wrapped: a wedged logind or a pipewire-pulse that
+# accepts a connection but never completes protocol negotiation must not hang
+# this script indefinitely, since it runs as edy-rdp-guacd.service's own
+# ExecStartPre (unconditionally, on every start) -- the same class of risk
+# bridge/edy-rdp-krb-preflight.sh already guards against for a different IPC
+# call (`timeout 1 getent ...`), and KNOWN_ISSUES I40 is a prior incident of
+# exactly this shape (FreeRDP3's Kerberos-first NLA hanging ~2 minutes against
+# a dead KDC). A timeout here degrades to the same "nothing resolved" path as
+# a clean negative answer -- the caller's existing fallback handles both alike.
+IPC_TIMEOUT=3
+
 # I59: the uid of whichever session is CURRENTLY active on seat0 - the GDM
 # greeter before anyone logs in, the logged-in user's own session after (which
 # is exactly "GDM and mirroring scenarios" without needing to know which one it
 # is ahead of time). Read-only (loginctl queries, no writes), so it is safe to
 # call under --check too. Prints nothing and returns 1 if loginctl is missing,
-# errors, or no session is both on seat0 and Active=yes (e.g. a headless host
-# with no display manager at all) - the caller falls back to a fixed uid.
+# errors, times out, or no session is both on seat0 and Active=yes (e.g. a
+# headless host with no display manager at all) - the caller falls back to a
+# fixed uid.
 resolve_active_seat_uid() {
     command -v loginctl >/dev/null 2>&1 || return 1
     local sid seat active uid k v
@@ -131,47 +144,71 @@ resolve_active_seat_uid() {
         seat=""; active=""; uid=""
         while IFS='=' read -r k v; do
             case "$k" in Seat) seat="$v" ;; Active) active="$v" ;; User) uid="$v" ;; esac
-        done < <(loginctl show-session "$sid" -p Seat -p Active -p User 2>/dev/null)
+        done < <(timeout "$IPC_TIMEOUT" loginctl show-session "$sid" -p Seat -p Active -p User 2>/dev/null)
         [[ "$seat" == seat0 && "$active" == yes && "$uid" =~ ^[0-9]+$ ]] || continue
         printf '%s\n' "$uid"
         return 0
-    done < <(loginctl list-sessions --no-legend 2>/dev/null)
+    done < <(timeout "$IPC_TIMEOUT" loginctl list-sessions --no-legend 2>/dev/null)
     return 1
 }
 # I59: the seat's OWN current default sink, over the (already vetted/bound)
 # socket path given in $1 - never a microphone, same "playing on the desktop"
 # meaning as the manual `pactl get-default-sink` step in docs/AUDIO.md. Prints
 # nothing and returns 1 if pactl is missing, the socket refuses the connection
-# (nobody there yet, or it is not actually a pulse socket), or no sink is set.
+# or times out (nobody there yet, or it is not actually a pulse socket), or no
+# sink is set.
 resolve_default_sink_monitor() {
     command -v pactl >/dev/null 2>&1 || return 1
     local sink
-    sink="$(PULSE_SERVER="unix:$1" pactl get-default-sink 2>/dev/null)" || return 1
+    sink="$(PULSE_SERVER="unix:$1" timeout "$IPC_TIMEOUT" pactl get-default-sink 2>/dev/null)" || return 1
     [[ -n "$sink" ]] || return 1
     printf '%s.monitor\n' "$sink"
 }
 
 # --- resolve the seat socket -------------------------------------------------
+# EDY_RDP_PULSE_SEAT_SOCKET is documented (SEAT SOCKET PRECEDENCE, above) to
+# WIN over the uid outright, so OVERRIDE has to be known BEFORE "auto" ever
+# runs: auto-resolving "whoever is active on seat0 right now" for a pinned
+# override path would make an operator's explicit override start silently
+# refusing (or, worse, succeeding for the wrong reason) purely depending on who
+# ELSE happens to be logged in -- found by adversarial review, reproduced
+# against a fake loginctl reporting a mismatched active uid.
+OVERRIDE=0
+if [[ -n "${EDY_RDP_PULSE_SEAT_SOCKET:-}" ]]; then
+    SOCKET="$EDY_RDP_PULSE_SEAT_SOCKET"; OVERRIDE=1
+fi
 UID_="${SEAT_UID_ARG:-${EDY_RDP_PULSE_SEAT_UID:-auto}}"
 if [[ "$UID_" == auto ]]; then
-    resolved="$(resolve_active_seat_uid || true)"
-    if [[ -n "$resolved" ]]; then
-        log "auto: resolved the active seat0 session to uid $resolved"
-        UID_="$resolved"
+    if (( OVERRIDE )); then
+        # Trust the override's OWN current owner for the ownership check
+        # below, rather than an unrelated "who is active" answer: the operator
+        # chose this exact path, so ITS real owner is what "wins over the uid"
+        # has to mean. A symlinked $SOCKET is still caught (and this bind
+        # refused) by seat_check()'s own -L check further down regardless of
+        # what stat reports here -- this is not a security-relevant lookup,
+        # only which numeric uid gets compared against.
+        resolved="$(stat -c '%u' -- "$SOCKET" 2>/dev/null || true)"
+        if [[ "$resolved" =~ ^[0-9]+$ ]]; then
+            UID_="$resolved"
+        else
+            UID_=1000
+            log "auto: EDY_RDP_PULSE_SEAT_SOCKET is set but $SOCKET does not exist yet - using uid $UID_ for the ownership check until it appears"
+        fi
     else
-        UID_=1000
-        log "auto: no session is both on seat0 and active (loginctl) - falling back to uid $UID_"
+        resolved="$(resolve_active_seat_uid || true)"
+        if [[ -n "$resolved" ]]; then
+            log "auto: resolved the active seat0 session to uid $resolved"
+            UID_="$resolved"
+        else
+            UID_=1000
+            log "auto: no session is both on seat0 and active (loginctl) - falling back to uid $UID_"
+        fi
     fi
 fi
 case "$UID_" in
     ''|*[!0-9]*) fail "seat uid must be numeric or 'auto', got '$UID_'" 2 ;;
 esac
-OVERRIDE=0
-if [[ -n "${EDY_RDP_PULSE_SEAT_SOCKET:-}" ]]; then
-    SOCKET="$EDY_RDP_PULSE_SEAT_SOCKET"; OVERRIDE=1
-else
-    SOCKET="/run/user/$UID_/pulse/native"
-fi
+(( OVERRIDE )) || SOCKET="/run/user/$UID_/pulse/native"
 T="$DIR/native"
 
 # --- the two vettings (lstat only; nothing followed) ---------------------------
@@ -213,6 +250,21 @@ target_check() {
     return 0
 }
 
+# Guacd restarts are a shared resource -- EVERY current viewer's session drops
+# when it restarts, not just the one that changed. Left unthrottled, a resolved
+# value that keeps flapping (found by adversarial review: this project's own
+# edt1-gui-crash-shutdown-rca.md documents the GDM greeter crash-looping on
+# every RDP disconnect, each crash landing in a fresh session -- exactly the
+# kind of churn edy-rdp-pulse-seat-auto.path reacts to) could otherwise fire
+# `systemctl try-restart` fast enough to trip systemd's OWN default
+# StartLimitBurst (5 restarts / 10s) and leave edy-rdp-guacd.service FAILED,
+# not just noisy, for every viewer until an operator runs `systemctl
+# reset-failed`. This cooldown keeps this script's OWN restarts well under that
+# limit; the next trigger after it expires (or guacd's own next restart for any
+# other reason, e.g. a deploy) still picks up whatever is current by then, so a
+# skipped restart here is a delay, never a permanently lost update.
+RESTART_COOLDOWN_SECS=30
+
 # I59: resolves and, unless $2=preview, PERSISTS PULSE_SOURCE for this seat when
 # .env opted in (PULSE_SOURCE=auto); leaves a pin or "audio off" (unset) alone,
 # and cleans up a stale generated file left by an EARLIER auto run so "audio off"
@@ -237,13 +289,40 @@ resolve_and_persist_source() {
         old_source=""
         [[ -f "$src_file" ]] && old_source="$(sed -n 's/^PULSE_SOURCE=//p' "$src_file")"
         [[ "$new_source" == "$old_source" ]] && return 0
-        printf 'PULSE_SOURCE=%s\n' "$new_source" > "$src_file.tmp" && mv -f -- "$src_file.tmp" "$src_file"
+        # A unique per-invocation temp name (this project's own established
+        # idiom for atomic-write-then-rename -- see bridge/edy-rdp-bridge-
+        # start.sh's mktemp use), not a fixed one: two invocations CAN overlap
+        # in practice (edy-rdp-guacd.service's own ExecStartPre and a
+        # login/logout-triggered rebind both call this script, with no
+        # ordering between them), and a fixed name let one invocation's mv
+        # silently fail (ENOENT, the other invocation having already renamed
+        # it away) while this function kept logging success regardless. The
+        # mv's exit status now gates the log line and the restart decision
+        # instead of running unconditionally after it.
+        local tmp
+        tmp="$(mktemp "$src_file.XXXXXX")" || { log "PULSE_SOURCE=auto: mktemp failed for $src_file - unchanged"; return 0; }
+        if ! { printf 'PULSE_SOURCE=%s\n' "$new_source" > "$tmp" && mv -f -- "$tmp" "$src_file"; }; then
+            rm -f -- "$tmp"
+            log "FAILED to persist PULSE_SOURCE=$new_source to $src_file (see above)"
+            return 0
+        fi
         log "resolved PULSE_SOURCE=$new_source (was '${old_source:-<none>}')"
         if (( AUTO_RESTART )); then
-            if systemctl try-restart edy-rdp-guacd.service 2>/dev/null; then
-                log "restarted edy-rdp-guacd.service to pick up the new PULSE_SOURCE"
+            if ! systemctl is-active --quiet edy-rdp-guacd.service; then
+                log "edy-rdp-guacd.service is not currently running - nothing to restart"
             else
-                log "edy-rdp-guacd.service try-restart did not run it (not currently active)"
+                local cooldown="$DIR/.last-guacd-restart" now last=0
+                now="$(date +%s)"
+                [[ -f "$cooldown" ]] && last="$(cat -- "$cooldown" 2>/dev/null || echo 0)"
+                [[ "$last" =~ ^[0-9]+$ ]] || last=0
+                if (( now - last < RESTART_COOLDOWN_SECS )); then
+                    log "skipping guacd restart -- one already happened $(( now - last ))s ago (cooldown ${RESTART_COOLDOWN_SECS}s; the next restart for any reason will pick up this value)"
+                elif systemctl try-restart edy-rdp-guacd.service 2>/dev/null; then
+                    printf '%s\n' "$now" > "$cooldown"
+                    log "restarted edy-rdp-guacd.service to pick up the new PULSE_SOURCE"
+                else
+                    log "FAILED to restart edy-rdp-guacd.service (see: systemctl status edy-rdp-guacd.service)"
+                fi
             fi
         fi
     elif [[ -z "$preview" && -e "$src_file" ]]; then

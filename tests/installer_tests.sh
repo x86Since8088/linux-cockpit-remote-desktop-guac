@@ -434,6 +434,46 @@ EOF
     return $bad
 }
 
+# 10d2. I59 follow-up (adversarial review): EDY_RDP_PULSE_SEAT_SOCKET is
+#      documented to WIN over the uid outright. With EDY_RDP_PULSE_SEAT_UID
+#      left at its "auto" default, a mismatched active-seat0 uid (reported by
+#      a fake loginctl) must NOT make the override start refusing a socket
+#      that never changed -- the override's own real owner is what the
+#      ownership check has to use, not an unrelated "who is active" answer.
+#      Hermetic: fake loginctl reporting an active uid that does NOT own the
+#      real (test-created) override socket.
+pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local d="$TMP/pulse-override-vs-auto" bin="$TMP/fakebin-loginctl2" bad=0 out me
+    me="$(id -u)"
+    install -d -m 0755 -- "$d/seat"
+    python3 - "$d/seat" <<'PY' || { echo "cannot create a test socket"; return 1; }
+import os, socket, sys
+os.chdir(sys.argv[1]); socket.socket(socket.AF_UNIX).bind("native")
+PY
+    install -d -- "$bin"
+    cat > "$bin/loginctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "list-sessions --no-legend" ]]; then
+    printf 'c1\n'
+elif [[ "$1" == show-session ]]; then
+    printf 'Seat=seat0\nActive=yes\nUser=%s\n' "$FAKE_ACTIVE_UID"
+fi
+EOF
+    chmod +x "$bin/loginctl"
+    export FAKE_ACTIVE_UID=424242   # deliberately NOT $me: someone else is "active" at seat0
+
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$d/dir" EDY_RDP_PULSE_SEAT_SOCKET="$d/seat/native" \
+           "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF "seat=$d/seat/native (exists)" <<<"$out" \
+        || { echo "override case: the pinned socket was not accepted despite a mismatched active seat0 uid:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF "not a socket owned by uid $FAKE_ACTIVE_UID" <<<"$out" \
+        && { echo "override case: auto-resolution's active-seat uid leaked into the ownership check:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    unset FAKE_ACTIVE_UID
+    return $bad
+}
+
 # 10e. I59: PULSE_SOURCE=auto resolves the seat's current default sink (via
 #      `pactl get-default-sink` over the bound socket) instead of a hand-typed
 #      name that goes stale the moment the audio topology changes; a pin, or
@@ -640,8 +680,9 @@ deploy_migrate_shadow_group_rename() {
 deploy_migrate_pulse_auto_defaults() {
     load_deploy_fn migrate_pulse_auto_defaults
     local bad=0 env="$TMP/pulse-auto-migrate.env"
-    local -a SAY_LOG=()
+    local -a SAY_LOG=() SYSTEMCTL_CALLS=()
     say() { SAY_LOG+=("$1 $2"); }
+    systemctl() { SYSTEMCTL_CALLS+=("$*"); return 0; }
 
     D=""; ENVF="$env"
     printf 'EDY_RDP_PULSE_SEAT_UID=1000\nPULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor\n' > "$env"
@@ -654,14 +695,27 @@ deploy_migrate_pulse_auto_defaults() {
         || { echo "(a) no 'updated ...' log: ${SAY_LOG[*]:-}"; bad=1; }
     [[ "${SAY_LOG[*]:-}" == *"PULSE_SOURCE <old default example> -> auto"* ]] \
         || { echo "(b) no 'updated ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+    # (e) the superseded per-uid pair (for exactly the uid just migrated away
+    # from) is disabled/stopped, so it cannot keep re-binding uid 1000's own
+    # socket/sink over the new -auto pair's resolution.
+    [[ " ${SYSTEMCTL_CALLS[*]:-} " == *" disable --now edy-rdp-pulse-seat@1000.path "* ]] \
+        || { echo "(e) old per-uid path unit was not disabled: ${SYSTEMCTL_CALLS[*]:-}"; bad=1; }
+    [[ " ${SYSTEMCTL_CALLS[*]:-} " == *" stop edy-rdp-pulse-rebind@1000.service "* ]] \
+        || { echo "(e) old per-uid rebind service was not stopped: ${SYSTEMCTL_CALLS[*]:-}"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"disabled"*"edy-rdp-pulse-seat@1000.path"* ]] \
+        || { echo "(e) no 'disabled ...' log: ${SAY_LOG[*]:-}"; bad=1; }
 
-    # (d) a second run on the now-migrated .env is a safe no-op.
-    SAY_LOG=()
+    # (d) a second run on the now-migrated .env is a safe no-op (no .env
+    # rewrite, no further systemctl calls -- the uid line no longer matches
+    # the old-default pattern this migration looks for).
+    SAY_LOG=(); SYSTEMCTL_CALLS=()
     migrate_pulse_auto_defaults
     [[ -z "${SAY_LOG[*]:-}" ]] || { echo "(d) second run touched an already-migrated .env: ${SAY_LOG[*]}"; bad=1; }
+    [[ -z "${SYSTEMCTL_CALLS[*]:-}" ]] || { echo "(d) second run made systemctl calls: ${SYSTEMCTL_CALLS[*]}"; bad=1; }
 
-    # (c) deliberately-customized values of either key are left untouched.
-    SAY_LOG=()
+    # (c) deliberately-customized values of either key are left untouched, and
+    # no systemctl call is made against a uid that was never the old default.
+    SAY_LOG=(); SYSTEMCTL_CALLS=()
     printf 'EDY_RDP_PULSE_SEAT_UID=4242\nPULSE_SOURCE=my-custom-sink.monitor\n' > "$env"
     migrate_pulse_auto_defaults
     grep -qx 'EDY_RDP_PULSE_SEAT_UID=4242' "$env" \
@@ -669,6 +723,7 @@ deploy_migrate_pulse_auto_defaults() {
     grep -qx 'PULSE_SOURCE=my-custom-sink.monitor' "$env" \
         || { echo "(c) a customized PULSE_SOURCE was changed: $(cat "$env")"; bad=1; }
     [[ -z "${SAY_LOG[*]:-}" ]] || { echo "(c) migration fired on customized values: ${SAY_LOG[*]}"; bad=1; }
+    [[ -z "${SYSTEMCTL_CALLS[*]:-}" ]] || { echo "(c) systemctl called for a customized (non-1000) uid: ${SYSTEMCTL_CALLS[*]}"; bad=1; }
     return $bad
 }
 
@@ -732,6 +787,7 @@ for t in installer_staged_install_completes \
          pulse_bind_check_mode \
          pulse_bind_refuses_unsafe_seat_socket \
          pulse_bind_auto_resolves_seat_uid \
+         pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket \
          pulse_bind_auto_resolves_source_preview \
          deploy_staged_completes_and_verifies \
          deploy_refuses_stale_env_before_swap \

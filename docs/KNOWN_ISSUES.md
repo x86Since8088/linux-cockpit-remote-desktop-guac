@@ -1643,19 +1643,76 @@ one hardcoded in `.env`.
   1000`, or `PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor` — the same string that has
   always been the `.envdefault` example) — a deliberately customized value, even one that happens to equal
   either of those, is indistinguishable from "never customized" this way and is left alone either way it
-  goes, which is the correct, safe side to err on.
+  goes, which is the correct, safe side to err on. Migrating the uid also disables the superseded
+  `edy-rdp-pulse-seat@1000.path`/`edy-rdp-pulse-rebind@1000.service` pair (found missing by adversarial
+  review — left running, it would keep re-binding uid 1000's own socket/sink over whatever the new `-auto`
+  pair resolves every time uid 1000's own session changes, reintroducing this exact issue non-
+  deterministically on precisely the host it targets).
+- **Six real defects found by adversarial review of the first draft, all fixed before merge:**
+  - **(High) An oscillating resolved value could take the shared `edy-rdp-guacd.service` down for every
+    viewer.** The first draft called `systemctl try-restart` unconditionally on every change with no
+    cooldown; this project's own GDM-greeter-crash-loop RCA (a real, documented occurrence on this exact
+    host) is precisely the kind of rapid session churn that could flip the resolved value fast enough to
+    trip systemd's default 5-restarts/10s `StartLimitBurst` and leave guacd FAILED — down, not just noisy
+    — for every current viewer until an operator ran `systemctl reset-failed`. Fixed with a 30-second
+    self-imposed cooldown: a skipped restart is a delay (the next trigger, or guacd's own next restart for
+    any other reason, still picks up the current value), never a lost update. The restart failure branch's
+    own diagnostic was also wrong (`try-restart` returning non-zero means an actual failure, not "unit not
+    running" — that case returns success and no-ops) and always logged the misleading "did not run it (not
+    currently active)"; fixed to check `systemctl is-active` first and log failures as failures.
+  - **(High) Migrating to `auto` never disabled the old per-uid unit pair it superseded** — see Migration
+    above.
+  - **(High) `install.sh --verify`'s audio-bind check silently stopped checking anything.** It built the
+    expected seat path as `/run/user/<uid>/pulse/native` using the literal `.env` string for `<uid>` —
+    with the new default `auto`, that produced the nonsense, always-absent path `/run/user/auto/pulse/
+    native`, so the check unconditionally reported "skipped (no seat login)" and lost the ability to ever
+    catch a real broken bind on any host running the new default (every fresh install, and edt1 once
+    migrated). Fixed by asking `edy-rdp-pulse-bind --check` (read-only, no root) for its own already-tested
+    resolution instead of re-deriving "who is the active seat" a second, now-stale way.
+  - **(Medium) `EDY_RDP_PULSE_SEAT_SOCKET` broke under the new `auto` default.** That override is
+    documented to win over the uid outright, but the ownership check inside `seat_check()` (unchanged)
+    still validated the override socket against whatever uid auto-resolution happened to pick — so a
+    pinned override could start failing or succeeding purely depending on who else was active at seat0.
+    Fixed: when the override is set, uid resolution now trusts the override socket's *own* stat'd owner
+    instead of querying loginctl for an unrelated answer (the actual security check — refusing a symlinked
+    override — is unchanged, downstream, in `seat_check()` itself).
+  - **(Medium) A fixed temp filename raced under concurrent invocations.** `edy-rdp-guacd.service`'s own
+    `ExecStartPre` and a login/logout-triggered rebind can run this script at the same time with no
+    ordering between them; both writing through the same `$DIR/pulse-source.env.tmp` let one invocation's
+    `mv` fail (ENOENT — the other had already renamed it away) while still unconditionally logging success.
+    Fixed with `mktemp` (this project's own existing idiom elsewhere, e.g. `edy-rdp-bridge-start.sh`) and a
+    checked `mv` exit status gating the log line and the restart decision.
+  - **(Medium) Unrelated-account login/logout churn could wedge the new auto-rebind unit into a permanently
+    failed state.** `edy-rdp-pulse-seat-auto.path` deliberately watches all of `/run/user` (any login or
+    logout by any account, not just the RDP seat — edt1 has several unrelated lingering service accounts),
+    so `edy-rdp-pulse-rebind-auto.service` can legitimately be *started* several times in quick succession
+    with no fault of its own; with no `StartLimit*=` override it inherited systemd's bare default and could
+    trip it, silently disabling the whole auto-follow feature until `systemctl reset-failed`. Fixed with a
+    deliberately generous `StartLimitIntervalSec=60`/`StartLimitBurst=30` on that service — separate from,
+    and not weakening, the guacd-restart cooldown above.
+  - **(Low) No timeout on the new `loginctl`/`pactl` IPC calls.** Both can in principle hang (a wedged
+    logind, a pipewire-pulse that accepts a connection but never finishes negotiating), and this script
+    runs unconditionally as `edy-rdp-guacd.service`'s own `ExecStartPre` — this project has hit this exact
+    class of bug before (I40, FreeRDP3's Kerberos-first NLA hanging ~2 minutes against a dead KDC) and
+    already has an established fix idiom for it (`edy-rdp-krb-preflight.sh`'s `timeout 1 getent ...`).
+    Fixed by wrapping both calls in a 3-second `timeout`, degrading to the same "nothing resolved" fallback
+    path a clean negative answer already takes.
 - **Known, accepted gap:** the login/logout-triggered mechanism reacts to the *active seat changing*, not
   a same-uid mid-session change (the already-active user plugs in a new USB headset). Nothing currently
   re-resolves for that short of a guacd restart. Named here rather than silently left (see I57 for the
   shape this takes elsewhere).
-- **Verification:** new `pulse_bind_auto_resolves_seat_uid` and `pulse_bind_auto_resolves_source_preview`
-  in `tests/installer_tests.sh` (hermetic: a fake `loginctl`/`pactl` earlier in `PATH`), covering the
-  greeter-active case, the no-active-session fallback, a seat-less-but-"active" session correctly excluded
-  by the `Seat=seat0` filter specifically (not just the `Active=yes` one), an explicit `--seat-uid` never
-  triggering auto-resolution at all, and a pin/unset `PULSE_SOURCE` never being previewed as `auto` —
-  every one of these mutation-tested. New `deploy_migrate_pulse_auto_defaults` mirrors I55's own migration
-  test structure. `run_tests.sh` green throughout. **Live-verified against edt1's actual current state**
-  (read-only `--check` queries, no host state changed by the verification itself): with nobody logged in
-  at the physical console, `EDY_RDP_PULSE_SEAT_UID=auto` correctly resolved to the GDM greeter's uid, and
+- **Verification:** new `pulse_bind_auto_resolves_seat_uid`, `pulse_bind_auto_uid_never_overrides_a_pinned_
+  seat_socket`, and `pulse_bind_auto_resolves_source_preview` in `tests/installer_tests.sh` (hermetic: a
+  fake `loginctl`/`pactl` earlier in `PATH`), covering the greeter-active case, the no-active-session
+  fallback, a seat-less-but-"active" session correctly excluded by the `Seat=seat0` filter specifically
+  (not just the `Active=yes` one), an explicit `--seat-uid` never triggering auto-resolution at all, the
+  `EDY_RDP_PULSE_SEAT_SOCKET`-vs-auto-uid fix, and a pin/unset `PULSE_SOURCE` never being previewed as
+  `auto` — every one of these mutation-tested. `deploy_migrate_pulse_auto_defaults` (mirroring I55's own
+  migration test structure) also verifies the superseded-unit cleanup. `run_tests.sh` green throughout.
+  Also live-tested end to end on `rockytest` via the real `deploy.sh --with-units` flow: the new units
+  rendered and enabled correctly, and the real `edy-rdp-pulse-rebind-auto.service` ran successfully
+  (falling back to uid 1000 and logging "seat socket absent" — expected on a container with no real
+  desktop session). **Live-verified (read-only) against edt1's actual current state**: with nobody logged
+  in at the physical console, `EDY_RDP_PULSE_SEAT_UID=auto` correctly resolved to the GDM greeter's uid, and
   `PULSE_SOURCE=auto` correctly resolved to that session's real USB speaker device — exactly the audio the
   fixed, stale `.env` value was missing.
