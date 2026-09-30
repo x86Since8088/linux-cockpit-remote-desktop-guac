@@ -1648,6 +1648,25 @@ one hardcoded in `.env`.
   review — left running, it would keep re-binding uid 1000's own socket/sink over whatever the new `-auto`
   pair resolves every time uid 1000's own session changes, reintroducing this exact issue non-
   deterministically on precisely the host it targets).
+- **An eighth defect, found by the USER actually using this feature on edt1: `Seat=seat0` is the wrong
+  signal for "the logged-in user's own session" entirely.** This project's RDP door (3390) hands off from
+  the greeter into an EXISTING desktop rather than a fresh physical login, and that handed-off session
+  never carries a `Seat=` at all — confirmed live: `loginctl show-seat seat0` reports
+  `ActiveSession=<the greeter's own session>` **permanently**, no matter who is actually logged in, while
+  the real desktop shows up as a separate session with `Remote=yes` and `Seat=` empty (the "Allow Locked
+  Remote Desktop" extension's own session, `gnome-remote-desktop-daemon --handover`). The symptom: the user
+  reported "Dummy Output" as the only audio device while actually using a real desktop with genuine USB
+  audio hardware sitting one session over — `resolve_active_seat_uid()` could only ever resolve to the
+  GDM greeter's own uid (which happens to have real hardware access, but is not the session anyone is
+  listening through), never the uid actually in use. Fixed by preferring any session that is `Class=user`
+  and graphical (`Type=wayland` or `x11`) and `Active=yes` — regardless of `Seat=`/`Remote=` — over the
+  seat0 greeter, which is now only the fallback when no such session exists at all (nobody logged into
+  anything). Deliberately does **not** also require `LockedHint=no`: mirroring a locked session is this
+  project's own supported use case, not an edge case to exclude. New hermetic test
+  `pulse_bind_auto_prefers_active_user_session_over_seat0_greeter` reproduces the exact live topology
+  (the greeter as the only `Seat=seat0` session, a real `Remote=yes` desktop session for a different uid)
+  plus a Cockpit "web" session correctly NOT being mistaken for a desktop, and a locked session still being
+  preferred; mutation-tested against the original seat0-only logic.
 - **A seventh defect, found by LIVE testing on edt1 immediately after merge (not the adversarial review),
   fixed the same day:** `edy-rdp-guacd.service` loads the generated `$DIR/pulse-source.env` as a second
   `EnvironmentFile=` so `podman` sees the resolved value — but systemd was confirmed live to re-read

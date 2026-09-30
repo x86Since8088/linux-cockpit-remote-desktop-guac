@@ -13,9 +13,12 @@
 #   only ever named ONE fixed uid, so it could reflect a mirrored desktop login OR
 #   the GDM greeter but never both as the operator actually switches between them.
 #   EDY_RDP_PULSE_SEAT_UID=auto (the new default) instead re-resolves, every time
-#   this script runs, WHICHEVER session is actually active on seat0 right now via
-#   `loginctl` (the greeter before login, whoever's logged in after) - see
-#   resolve_active_seat_uid() below. PULSE_SOURCE=auto (opt-in; unset still means
+#   this script runs, WHICHEVER real desktop session is actually in use right now
+#   via `loginctl` (the greeter before login, whoever's logged in after -- not
+#   necessarily "on seat0": this project's RDP door hands off into an existing
+#   session that never carries a Seat= at all, found live after shipping the
+#   first cut of this) - see resolve_active_seat_uid() below. PULSE_SOURCE=auto
+#   (opt-in; unset still means
 #   "no audio channel", unchanged) similarly re-resolves that seat's OWN current
 #   default sink via `pactl get-default-sink` over the just-bound socket - see
 #   resolve_default_sink_monitor(). Either can still be pinned to a literal value,
@@ -128,27 +131,55 @@ fail() { local rc="${2:-1}"; log "FAIL $1"; exit "$rc"; }
 # a clean negative answer -- the caller's existing fallback handles both alike.
 IPC_TIMEOUT=3
 
-# I59: the uid of whichever session is CURRENTLY active on seat0 - the GDM
-# greeter before anyone logs in, the logged-in user's own session after (which
-# is exactly "GDM and mirroring scenarios" without needing to know which one it
-# is ahead of time). Read-only (loginctl queries, no writes), so it is safe to
-# call under --check too. Prints nothing and returns 1 if loginctl is missing,
-# errors, times out, or no session is both on seat0 and Active=yes (e.g. a
-# headless host with no display manager at all) - the caller falls back to a
-# fixed uid.
+# I59 follow-up (found live, on edt1, by the user actually using this feature:
+# "Dummy Output" is all they saw despite a real device being resolved) --
+# "Seat=seat0" is the WRONG signal for "the logged-in user's own session" half
+# of "GDM and mirroring scenarios". This project's RDP door (3390) hands off
+# from the greeter into an EXISTING desktop rather than a fresh physical
+# login, and that handed-off session never carries a Seat= at all: confirmed
+# live, `loginctl show-seat seat0` reports ActiveSession=<the greeter's own
+# session> PERMANENTLY, while the actual logged-in desktop shows up as a
+# SEPARATE session with Remote=yes and Seat= empty (the "Allow Locked Remote
+# Desktop" extension's own session, gnome-remote-desktop-daemon --handover)
+# -- so the old "Seat=seat0 && Active=yes" filter could only ever resolve to
+# the greeter's own uid, no matter who was actually logged in and listening.
+#
+# The uid that actually matters is whichever REAL desktop session is in use --
+# Class=user (excludes every "manager" systemd --user instance, including the
+# greeter's own early one) and a graphical Type (wayland or x11; excludes a
+# Class=user "web" session, e.g. a Cockpit browser tab, which has no desktop
+# audio of its own) and Active=yes. Deliberately NOT also requiring
+# LockedHint=no: the whole point of the locked-remote-desktop extension this
+# project ships is that a LOCKED session is still a legitimate, intentional
+# target to mirror. The seat0 greeter is the correct answer only when NO such
+# session exists at all -- nobody is logged into anything, so the login
+# screen's own audio is genuinely all there is.
+#
+# Read-only (loginctl queries, no writes), so it is safe to call under --check
+# too. Prints nothing and returns 1 if loginctl is missing, errors, times out,
+# or neither an active user session nor a seat0 session exists at all (e.g. a
+# headless host with no display manager) - the caller falls back to a fixed
+# uid.
 resolve_active_seat_uid() {
     command -v loginctl >/dev/null 2>&1 || return 1
-    local sid seat active uid k v
+    local sid seat active uid type class k v user_uid="" seat0_uid=""
     while read -r sid _; do
         [[ -n "$sid" ]] || continue
-        seat=""; active=""; uid=""
+        seat=""; active=""; uid=""; type=""; class=""
         while IFS='=' read -r k v; do
-            case "$k" in Seat) seat="$v" ;; Active) active="$v" ;; User) uid="$v" ;; esac
-        done < <(timeout "$IPC_TIMEOUT" loginctl show-session "$sid" -p Seat -p Active -p User 2>/dev/null)
-        [[ "$seat" == seat0 && "$active" == yes && "$uid" =~ ^[0-9]+$ ]] || continue
-        printf '%s\n' "$uid"
-        return 0
+            case "$k" in
+                Seat) seat="$v" ;; Active) active="$v" ;; User) uid="$v" ;;
+                Type) type="$v" ;; Class) class="$v" ;;
+            esac
+        done < <(timeout "$IPC_TIMEOUT" loginctl show-session "$sid" -p Seat -p Active -p User -p Type -p Class 2>/dev/null)
+        [[ "$active" == yes && "$uid" =~ ^[0-9]+$ ]] || continue
+        if [[ -z "$user_uid" && "$class" == user && ( "$type" == wayland || "$type" == x11 ) ]]; then
+            user_uid="$uid"
+        fi
+        [[ -z "$seat0_uid" && "$seat" == seat0 ]] && seat0_uid="$uid"
     done < <(timeout "$IPC_TIMEOUT" loginctl list-sessions --no-legend 2>/dev/null)
+    if [[ -n "$user_uid" ]]; then printf '%s\n' "$user_uid"; return 0; fi
+    if [[ -n "$seat0_uid" ]]; then printf '%s\n' "$seat0_uid"; return 0; fi
     return 1
 }
 # I59: the seat's OWN current default sink, over the (already vetted/bound)
@@ -197,11 +228,11 @@ if [[ "$UID_" == auto ]]; then
     else
         resolved="$(resolve_active_seat_uid || true)"
         if [[ -n "$resolved" ]]; then
-            log "auto: resolved the active seat0 session to uid $resolved"
+            log "auto: resolved the active session to uid $resolved"
             UID_="$resolved"
         else
             UID_=1000
-            log "auto: no session is both on seat0 and active (loginctl) - falling back to uid $UID_"
+            log "auto: no active user session and no seat0 session found (loginctl) - falling back to uid $UID_"
         fi
     fi
 fi
