@@ -1,23 +1,33 @@
 ## 1.10.1.20260929 - 2026-09-29
 
-Fixes a live-reported bug (I56): a held modifier (classically Alt, via Alt+Tab) "sticks" and the
-guest misreads the operator's next keystroke as a combo, until the library's own reactive
-self-correction catches up one keystroke too late.
+Fixes a live-reported bug (I56): a held modifier (classically Alt, via Alt+Tab) "sticks" on the
+guest for as long as the session is unfocused — not just for one keystroke on returning.
 
 - **Root cause: a lost keyup, not a delivery-ordering problem.** The tunnel is a single ordered
   channel over TCP — nothing in it can reorder or drop a sent instruction. The browser itself
   only ever delivers `keyup` to whatever element holds DOM focus, and losing focus never
-  synthesizes one — so a key held down when focus leaves the session (in-page focus move, or the
-  Alt+Tab case: the whole window losing OS focus without blurring the display element at all)
-  leaves `Guacamole.Keyboard` believing it is still pressed, with nothing ever telling it
-  otherwise, until the next keystroke's own reactive correction runs — one keystroke too late.
+  synthesizes one — so a key held down when focus leaves the session leaves `Guacamole.Keyboard`
+  believing it is still pressed for the entire time the session is unfocused (any mouse click,
+  drag or scroll on the guest during that window arrives as an Alt-combo too), with nothing
+  telling it otherwise until the library's own reactive self-correction runs on the next keyboard
+  event — correctly releasing the stale modifier *before* that new key, not misreading it as a
+  combo (corrected from this fix's own first draft after adversarial review checked it against
+  the real vendored library and real Chromium/X11 behavior — see I56 for the full correction,
+  including what to check next if the exact originally-reported symptom persists).
 - **Fix:** `guac-rdp.js` now calls `Guacamole.Keyboard`'s own `reset()` (a real, existing API —
   releases every keysym it still tracks as pressed, routed through the normal keyup path so the
   **guest** actually gets told) the moment focus is lost, bound to the display element's own
-  `blur`, `window`'s `blur` (the Alt+Tab case), and `visibilitychange` (backgrounded/minimized
-  tabs) — no single one of the three covers every way a session can stop receiving key events.
-  `resetShiftAdjust()` runs alongside it as defence in depth for the narrower shiftAdjust/pressed
-  desync case `teardown()` already guards against elsewhere.
+  `blur`, `window`'s `blur`, and `visibilitychange` (backgrounded/minimized tabs) — no single one
+  of the three reliably covers every way a session can stop receiving key events, and firing more
+  than one for the same event is harmless (measured ~1µs per no-op call). `resetShiftAdjust()`
+  runs alongside it as defence in depth for the narrower shiftAdjust/pressed desync case
+  `teardown()` already guards against elsewhere. **Known, accepted trade-off:** a modifier held
+  THROUGH a focus round-trip without ever being physically released gets spuriously released too
+  (the next physical press restores it) — reviewed and preferred over the alternative of a
+  modifier that can stay stuck down indefinitely.
+- **Bonus fix, pre-existing:** `teardown()` never released a held key on disconnect either, and
+  dropping the session mid-autorepeat left the library's own repeat timer running against a
+  nulled keyboard, throwing indefinitely. `teardown()` now calls `keyboard.reset()` too.
 - **New trace category:** the "Trace clipboard/sound" toggle (I53) is now "Trace
   clipboard/sound/keyboard" — logs when a focus-loss reset fires, never which keys were involved.
 - **Investigated separately, not implemented:** a custom ACK/retransmit protocol was considered
@@ -25,13 +35,21 @@ self-correction catches up one keystroke too late.
   event the OS does not raise on focus loss, so that would have added latency to fix nothing. A
   "Send text" batch-entry button is feasible on top of the vendored library's own existing
   `Guacamole.Keyboard.prototype.type(string)` but addresses a different concern; not built here.
+- **Also found, deferred: I57**, an unrelated pre-existing race where a rapid reconnect during
+  graceful disconnect's 800ms grace window can null a brand-new session's client.
 - **Verification:** new `tests/js/keyboard_blur.test.js`, extracting the actual shipped wiring
-  verbatim (same `TESTHOOK` pattern as I45's `keyboard_remap.test.js`) against a minimal,
-  hand-written, spec-correct `EventTarget` stand-in — Node's own built-in `EventTarget` was found,
-  while writing this test, to deviate from the DOM spec on bare-boolean `capture` matching between
-  `addEventListener`/`removeEventListener` (confirmed against jsdom and the DOM spec), which would
-  have hidden a real reconnect listener-leak bug the mutation-tested "reconnecting" case now
-  catches. `run_tests.sh` green throughout (16 JS tests, up from 10).
+  verbatim (same `TESTHOOK` pattern as I45's `keyboard_remap.test.js`) — one block for connect-time
+  setup, one for `teardown()`'s own cleanup — against a minimal, hand-written, spec-correct
+  `EventTarget` stand-in. Node's own built-in `EventTarget` was found, while writing this test, to
+  deviate from the DOM spec on bare-boolean `capture` matching between `addEventListener`/
+  `removeEventListener` (confirmed against jsdom and the DOM spec), which would have hidden real
+  listener-leak bugs. An independent adversarial review then found 3 more leak paths this test
+  didn't yet cover (a leaked `window`/`document` listener in either block, and a capture-flag
+  mismatch) — all three now have dedicated, mutation-tested coverage. That same review separately
+  verified the fix against real headless/CDP Chromium in Xvfb with genuine X11 focus changes:
+  clean listener counts across reconnects, correct single-release behavior, ~106ms for 100,000
+  no-op resets, and no misfire in either the pop-out windows or the Keyboard-Lock fullscreen path.
+  `run_tests.sh` green throughout (20 JS tests, up from 10).
 
 ## 1.10.0.20260929 - 2026-09-29
 

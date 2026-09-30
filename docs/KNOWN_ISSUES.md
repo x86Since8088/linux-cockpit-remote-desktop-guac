@@ -1409,39 +1409,75 @@ tests extract just the one function's source with a `sed` range and drive it dir
 function before `PATH`, so these shadow the real tools with no `PATH` trick needed); the host's actual
 `/etc/group` is never touched no matter who runs this suite.
 
-### I56 · A held modifier (classically Alt, via Alt+Tab) "sticks" on focus loss — the guest never gets its keyup · Sev M · FIXED (1.10.1.20260929)
+### I56 · A held modifier (classically Alt, via Alt+Tab) "sticks" on focus loss for as long as the session is unfocused · Sev M · FIXED (1.10.1.20260929)
 Reported live: after Alt+Tab-ing away and back (or any other action that moved focus off the session),
-the operator's next keystroke was sometimes acted on by the guest as an Alt-combo it never intended,
-before things went back to normal. Root cause traced to the browser's own event model, not this
-project's protocol handling or anything about delivery ordering (the tunnel is a single ordered
-WebSocket/HTTP channel over TCP — nothing in it can reorder or drop an instruction once sent): the
-browser only ever delivers `keyup` to whatever element currently holds DOM focus, and **losing focus
-never synthesizes one**. So a key held down at the moment focus leaves the session (the display element
-losing focus to another in-page element, or — the classic Alt+Tab case — the whole browser window
-losing OS-level focus while the display element remains `document.activeElement`, which does NOT fire
-that element's own `blur`) leaves this page's `Guacamole.Keyboard` still believing it is pressed, with
-no event ever telling it otherwise.
+an interaction was sometimes acted on by the guest as an Alt-combo it never intended. Root cause traced
+to the browser's own event model, not this project's protocol handling or anything about delivery
+ordering (the tunnel is a single ordered WebSocket/HTTP channel over TCP — nothing in it can reorder or
+drop an instruction once sent): the browser only ever delivers `keyup` to whatever element currently
+holds DOM focus, and **losing focus never synthesizes one**. So a key held down at the moment focus
+leaves the session (the display element losing focus to another in-page element, or the whole browser
+window losing OS-level focus) leaves this page's `Guacamole.Keyboard` still believing it is pressed,
+with no event ever telling it otherwise — **for the entire time the session is unfocused**, not just
+for one keystroke: any mouse click, drag or scroll on the guest during that window arrives there as an
+Alt-combo too.
 
-The vendored `guacamole-common-js` library DOES already self-correct stale modifier state, by comparing
-its own tracked `pressed` set against the browser's live `event.altKey`/`shiftKey`/etc. flags — but only
-reactively, on the very next keyboard event it happens to see. By the time that correction runs, the
-guest has already processed that same keystroke with the stale modifier still held from its own point of
-view — precisely the "acted on before the fix landed" symptom reported.
+**Correcting this entry's own first draft, found by adversarial review against the actual vendored
+library and real browsers, before this reached `main`:** the vendored `guacamole-common-js` library DOES
+already self-correct stale modifier state on the very next keyboard event, by comparing its own tracked
+`pressed` set against the browser's live `event.altKey`/`shiftKey`/etc. flags — but it releases the stale
+modifier **before** processing the new key, not after and not together with it (confirmed by driving the
+real library directly: the guest sees "Alt up, then the new key down", correctly ordered). So the
+original "the very next keystroke gets misread as a combo" explanation for this fix was wrong — what was
+actually stuck was everything BETWEEN losing focus and that next keystroke, not the keystroke itself.
+Separately: real Chromium/X11 testing found that Alt+Tab in practice fires the display element's own
+`blur` too, not only `window`'s as this entry originally claimed — the two are not as separable as first
+assumed. Neither correction changes what was built below; both are corrected here because the mechanism
+matters when comparing this fix against a live re-report — if the exact original symptom persists, the
+next place to look is a lone Alt tap (press with nothing else held, then release) opening a guest
+application's own menu bar, a real, independent behavior in many Windows/GTK/LibreOffice/Firefox builds
+that this fix cannot distinguish from a genuine two-key modifier combo.
 
 **The fix:** `Guacamole.Keyboard` already ships a `reset()` method — undocumented in this project until
 now, but a real, public API — that walks every keysym it still believes is pressed and fires a genuine
 `onkeyup` for each, routing through this file's own `sendGuestKeyEvent` exactly like a real keyup, so the
-**guest** is actually told to release them, not just this page's own local bookkeeping. `guac-rdp.js` now
-calls it the moment focus is lost, instead of waiting for the next keystroke to self-correct — bound to
-three distinct signals, since no single one covers every real way a session can lose the ability to
-receive key events: the display element's own `blur` (focus moved to another in-page element, e.g.
-clicking a different tab), `window`'s `blur` (the Alt+Tab case itself, which does not blur the display
-element), and `visibilitychange` (the tab was backgrounded or minimized, which does not reliably fire
-either `blur`). `resetShiftAdjust()` is called alongside it as defence in depth: `reset()` already clears
-any `shiftAdjust` entry for a keysym still tracked in `keyboard.pressed` (via that same `onkeyup` path),
-but this also covers the narrower case of a `shiftAdjust` entry with no matching `keyboard.pressed` entry
-(the same gap `teardown()`'s own identical pairing, and the pre-existing "client going null mid-press"
-test, already exist to guard against elsewhere in this file).
+**guest** is actually told to release them the moment focus is lost, rather than waiting on the library's
+own next-keystroke correction. Verified cheap even in the overwhelmingly common case where nothing is
+actually pressed (most blur/visibilitychange events happen mid-typing, not mid-keypress): roughly 1
+microsecond per no-op call against the real library, and calling it redundantly when more than one of the
+three bound signals fires for the same event is harmless. Bound to three distinct signals, since no single
+one reliably covers every real way a session can lose the ability to receive key events: the display
+element's own `blur`, `window`'s `blur`, and `visibilitychange` (the tab was backgrounded or minimized,
+which does not reliably fire either `blur`). `resetShiftAdjust()` is called alongside it as defence in
+depth: `reset()` already clears any `shiftAdjust` entry for a keysym still tracked in `keyboard.pressed`
+(via that same `onkeyup` path), but this also covers the narrower case of a `shiftAdjust` entry with no
+matching `keyboard.pressed` entry (the same gap `teardown()`'s own identical pairing, and the pre-existing
+"client going null mid-press" test, already exist to guard against elsewhere in this file). `teardown()`
+itself now also calls `keyboard.reset()` before nulling the keyboard out — see the bonus fix below.
+
+**Known, accepted trade-off, found by adversarial review, deliberately not "fixed."** A modifier held
+THROUGH a focus round-trip without ever being physically released (hold Ctrl, click a different in-page
+tab, then type Ctrl+C while still holding Ctrl) gets spuriously released by this same `reset()` call,
+since the browser never re-fires a `keydown` for a key that was never actually released — the guest sees
+a bare `c`, not `Ctrl+c`, until the next physical press of Ctrl restores it. Reviewed and rejected: also
+resetting `Guacamole.Keyboard`'s own tracked modifier-flag state was tried and found to only rescue the
+first such chord, while reintroducing "trust a possibly-stale browser modifier flag" — the exact class of
+problem the library's own self-correction exists to guard against. A modifier that occasionally needs a
+second press to "stick" again is a strict improvement over one that can stay stuck down, silently
+modifying everything, for an unbounded time.
+
+**Bonus, found and fixed in the same pass, pre-existing (not introduced by this fix): `teardown()` never
+released a still-held key on disconnect either**, and if the session dropped while an ordinary key was
+mid-autorepeat, the vendored library's own internal repeat timer kept running against a keyboard whose
+`onkeyup`/`onkeydown` had just been nulled by `teardown()`, throwing `TypeError: onkeyup is not a
+function` on every tick, indefinitely (reproduced: ~10 errors in 500ms). `teardown()` now calls
+`keyboard.reset()` — which also clears that same internal repeat timer, not just hygiene — before nulling
+the keyboard reference, exactly mirroring the connect-time fix above. This incidentally already covered
+the ordinary Disconnect-button path even before this fix (clicking Stop blurs the display first), but not
+the error/server-drop paths, which never touched the display element at all.
+
+**Also found, pre-existing, explicitly deferred, NOT fixed in this pass: see I57** (an unrelated race in
+graceful disconnect's 800ms grace window).
 
 **Why this is a state-tracking bug, not a reliability/ordering one.** The transport already guarantees
 in-order, lossless delivery once an instruction is sent — the actual failure mode is that a genuine
@@ -1459,16 +1495,40 @@ runs, naming only that it happened, never which keys were involved, matching the
 own byte-counts-not-contents discipline.
 
 **Verification.** New `tests/js/keyboard_blur.test.js`, extracting the actual shipped wiring verbatim
-(the same `TESTHOOK`-sentinel pattern `keyboard_remap.test.js` already established for I45) and driving
-it against a minimal, hand-written, spec-correct `EventTarget` stand-in — deliberately NOT Node's own
-built-in `EventTarget`, which was found, while writing this test, to have a real deviation from the DOM
-spec (it does not correctly match a bare boolean `capture` argument between `addEventListener`/
-`removeEventListener`, unlike jsdom and real browsers, confirmed by testing both directly) that would
-have made a genuine listener-leak bug in an earlier draft of this fix look like it passed. Covers: blur
-on the display element, `window` blur, `visibilitychange`, all three correctly releasing every held key
-and updating `shiftAdjust`; no client/keyboard yet correctly does nothing and never throws; the trace
-line fires with the right category and message; and — mutation-tested by deliberately removing the
-old-listener-cleanup guard and confirming the test then fails — reconnecting (a second `connect()` in the
-same page) removes the FIRST session's listeners before attaching new ones, so a stale handler from a
-prior session can never double-fire or reset an old, already-torn-down keyboard object. `run_tests.sh`
-green throughout (16 JS tests, up from 10).
+(the same `TESTHOOK`-sentinel pattern `keyboard_remap.test.js` already established for I45) — one block
+for the connect-time setup, a second for `teardown()`'s own cleanup — and driving both against a minimal,
+hand-written, spec-correct `EventTarget` stand-in — deliberately NOT Node's own built-in `EventTarget`,
+which was found, while writing this test, to have a real deviation from the DOM spec (it does not
+correctly match a bare boolean `capture` argument between `addEventListener`/`removeEventListener`,
+unlike jsdom and real browsers, confirmed by testing both directly) that would have made a genuine
+listener-leak bug in an earlier draft of this fix look like it passed. Covers: blur on the display
+element, `window` blur, `visibilitychange`, all three correctly releasing every held key; no client/
+keyboard yet correctly does nothing and never throws; the trace line fires with the right category and
+message; `teardown()` correctly clears all three listeners AND nulls `keyboardBlurHandler` (so a later
+`connect()` never sees a stale truthy handler left over), including with no display element left at all;
+and a full connect → teardown → reconnect cycle across both blocks together leaves no stale handler
+capable of firing. Every one of these is mutation-tested (a first pass from an independent adversarial
+review found 3 of them — a leaked `window`/`document` listener in either block, and a capture-flag
+mismatch — passed with the ORIGINAL, less thorough version of this test; all three are now caught).
+Separately verified, by that same review, directly against real headless/CDP-driven Chromium in Xvfb with
+`xdotool`-driven real X11 focus changes (not part of this repo's own automated suite, since it has no
+Playwright harness configured): two full connect cycles show exactly one listener of each kind at a time
+with zero leaked after teardown; a real focus loss with Alt+Shift held releases each key exactly once;
+100,000 no-op blur events cost about 106ms total; pop-out windows (each running an independent copy of
+this same script) neither misfire into nor are affected by the main window's own wiring; and entering
+Keyboard-Lock fullscreen never triggers a spurious reset, since the mouse click that starts fullscreen has
+already blurred the display before any of this runs. `run_tests.sh` green throughout (20 JS tests, up
+from 10).
+
+### I57 · A rapid Sound/Clipboard/Resolution change during graceful disconnect can null a NEW session's client · Sev L · OPEN (deferred)
+Found incidentally while adversarially reviewing I56's fix, pre-existing, unrelated to it. `teardown()`'s
+graceful (non-`immediate`) path waits up to 800ms (or until the tunnel confirms `CLOSED`) before actually
+disposing — a grace period, not an instant transition. If a control that starts a brand-new connection
+(a toggle whose handler tears down and reconnects, e.g. changing Sound mid-session) runs inside that
+800ms window, the ORIGINAL teardown's delayed `dispose()` still fires afterward and nulls `client`/
+`tunnel` — which by then belong to the NEW, just-started session, not the one that was actually being torn
+down. Not fixed in this pass: this is a distinct concurrency issue in `teardown()`'s own delayed-dispose
+design, deserving its own careful fix (e.g. a generation counter so a stale `dispose()` can recognize it
+is no longer current and no-op) rather than a quick patch bolted onto an unrelated keyboard fix. Named
+here rather than silently left, per this project's own convention for a discovered-but-deferred gap (see
+I46 for the shape this takes elsewhere in this file).
