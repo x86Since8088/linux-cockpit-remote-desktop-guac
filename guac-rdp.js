@@ -89,6 +89,7 @@
 
     // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
     var clipboardOn = true, soundOn = false, traceOn = false, clipReadHandler = null;
+    var keyboardBlurHandler = null;   // releases stuck keys on focus loss -- see its own setup below
     var lastRemoteClip = null;   // newest text the session put on its clipboard (for the "Receive clipboard" button)
     function syncPassthroughFlags() {
         clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
@@ -926,12 +927,31 @@
     function teardown(immediate) {
         if (disposing) return;
         disposing = true;
-        if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
+        // reset() BEFORE nulling onkeyup/onkeydown, not after: it fires a real
+        // onkeyup for every keysym still tracked as pressed (releasing them
+        // properly, same as the focus-loss fix below) and -- load-bearing, not
+        // just hygiene -- clears the vendored library's own internal key-repeat
+        // timers. Without this, disconnecting while a key was mid-autorepeat
+        // left that timer running against a keyboard whose onkeyup/onkeydown
+        // had just been nulled, throwing "onkeyup is not a function" on every
+        // tick, indefinitely (found while verifying the focus-loss fix below,
+        // pre-existing, not introduced by it).
+        if (keyboard) { keyboard.reset(); keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
         resetShiftAdjust();   // a mid-press disconnect must not leak a stale add/remove into the next session
         var lockBox = $("display");
         if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
         if (lockBox && clipReadHandler) lockBox.removeEventListener("focus", clipReadHandler, true);
-        lockSyncHandler = null; clipReadHandler = null; remoteLocks = null; browserLocks = null;
+        // TESTHOOK:KEYBLUR_TEARDOWN:BEGIN -- tests/js/keyboard_blur.test.js
+        // extracts this verbatim too, alongside TESTHOOK:KEYBLUR above.
+        if (keyboardBlurHandler) {
+            if (lockBox) lockBox.removeEventListener("blur", keyboardBlurHandler, true);
+            window.removeEventListener("blur", keyboardBlurHandler);
+            document.removeEventListener("visibilitychange", keyboardBlurHandler);
+        }
+        keyboardBlurHandler = null;
+        // TESTHOOK:KEYBLUR_TEARDOWN:END
+        lockSyncHandler = null; clipReadHandler = null;
+        remoteLocks = null; browserLocks = null;
         if ($("numlock")) {
             $("numlock").disabled = true;
             $("numlock").classList.remove("on");
@@ -1295,6 +1315,70 @@
         keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { sendGuestKeyEvent(true, k); };
         keyboard.onkeyup = function (k) { sendGuestKeyEvent(false, k); };
+        // A keydown with no matching keyup is a real, live-reported bug (a held
+        // modifier -- classically Alt, via Alt+Tab -- "sticks" on the GUEST for
+        // as long as the session is unfocused: any mouse click/drag/scroll
+        // during that window arrives there as an Alt-combo, not just whatever
+        // the operator types on returning). The browser only delivers keyup to
+        // whatever element currently holds DOM focus, and losing focus never
+        // synthesizes one -- so the moment this element (or the whole browser
+        // window) loses focus while a key is physically down, neither
+        // Guacamole.Keyboard's own bookkeeping nor this file's own shiftAdjust
+        // tracking ever hears about the release. Guacamole.Keyboard DOES
+        // self-correct stale modifier state by comparing its tracked state
+        // against the browser's live event.altKey/etc flags, but only
+        // reactively, on the NEXT keyboard event it sees (correctly releasing
+        // the stale modifier BEFORE that new key, verified against the real
+        // vendored library -- this is not a same-keystroke misread) -- so
+        // nothing corrects the guest for the whole time the operator is away.
+        // keyboard.reset() (a real Guacamole.Keyboard API) walks every keysym
+        // it still believes is pressed and fires a genuine onkeyup for each --
+        // routing through sendGuestKeyEvent exactly like a real keyup, so the
+        // GUEST is actually told to release them the moment focus is lost,
+        // rather than waiting on that reactive correction. Cheap even when
+        // nothing is pressed (the overwhelmingly common case, since most
+        // blur/visibilitychange events happen mid-typing, not mid-keypress) --
+        // measured at roughly 1 microsecond per no-op call against the real
+        // library. resetShiftAdjust() is defence in depth on top of that:
+        // reset() already clears any shiftAdjust entry for a keysym still in
+        // keyboard.pressed (via that same onkeyup path), but this also covers
+        // a keysym whose entry exists only in shiftAdjust with no matching
+        // keyboard.pressed entry (see teardown()'s own identical pairing, and
+        // the "client going null mid-press" test in
+        // tests/js/keyboard_remap.test.js for why that gap matters). Known,
+        // accepted trade-off (see tests/js/keyboard_blur.test.js's own header
+        // for the reasoning): a modifier held THROUGH a focus round-trip
+        // without ever being physically released gets spuriously released
+        // here too, since the browser never re-fires a keydown for a key that
+        // was never actually released -- the next physical press of that same
+        // key restores it, and releasing a still-held key is far safer than
+        // the original bug (indefinitely stuck down). Bound to THIS element's
+        // own blur (focus moved to another in-page element, e.g. clicking a
+        // different tab) AND window blur (real X11/browser testing found BOTH
+        // often fire together for Alt+Tab in practice, not just window's, so
+        // this is deliberately not relying on any one browser's exact
+        // behavior) AND visibilitychange (the tab was backgrounded/minimized,
+        // which does not always fire either blur) -- reset() firing more than
+        // once for the same focus-loss event is harmless (idempotent; a no-op
+        // once nothing is left pressed).
+        // TESTHOOK:KEYBLUR:BEGIN -- tests/js/keyboard_blur.test.js extracts this
+        // block verbatim and runs it standalone via vm, so that test exercises
+        // the actual shipped wiring, not a reimplementation.
+        if (keyboardBlurHandler) {
+            box.removeEventListener("blur", keyboardBlurHandler, true);
+            window.removeEventListener("blur", keyboardBlurHandler);
+            document.removeEventListener("visibilitychange", keyboardBlurHandler);
+        }
+        keyboardBlurHandler = function () {
+            if (!keyboard) return;
+            trace("keyboard", "focus lost -- releasing any keys still held (keyboard.reset())");
+            keyboard.reset();
+            resetShiftAdjust();
+        };
+        box.addEventListener("blur", keyboardBlurHandler, true);
+        window.addEventListener("blur", keyboardBlurHandler);
+        document.addEventListener("visibilitychange", keyboardBlurHandler);
+        // TESTHOOK:KEYBLUR:END
 
         // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
         // forwards a lock KEY when it is pressed live, but never knew the browser's
