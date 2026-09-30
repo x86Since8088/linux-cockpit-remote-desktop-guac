@@ -1,3 +1,23 @@
+## 1.10.6.20260930 - 2026-09-30
+
+New capability (I60): a "Logs…" button on the main Connect panel and both pop-out windows, opening a
+fullscreen viewer over the browser's own clipboard/sound/keyboard trace log or the server-side relay/guacd
+journal (scoped to the current session, or all sessions for an admin), with a text filter and selectable
+columns persisted per source.
+
+- The trace log is now also kept in a capped, in-memory array (2000 entries) as well as printed to the
+  console, so it can be shown as a table.
+- The server journal reads use the same `superuser:"require"` PolicyKit elevation the Self Tests panel's
+  guacd checks already require; "all sessions" is additionally UI-disabled for a non-admin, and is capped
+  to the last 6 hours (labeled as such in the dropdown) since it has no grep filter to narrow it.
+- "This session" scoping works because the relay mints the session uuid and hands it to guacd as the
+  connection id verbatim, so grepping either the relay's or guacd's journal by that uuid finds the same
+  session's lines in both.
+- A PolicyKit/auth failure reading the journal is now surfaced in the modal instead of silently rendering
+  as "0 entries".
+- New `tests/js/view_logs.test.js` (TESTHOOK-verbatim-extraction) covers the journal-line parser, including
+  multi-line journal entries and CRLF output. `run_tests.sh` green.
+
 ## 1.10.5.20260930 - 2026-09-30
 
 Fixes a bug in I59 found by the user actually using the feature on edt1 (not the adversarial review, not
