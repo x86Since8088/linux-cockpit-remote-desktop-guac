@@ -46,11 +46,13 @@ EDY_RDP_ADMIN_GROUP=sudo
 # Does not apply when nobody else is signed in at the seat, or when the
 # signed-in user IS the requester. Unlike EDY_RDP_ADMIN_GROUP this group is NOT
 # required to exist on the host — a missing group just means nobody currently
-# passes this gate (fail closed), which is the safe out-of-the-box default; an
-# operator opts in with `groupadd rdp-shadow` and `usermod -aG rdp-shadow
-# <user>` (or points this at an existing group). Set empty to turn this extra
-# gate off entirely and revert to admin-only console gating.
-EDY_RDP_SHADOW_GROUP=rdp-shadow
+# passes this gate (fail closed), which is the safe out-of-the-box default;
+# `deploy.sh --with-users` creates it automatically (mirroring RELAY_GROUP/
+# RELAY_USER), or an operator opts in by hand with `groupadd
+# cockpit-guac-rdp-shadow` and `usermod -aG cockpit-guac-rdp-shadow <user>`
+# (or points this at an existing group). Set empty to turn this extra gate off
+# entirely and revert to admin-only console gating.
+EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow
 
 # Where the relay persists its session registry. On tmpfs, so it does not survive
 # a reboot - which is correct, because live guacd and grd sessions do not either.

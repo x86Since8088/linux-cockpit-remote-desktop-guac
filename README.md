@@ -205,19 +205,19 @@ additionally requires membership in a unix group:
 
 ```bash
 # in /opt/cockpit-guac-rdp/.env
-EDY_RDP_SHADOW_GROUP=rdp-shadow
+EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow
 ```
+`deploy.sh --with-users` now creates this group automatically, the same way it already does
+for the main relay group. If you did not pass that flag, create it and add members yourself:
 ```bash
-sudo groupadd rdp-shadow
-sudo usermod -aG rdp-shadow <your account>
+sudo groupadd cockpit-guac-rdp-shadow
+sudo usermod -aG cockpit-guac-rdp-shadow <your account>
 sudo systemctl restart edy-rdp-relay.service
 ```
-This group is **not created for you** — an operator must create it and add members before
-anyone can shadow a different user's console session; a nonexistent or empty group means
-the gate refuses everyone (fail closed), which is the safe default. Set
-`EDY_RDP_SHADOW_GROUP=` (empty) to turn this extra check off entirely and revert to
-admin-only console gating. Does not apply when nobody is signed in at the seat, or when
-the signed-in user is the one requesting the mirror.
+A nonexistent or empty group means the gate refuses everyone (fail closed), which is the
+safe default. Set `EDY_RDP_SHADOW_GROUP=` (empty) to turn this extra check off entirely and
+revert to admin-only console gating. Does not apply when nobody is signed in at the seat, or
+when the signed-in user is the one requesting the mirror.
 
 **Self-update.** The relay checks `EDY_RDP_UPDATE_REPO` (a GitHub `owner/repo`,
 default this project's own) for a newer tagged Release. Checking and applying are

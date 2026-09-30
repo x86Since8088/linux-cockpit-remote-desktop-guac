@@ -843,7 +843,7 @@ SESSION_TOKENS = SessionTokens()
 
 class Connection:
     def __init__(self, client, uid, table, guacd_addr, admin_group,
-                 shadow_group="rdp-shadow"):
+                 shadow_group="cockpit-guac-rdp-shadow"):
         self.client = client
         self.uid = uid
         self.table = table
@@ -1311,7 +1311,7 @@ def _send_error_and_close(client, message):
         pass
 
 
-def handle(client, table, live, guacd_addr, admin_group, shadow_group="rdp-shadow"):
+def handle(client, table, live, guacd_addr, admin_group, shadow_group="cockpit-guac-rdp-shadow"):
     try:
         _pid, uid, _gid = peer_credentials(client)
     except OSError as exc:
@@ -1577,7 +1577,7 @@ def main(argv=None):
     ap.add_argument("--guacd", default="127.0.0.1:4822",
                     help="guacd endpoint: host:port or unix:/path (pod-internal)")
     ap.add_argument("--admin-group", default="sudo", help="group granting console access")
-    ap.add_argument("--shadow-group", default="rdp-shadow",
+    ap.add_argument("--shadow-group", default="cockpit-guac-rdp-shadow",
                     help="group additionally required to mirror a DIFFERENT signed-in "
                          "user's console session (on top of the admin gate above). "
                          "Empty = this extra gate is off.")

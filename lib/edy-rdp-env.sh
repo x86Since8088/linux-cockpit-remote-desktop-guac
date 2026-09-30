@@ -154,13 +154,15 @@ env_check_values() {
                 printf "%s: group '%s' does not exist on this host\n" "$k" "$v"; rc=1; fi ;;
           EDY_RDP_SHADOW_GROUP)
             # Deliberately NO getent-group existence check (unlike ADMIN_GROUP
-            # above): this is a brand-new, project-specific group name that will
-            # not exist on any host until an operator creates it, and refusing
-            # every install/redeploy on that would be a needless, deploy-breaking
-            # foot-gun. is_admin() already treats a nonexistent group as "nobody
-            # in it" (fails closed), which is exactly this feature's safe
-            # out-of-the-box default. Empty is a supported, intentional way to
-            # turn the whole gate off (mirrors EDY_RDP_REMOTE_ALLOW=).
+            # above): this is a project-specific group name that will not exist
+            # on any host until `deploy.sh --with-users` creates it (or an
+            # operator does, on a host where that flag was never passed), and
+            # refusing every install/redeploy until then would be a needless,
+            # deploy-breaking foot-gun. is_admin() already treats a nonexistent
+            # group as "nobody in it" (fails closed), which is exactly this
+            # feature's safe out-of-the-box default. Empty is a supported,
+            # intentional way to turn the whole gate off (mirrors
+            # EDY_RDP_REMOTE_ALLOW=).
             [[ -z "$v" || "$v" =~ ^[a-z_][a-z0-9_-]*$ ]] \
                 || { printf "%s: must be empty (disables the shadow gate) or a unix group name\n" "$k"; rc=1; } ;;
           EDY_RDP_REMOTE_ADMIN_ONLY|EDY_RDP_DESKUI_ENABLE)

@@ -449,6 +449,140 @@ shell_syntax() {
     return $bad
 }
 
+# 12/13 helper: migrate_shadow_group_rename() and ensure_shadow_group() call
+# real groupadd/groupmod/getent against the actual system group table -
+# exactly like migrate_group_rename()/create_users() do - and deploy.sh's own
+# root-or-DESTDIR gate at the top of the file makes it impossible to reach
+# their UNGUARDED (real, non-staged) code path through the script itself
+# without being root. So these two tests extract just the one function's
+# source (the same sed-range-then-eval technique load_manifest() above
+# already uses for install.sh's BEGIN-MANIFEST/END-MANIFEST) and drive it
+# directly against FAKE getent/groupmod/groupadd/say/die shell functions
+# (a bare command name resolves to a same-named shell function before PATH,
+# so these shadow the real tools with no PATH trick needed) - the host's
+# actual /etc/group is never touched no matter who runs this suite.
+load_deploy_fn() {   # $1 = function name; sources that one function into THIS shell
+    eval "$(sed -n "/^$1() {/,/^}/p" "$SRC/deploy.sh")"
+}
+
+# 12. migrate_shadow_group_rename(): (a) a real "rdp-shadow" group is renamed
+#     to "cockpit-guac-rdp-shadow", (b) an .env carrying the exact old default
+#     is rewritten, (c) an .env with a clearly-customized value is untouched by
+#     both the rename and the rewrite, (d) a second run of each case is a safe
+#     no-op (idempotent).
+deploy_migrate_shadow_group_rename() {
+    load_deploy_fn migrate_shadow_group_rename
+    local bad=0 env="$TMP/shadow-migrate.env"
+    local -a SAY_LOG=() GROUPMOD_CALLS=()
+    local FAKE_GROUPS DIED=0
+    say()     { SAY_LOG+=("$1 $2"); }
+    die()     { DIED=1; SAY_LOG+=("DIE: $*"); }
+    getent()  { [[ "$1" == group ]] || return 1
+                local g; for g in $FAKE_GROUPS; do [[ "$g" == "$2" ]] && return 0; done; return 2; }
+    groupmod() { GROUPMOD_CALLS+=("$*")
+                 [[ "$*" == "-n cockpit-guac-rdp-shadow rdp-shadow" ]] \
+                     && FAKE_GROUPS="cockpit-guac-rdp-shadow"; }
+
+    # (a) a real "rdp-shadow" group exists, "cockpit-guac-rdp-shadow" does not.
+    D=""; FAKE_GROUPS="rdp-shadow"; ENVF="$TMP/no-such-env"
+    migrate_shadow_group_rename
+    (( ! DIED )) || { echo "(a) die() was called: ${SAY_LOG[*]}"; bad=1; }
+    [[ "${GROUPMOD_CALLS[*]:-}" == "-n cockpit-guac-rdp-shadow rdp-shadow" ]] \
+        || { echo "(a) groupmod calls: '${GROUPMOD_CALLS[*]:-}'"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"renamed"*"rdp-shadow -> cockpit-guac-rdp-shadow"* ]] \
+        || { echo "(a) no 'renamed ... rdp-shadow -> cockpit-guac-rdp-shadow' log: ${SAY_LOG[*]:-}"; bad=1; }
+    # (d) run again: "cockpit-guac-rdp-shadow" now exists, so this must be a no-op.
+    GROUPMOD_CALLS=(); SAY_LOG=()
+    migrate_shadow_group_rename
+    [[ -z "${GROUPMOD_CALLS[*]:-}" ]] || { echo "(a/d) second run called groupmod again: ${GROUPMOD_CALLS[*]}"; bad=1; }
+
+    # cockpit-guac-rdp-shadow already exists (e.g. an operator made it by hand
+    # under the new name already) -> do nothing, not an error, EVEN IF a real
+    # "rdp-shadow" also still happens to exist alongside it.
+    GROUPMOD_CALLS=(); SAY_LOG=(); FAKE_GROUPS="rdp-shadow cockpit-guac-rdp-shadow"
+    migrate_shadow_group_rename
+    [[ -z "${GROUPMOD_CALLS[*]:-}" ]] || { echo "(a) renamed although cockpit-guac-rdp-shadow already existed"; bad=1; }
+    (( ! DIED )) || { echo "(a) die() was called when the new group already existed"; bad=1; }
+
+    # (b) .env carries the exact old default -> rewritten in place.
+    FAKE_GROUPS=""; ENVF="$env"
+    printf 'EDY_RDP_GUACD=127.0.0.1:4822\nEDY_RDP_SHADOW_GROUP=rdp-shadow\n' > "$env"
+    migrate_shadow_group_rename
+    grep -qx 'EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow' "$env" \
+        || { echo "(b) .env was not rewritten: $(cat "$env")"; bad=1; }
+    grep -qx 'EDY_RDP_SHADOW_GROUP=rdp-shadow' "$env" \
+        && { echo "(b) old line is still present"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"updated"*"EDY_RDP_SHADOW_GROUP rdp-shadow -> cockpit-guac-rdp-shadow"* ]] \
+        || { echo "(b) no 'updated ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+    # (d) run again on the now-rewritten .env: a safe no-op.
+    SAY_LOG=()
+    migrate_shadow_group_rename
+    [[ -z "${SAY_LOG[*]:-}" ]] || { echo "(b/d) second run touched an already-migrated .env: ${SAY_LOG[*]}"; bad=1; }
+    grep -qx 'EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow' "$env" \
+        || { echo "(b/d) .env no longer carries the new value after a second run"; bad=1; }
+
+    # (c) a deliberately-customized .env value: untouched by the rewrite, and a
+    # real "rdp-shadow" group existing at the same time must not touch it either.
+    FAKE_GROUPS="rdp-shadow"; GROUPMOD_CALLS=(); SAY_LOG=()
+    printf 'EDY_RDP_SHADOW_GROUP=my-custom-shadow-group\n' > "$env"
+    migrate_shadow_group_rename
+    grep -qx 'EDY_RDP_SHADOW_GROUP=my-custom-shadow-group' "$env" \
+        || { echo "(c) a customized .env value was changed: $(cat "$env")"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" != *updated* ]] || { echo "(c) .env-rewrite logic fired on a customized value"; bad=1; }
+    # the group rename in (a) is independent of the .env content and DID fire
+    # here too (a real "rdp-shadow" group existed) - that is correct: (a) and
+    # (b)/(c) are separate, unrelated checks, not an accidental linkage.
+    [[ "${GROUPMOD_CALLS[*]:-}" == "-n cockpit-guac-rdp-shadow rdp-shadow" ]] \
+        || { echo "(c) unexpected groupmod calls: '${GROUPMOD_CALLS[*]:-}'"; bad=1; }
+    return $bad
+}
+
+# 13. ensure_shadow_group(): creates the resolved group when it is missing and
+#     EDY_RDP_SHADOW_GROUP is non-empty; creates nothing when it is blank; and
+#     (structurally) is only ever called under --with-users in do_deploy().
+deploy_ensure_shadow_group() {
+    load_deploy_fn ensure_shadow_group
+    . "$SRC/lib/edy-rdp-env.sh" || { echo "cannot source lib/edy-rdp-env.sh"; return 1; }
+    local bad=0 env="$TMP/ensure-shadow.env"
+    local -a SAY_LOG=() GROUPADD_CALLS=()
+    local FAKE_GROUPS
+    say()      { SAY_LOG+=("$1 $2"); }
+    getent()   { [[ "$1" == group ]] || return 1
+                 local g; for g in $FAKE_GROUPS; do [[ "$g" == "$2" ]] && return 0; done; return 2; }
+    groupadd() { GROUPADD_CALLS+=("$*"); }
+
+    # non-empty EDY_RDP_SHADOW_GROUP, group missing -> created.
+    ENVF="$env"; FAKE_GROUPS=""
+    printf 'EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow\n' > "$env"
+    ensure_shadow_group
+    [[ "${GROUPADD_CALLS[*]:-}" == "--system cockpit-guac-rdp-shadow" ]] \
+        || { echo "missing-group case: groupadd calls '${GROUPADD_CALLS[*]:-}'"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"created"*"cockpit-guac-rdp-shadow"* ]] \
+        || { echo "missing-group case: no 'created ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+
+    # non-empty, group already exists -> no-op (idempotent).
+    GROUPADD_CALLS=(); SAY_LOG=(); FAKE_GROUPS="cockpit-guac-rdp-shadow"
+    ensure_shadow_group
+    [[ -z "${GROUPADD_CALLS[*]:-}" ]] \
+        || { echo "existing-group case: groupadd was still called: ${GROUPADD_CALLS[*]}"; bad=1; }
+
+    # blanked EDY_RDP_SHADOW_GROUP (the gate turned off) -> nothing is created.
+    GROUPADD_CALLS=(); SAY_LOG=(); FAKE_GROUPS=""
+    printf 'EDY_RDP_SHADOW_GROUP=\n' > "$env"
+    ensure_shadow_group
+    [[ -z "${GROUPADD_CALLS[*]:-}" ]] \
+        || { echo "blank-group case: groupadd was called although the gate is off: ${GROUPADD_CALLS[*]}"; bad=1; }
+
+    # without --with-users at all, do_deploy() must never reach this function -
+    # asserted structurally, the same way run_tests.sh's own DEPLOY-CONTRACT
+    # section asserts other call-site properties by grep rather than by driving
+    # a real unflagged deploy (which would need the group to pre-exist to tell
+    # "not called" apart from "called and it was a no-op").
+    grep -qE '\(\(WITH_USERS\)\) && \{ step "shadow group"; ensure_shadow_group; \}' "$SRC/deploy.sh" \
+        || { echo "ensure_shadow_group is no longer gated behind ((WITH_USERS)) in do_deploy()"; bad=1; }
+    return $bad
+}
+
 # ---------------------------------------------------------------------------
 # Order matters: 2, 3, 8 and 9 read the tree test 1 installs.
 for t in installer_staged_install_completes \
@@ -464,7 +598,9 @@ for t in installer_staged_install_completes \
          pulse_bind_refuses_unsafe_seat_socket \
          deploy_staged_completes_and_verifies \
          deploy_refuses_stale_env_before_swap \
-         shell_syntax; do
+         shell_syntax \
+         deploy_migrate_shadow_group_rename \
+         deploy_ensure_shadow_group; do
     run_test "$t"
 done
 

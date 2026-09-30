@@ -1325,3 +1325,80 @@ checked at install/deploy time, or only in a design document, never live and on 
   does not exist yet (edt1 has not been updated past the pre-rename `edy-rdp` name) — exactly the kind of
   drift "No anonymous PulseAudio TCP (4713)" and "cockpit-guac-rdp group exists with expected membership"
   exist to surface once this ships and edt1 is eventually updated.
+
+### I55 · `EDY_RDP_SHADOW_GROUP` default renamed to `cockpit-guac-rdp-shadow`, and `--with-users` now guarantees it exists · Sev N/A · SHIPPED (1.10.0.20260929)
+Not a bug fix — a rename plus a reversal of one part of I50's original product decision, recorded here
+in the same spirit as I51 (which this entry otherwise leaves untouched: I50's own reasoning for shipping
+the shadow gate fail-closed and un-hardened-at-install-time is still valid and still applies; what
+changed is a narrower, later decision about who creates the group, not why the gate behaves as it does).
+
+**The rename.** I50/1.8.0 shipped `EDY_RDP_SHADOW_GROUP` defaulting to `rdp-shadow`, chosen before I51/
+1.9.0 renamed this project's own relay group `edy-rdp` → `cockpit-guac-rdp`. The default is now
+`cockpit-guac-rdp-shadow`, matching that same convention. `relay/edy_rdp_relay.py`'s three `"rdp-shadow"`
+literal defaults (`Connection.__init__`, `handle()`, `--shadow-group`'s `argparse` default) and
+`.envdefault`'s shipped value all moved together; nothing about the gate's own logic changed.
+
+**The migration — two independent, unconditional, idempotent steps, mirroring I51's own
+`migrate_group_rename()`.** A new `migrate_shadow_group_rename()` in `deploy.sh`, run right after
+`migrate_group_rename()` on every `do_deploy()` (no `--with-users` gate, same reasoning I51 already
+settled: renaming something that already exists on an already-deployed host is a compatibility
+carry-forward, not a new grant of capability) and guarded by the identical `[[ -z "$D" ]] || return 0`
+a staged/DESTDIR test roundtrip needs for the same reason I51's guard does:
+1. A real `rdp-shadow` group, if one exists and `cockpit-guac-rdp-shadow` does not, is renamed in place
+   (`groupmod -n`, same GID and members preserved) — a plain check-and-create here would have left a
+   real group's members behind and created a second, empty one under the new name. If
+   `cockpit-guac-rdp-shadow` already exists (a prior run of this same migration, or an operator who
+   already created it by hand under the new name), this step does nothing and that is not an error.
+2. Separately, this host's own `.env` — if it carries the *exact*, full-line old default
+   (`EDY_RDP_SHADOW_GROUP=rdp-shadow`, checked with `grep -qx`, never a substring match) — is rewritten
+   in place to the new default. This is NOT the same kind of migration as (1): a deployed `.env`'s value
+   only ever got there because an earlier deploy's `install.sh` reconciliation step auto-filled it
+   *from `.envdefault` at the time*, so it must track the new default the same way (1) retargets the
+   group that old default used to name. An operator who deliberately chose some *other* group name is
+   never touched by this line, by construction of the exact-match check. The one intentionally
+   unhandled edge case: an operator who happened to deliberately choose the literal string `rdp-shadow`
+   itself as their own custom group name — astronomically unlikely, and harmless either way (their
+   group either already exists, and step (1) already left it alone, or it does not, and pointing their
+   `.env` at the new default is a reasonable outcome) — no extra logic was added to try to distinguish
+   this from the common case, deliberately, since there is no way to and no need to.
+
+**The reversal: `--with-users` now guarantees the group exists.** I50 deliberately left this group
+uncreated by any tooling — "an operator's own, deliberate step" (see I50, above) — reasoning that
+`install.sh`'s preflight never required it to exist (unlike `EDY_RDP_ADMIN_GROUP`), so nothing forced an
+operator to have it ready before a routine deploy. That reasoning about the *preflight* is unchanged and
+still correct. What changed is the separate question of whether `deploy.sh` should offer to create it
+for an operator who *does* opt in, the same way it already creates `RELAY_GROUP`/`RELAY_USER` under that
+flag. A new `ensure_shadow_group()`, gated behind the same `WITH_USERS` flag (no new flag introduced),
+reads the resolved `EDY_RDP_SHADOW_GROUP` out of `$ENVF` and `groupadd --system`s it if missing and
+non-empty; a blanked value (the gate turned off) creates nothing, matching the gate's own semantics.
+
+**Ordering constraint (this is why the call site is not simply "beside `create_users()`").**
+`create_users()` runs *before* `do_deploy()` invokes the installed `install.sh`, because `install.sh`'s
+own preflight (check 8) requires `RELAY_GROUP`/`RELAY_USER` to already exist. But at that point `.env`
+has not yet been placed or reconciled — `install.sh` is what does that. `EDY_RDP_SHADOW_GROUP` carries
+no equivalent preflight requirement (`lib/edy-rdp-env.sh`'s validation for it deliberately has no
+`getent`-existence check, for the same reason I50 gave: refusing every install over a not-yet-created,
+project-specific group name would be a needless, deploy-breaking foot-gun), so nothing forces
+`ensure_shadow_group()` to run early. It instead runs *after* the installed `install.sh` completes, so
+it reads the FINAL, fully-reconciled `.env` — respecting an operator's actual customized value, or a
+value this same release's `migrate_shadow_group_rename()` (2) just rewrote — rather than guessing at a
+value from `.envdefault` before reconciliation has happened, which would create the wrong group
+entirely on any host that customizes this variable.
+
+**Verification.** `run_tests.sh` green throughout (199 relay unit tests, unchanged — only a test
+fixture default moved in `relay/test_edy_rdp_relay.py`'s `_conn()`). `tests/installer_tests.sh` gained
+two tests: `deploy_migrate_shadow_group_rename` (a real `rdp-shadow`-named group renamed with members
+preserved; an `.env` carrying the exact old default rewritten; a deliberately-customized `.env` value
+left untouched by both the rename and the rewrite even with a real `rdp-shadow` group also present; a
+second run of every case above a safe no-op) and `deploy_ensure_shadow_group` (the group created when
+missing and non-empty; left alone when it already exists; nothing created when blanked; structurally
+confirmed to still be gated behind `((WITH_USERS))`). Both `groupadd`/`groupmod`/`getent` and the
+group-rename migration call real system commands against the actual host account table exactly like
+`create_users()`/`migrate_group_rename()` already do, and this suite's own header states its invariant
+plainly: non-root, nothing on the host touched. Reaching either function's real (non-staged) code path
+through `deploy.sh` itself needs root, which these tests intentionally never assume — so, like
+`load_manifest()` above already does for `install.sh`'s `BEGIN-MANIFEST`/`END-MANIFEST` block, both new
+tests extract just the one function's source with a `sed` range and drive it directly against fake
+`getent`/`groupmod`/`groupadd`/`say` shell functions (a bare command name resolves to a same-named shell
+function before `PATH`, so these shadow the real tools with no `PATH` trick needed); the host's actual
+`/etc/group` is never touched no matter who runs this suite.
