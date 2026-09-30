@@ -1,3 +1,38 @@
+## 1.10.1.20260929 - 2026-09-29
+
+Fixes a live-reported bug (I56): a held modifier (classically Alt, via Alt+Tab) "sticks" and the
+guest misreads the operator's next keystroke as a combo, until the library's own reactive
+self-correction catches up one keystroke too late.
+
+- **Root cause: a lost keyup, not a delivery-ordering problem.** The tunnel is a single ordered
+  channel over TCP — nothing in it can reorder or drop a sent instruction. The browser itself
+  only ever delivers `keyup` to whatever element holds DOM focus, and losing focus never
+  synthesizes one — so a key held down when focus leaves the session (in-page focus move, or the
+  Alt+Tab case: the whole window losing OS focus without blurring the display element at all)
+  leaves `Guacamole.Keyboard` believing it is still pressed, with nothing ever telling it
+  otherwise, until the next keystroke's own reactive correction runs — one keystroke too late.
+- **Fix:** `guac-rdp.js` now calls `Guacamole.Keyboard`'s own `reset()` (a real, existing API —
+  releases every keysym it still tracks as pressed, routed through the normal keyup path so the
+  **guest** actually gets told) the moment focus is lost, bound to the display element's own
+  `blur`, `window`'s `blur` (the Alt+Tab case), and `visibilitychange` (backgrounded/minimized
+  tabs) — no single one of the three covers every way a session can stop receiving key events.
+  `resetShiftAdjust()` runs alongside it as defence in depth for the narrower shiftAdjust/pressed
+  desync case `teardown()` already guards against elsewhere.
+- **New trace category:** the "Trace clipboard/sound" toggle (I53) is now "Trace
+  clipboard/sound/keyboard" — logs when a focus-loss reset fires, never which keys were involved.
+- **Investigated separately, not implemented:** a custom ACK/retransmit protocol was considered
+  and rejected — there was never a lost or reordered wire message to retry, only a browser-native
+  event the OS does not raise on focus loss, so that would have added latency to fix nothing. A
+  "Send text" batch-entry button is feasible on top of the vendored library's own existing
+  `Guacamole.Keyboard.prototype.type(string)` but addresses a different concern; not built here.
+- **Verification:** new `tests/js/keyboard_blur.test.js`, extracting the actual shipped wiring
+  verbatim (same `TESTHOOK` pattern as I45's `keyboard_remap.test.js`) against a minimal,
+  hand-written, spec-correct `EventTarget` stand-in — Node's own built-in `EventTarget` was found,
+  while writing this test, to deviate from the DOM spec on bare-boolean `capture` matching between
+  `addEventListener`/`removeEventListener` (confirmed against jsdom and the DOM spec), which would
+  have hidden a real reconnect listener-leak bug the mutation-tested "reconnecting" case now
+  catches. `run_tests.sh` green throughout (16 JS tests, up from 10).
+
 ## 1.10.0.20260929 - 2026-09-29
 
 Renames the console shadow-gate's group to match this project's own naming convention, and

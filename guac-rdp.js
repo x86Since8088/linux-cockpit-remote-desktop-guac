@@ -89,6 +89,7 @@
 
     // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
     var clipboardOn = true, soundOn = false, traceOn = false, clipReadHandler = null;
+    var keyboardBlurHandler = null;   // releases stuck keys on focus loss -- see its own setup below
     var lastRemoteClip = null;   // newest text the session put on its clipboard (for the "Receive clipboard" button)
     function syncPassthroughFlags() {
         clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
@@ -931,7 +932,13 @@
         var lockBox = $("display");
         if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
         if (lockBox && clipReadHandler) lockBox.removeEventListener("focus", clipReadHandler, true);
-        lockSyncHandler = null; clipReadHandler = null; remoteLocks = null; browserLocks = null;
+        if (keyboardBlurHandler) {
+            if (lockBox) lockBox.removeEventListener("blur", keyboardBlurHandler, true);
+            window.removeEventListener("blur", keyboardBlurHandler);
+            document.removeEventListener("visibilitychange", keyboardBlurHandler);
+        }
+        lockSyncHandler = null; clipReadHandler = null; keyboardBlurHandler = null;
+        remoteLocks = null; browserLocks = null;
         if ($("numlock")) {
             $("numlock").disabled = true;
             $("numlock").classList.remove("on");
@@ -1295,6 +1302,51 @@
         keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { sendGuestKeyEvent(true, k); };
         keyboard.onkeyup = function (k) { sendGuestKeyEvent(false, k); };
+        // A keydown with no matching keyup is a real, live-reported bug (a held
+        // modifier -- classically Alt, via Alt+Tab -- "sticks" and the guest OS
+        // then misreads the operator's next keystroke as a modifier combo). The
+        // browser only delivers keyup to whatever element currently holds DOM
+        // focus, and losing focus never synthesizes one -- so the moment this
+        // element (or the whole browser window) loses focus while a key is
+        // physically down, neither Guacamole.Keyboard's own bookkeeping nor this
+        // file's own shiftAdjust tracking ever hears about the release.
+        // Guacamole.Keyboard DOES self-correct, but only reactively, on the NEXT
+        // keyboard event it sees -- by then the guest may already have
+        // misinterpreted that very keystroke as a stuck-modifier combo. keyboard
+        // .reset() (a real Guacamole.Keyboard API) walks every keysym it still
+        // believes is pressed and fires a genuine onkeyup for each -- routing
+        // through sendGuestKeyEvent exactly like a real keyup, so the GUEST is
+        // actually told to release them, not just this page's own local state.
+        // resetShiftAdjust() is defence in depth on top of that: reset() already
+        // clears any shiftAdjust entry for a keysym still in keyboard.pressed (via
+        // that same onkeyup path), but this also covers a keysym whose entry
+        // exists only in shiftAdjust with no matching keyboard.pressed entry (see
+        // teardown()'s own identical pairing, and the "client going null
+        // mid-press" test in tests/js/keyboard_remap.test.js for why that gap
+        // matters). Bound to THIS element's own blur (focus moved to another
+        // in-page element, e.g. clicking a different tab) AND window blur (the
+        // whole browser lost OS-level focus -- the Alt+Tab case itself -- which
+        // does NOT blur this element, since document.activeElement never
+        // changes) AND visibilitychange (the tab was backgrounded/minimized,
+        // which does not always fire either blur).
+        // TESTHOOK:KEYBLUR:BEGIN -- tests/js/keyboard_blur.test.js extracts this
+        // block verbatim and runs it standalone via vm, so that test exercises
+        // the actual shipped wiring, not a reimplementation.
+        if (keyboardBlurHandler) {
+            box.removeEventListener("blur", keyboardBlurHandler, true);
+            window.removeEventListener("blur", keyboardBlurHandler);
+            document.removeEventListener("visibilitychange", keyboardBlurHandler);
+        }
+        keyboardBlurHandler = function () {
+            if (!keyboard) return;
+            trace("keyboard", "focus lost -- releasing any keys still held (keyboard.reset())");
+            keyboard.reset();
+            resetShiftAdjust();
+        };
+        box.addEventListener("blur", keyboardBlurHandler, true);
+        window.addEventListener("blur", keyboardBlurHandler);
+        document.addEventListener("visibilitychange", keyboardBlurHandler);
+        // TESTHOOK:KEYBLUR:END
 
         // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
         // forwards a lock KEY when it is pressed live, but never knew the browser's

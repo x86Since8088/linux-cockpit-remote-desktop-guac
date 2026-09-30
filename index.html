@@ -90,8 +90,8 @@
           <input type="checkbox" id="opt-audio"> Sound</label>
       </div>
       <div class="f adv">
-        <label for="opt-trace" title="Log clipboard and sound decisions (negotiated? gated on/off? blocked by the browser? byte counts) to the browser console (F12) for troubleshooting. Never logs clipboard CONTENTS. No effect on the connection itself.">
-          <input type="checkbox" id="opt-trace"> Trace clipboard/sound</label>
+        <label for="opt-trace" title="Log clipboard, sound and keyboard-focus decisions (negotiated? gated on/off? blocked by the browser? byte counts? a stuck key released on focus loss?) to the browser console (F12) for troubleshooting. Never logs clipboard CONTENTS or which keys were pressed. No effect on the connection itself.">
+          <input type="checkbox" id="opt-trace"> Trace clipboard/sound/keyboard</label>
       </div>
       <button id="go">Connect</button>
       <button id="stop" class="sec" disabled>Disconnect</button>
@@ -188,6 +188,6 @@
     </table>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.0.20260929</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.1.20260929</span></footer>
 </body>
 </html>

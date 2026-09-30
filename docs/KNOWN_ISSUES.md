@@ -1408,3 +1408,67 @@ tests extract just the one function's source with a `sed` range and drive it dir
 `getent`/`groupmod`/`groupadd`/`say` shell functions (a bare command name resolves to a same-named shell
 function before `PATH`, so these shadow the real tools with no `PATH` trick needed); the host's actual
 `/etc/group` is never touched no matter who runs this suite.
+
+### I56 · A held modifier (classically Alt, via Alt+Tab) "sticks" on focus loss — the guest never gets its keyup · Sev M · FIXED (1.10.1.20260929)
+Reported live: after Alt+Tab-ing away and back (or any other action that moved focus off the session),
+the operator's next keystroke was sometimes acted on by the guest as an Alt-combo it never intended,
+before things went back to normal. Root cause traced to the browser's own event model, not this
+project's protocol handling or anything about delivery ordering (the tunnel is a single ordered
+WebSocket/HTTP channel over TCP — nothing in it can reorder or drop an instruction once sent): the
+browser only ever delivers `keyup` to whatever element currently holds DOM focus, and **losing focus
+never synthesizes one**. So a key held down at the moment focus leaves the session (the display element
+losing focus to another in-page element, or — the classic Alt+Tab case — the whole browser window
+losing OS-level focus while the display element remains `document.activeElement`, which does NOT fire
+that element's own `blur`) leaves this page's `Guacamole.Keyboard` still believing it is pressed, with
+no event ever telling it otherwise.
+
+The vendored `guacamole-common-js` library DOES already self-correct stale modifier state, by comparing
+its own tracked `pressed` set against the browser's live `event.altKey`/`shiftKey`/etc. flags — but only
+reactively, on the very next keyboard event it happens to see. By the time that correction runs, the
+guest has already processed that same keystroke with the stale modifier still held from its own point of
+view — precisely the "acted on before the fix landed" symptom reported.
+
+**The fix:** `Guacamole.Keyboard` already ships a `reset()` method — undocumented in this project until
+now, but a real, public API — that walks every keysym it still believes is pressed and fires a genuine
+`onkeyup` for each, routing through this file's own `sendGuestKeyEvent` exactly like a real keyup, so the
+**guest** is actually told to release them, not just this page's own local bookkeeping. `guac-rdp.js` now
+calls it the moment focus is lost, instead of waiting for the next keystroke to self-correct — bound to
+three distinct signals, since no single one covers every real way a session can lose the ability to
+receive key events: the display element's own `blur` (focus moved to another in-page element, e.g.
+clicking a different tab), `window`'s `blur` (the Alt+Tab case itself, which does not blur the display
+element), and `visibilitychange` (the tab was backgrounded or minimized, which does not reliably fire
+either `blur`). `resetShiftAdjust()` is called alongside it as defence in depth: `reset()` already clears
+any `shiftAdjust` entry for a keysym still tracked in `keyboard.pressed` (via that same `onkeyup` path),
+but this also covers the narrower case of a `shiftAdjust` entry with no matching `keyboard.pressed` entry
+(the same gap `teardown()`'s own identical pairing, and the pre-existing "client going null mid-press"
+test, already exist to guard against elsewhere in this file).
+
+**Why this is a state-tracking bug, not a reliability/ordering one.** The transport already guarantees
+in-order, lossless delivery once an instruction is sent — the actual failure mode is that a genuine
+keyup was simply never generated in the first place, because the browser had nothing to synthesize it
+from. No amount of acknowledgement/retry machinery on top of the existing protocol would have helped:
+there was never a lost or reordered message to retry, only a browser-native event that the OS itself
+does not raise on focus loss. A custom-string batch-send ("Send text") button was separately investigated
+in this same discussion and found straightforwardly buildable on top of the vendored library's own
+existing `Guacamole.Keyboard.prototype.type(string)` method — not implemented in this pass, since it
+addresses a different concern (bulk/reliable text entry) than the stuck-modifier bug this entry covers.
+
+**New opt-in trace category.** The existing "Trace clipboard/sound" toggle (I53) is now "Trace
+clipboard/sound/keyboard" — a `trace("keyboard", ...)` line fires whenever a focus-loss reset actually
+runs, naming only that it happened, never which keys were involved, matching the existing categories'
+own byte-counts-not-contents discipline.
+
+**Verification.** New `tests/js/keyboard_blur.test.js`, extracting the actual shipped wiring verbatim
+(the same `TESTHOOK`-sentinel pattern `keyboard_remap.test.js` already established for I45) and driving
+it against a minimal, hand-written, spec-correct `EventTarget` stand-in — deliberately NOT Node's own
+built-in `EventTarget`, which was found, while writing this test, to have a real deviation from the DOM
+spec (it does not correctly match a bare boolean `capture` argument between `addEventListener`/
+`removeEventListener`, unlike jsdom and real browsers, confirmed by testing both directly) that would
+have made a genuine listener-leak bug in an earlier draft of this fix look like it passed. Covers: blur
+on the display element, `window` blur, `visibilitychange`, all three correctly releasing every held key
+and updating `shiftAdjust`; no client/keyboard yet correctly does nothing and never throws; the trace
+line fires with the right category and message; and — mutation-tested by deliberately removing the
+old-listener-cleanup guard and confirming the test then fails — reconnecting (a second `connect()` in the
+same page) removes the FIRST session's listeners before attaching new ones, so a stale handler from a
+prior session can never double-fire or reset an old, already-torn-down keyboard object. `run_tests.sh`
+green throughout (16 JS tests, up from 10).
