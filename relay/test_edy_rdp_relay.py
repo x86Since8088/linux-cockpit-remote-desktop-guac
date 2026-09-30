@@ -525,7 +525,7 @@ class ConsoleShadowGate(unittest.TestCase):
         def poll(self): return None
         def kill(self): pass
 
-    def _conn(self, uid, admin_group="sudo", shadow_group="rdp-shadow"):
+    def _conn(self, uid, admin_group="sudo", shadow_group="cockpit-guac-rdp-shadow"):
         c = R.Connection(client=None, uid=uid, table=SR.SessionRegistry(),
                          guacd_addr=("127.0.0.1", 4822), admin_group=admin_group,
                          shadow_group=shadow_group)

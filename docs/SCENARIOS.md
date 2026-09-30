@@ -41,13 +41,14 @@ real desktop.
 
 Being an admin is a separate question from *whose* desktop you point the mirror at. If a
 **different** user is currently signed in at the physical seat, mirroring it needs
-membership in a second unix group (`EDY_RDP_SHADOW_GROUP`, default `rdp-shadow` — see
-[README.md](../README.md)'s Configuration section), on top of the admin gate above, which
-is unchanged. This does not apply when nobody is signed in at the seat, or when the
-signed-in user is the one requesting console — in either case the admin gate alone
-decides it, exactly as before. The group is not created automatically; an operator
-creates it and adds members deliberately (see [KNOWN_ISSUES](KNOWN_ISSUES.md) for why a
-missing group fails closed rather than refusing to deploy).
+membership in a second unix group (`EDY_RDP_SHADOW_GROUP`, default
+`cockpit-guac-rdp-shadow` — see [README.md](../README.md)'s Configuration section), on top
+of the admin gate above, which is unchanged. This does not apply when nobody is signed in
+at the seat, or when the signed-in user is the one requesting console — in either case the
+admin gate alone decides it, exactly as before. `deploy.sh --with-users` creates this group
+automatically; an operator who did not pass that flag creates it and adds members
+themselves (see [KNOWN_ISSUES](KNOWN_ISSUES.md) for why a missing group fails closed
+rather than refusing to deploy).
 
 ## Virtual monitor
 

@@ -1,3 +1,44 @@
+## 1.10.0.20260929 - 2026-09-29
+
+Renames the console shadow-gate's group to match this project's own naming convention, and
+reverses part of I50's original 1.8.0 decision: `deploy.sh --with-users` now guarantees the
+group exists instead of leaving it entirely to an operator.
+
+- **Renamed:** `EDY_RDP_SHADOW_GROUP`'s default is now `cockpit-guac-rdp-shadow` (was
+  `rdp-shadow`, chosen before I51's `cockpit-guac-rdp` rename). Updated everywhere the old
+  default was a literal: `.envdefault`, `relay/edy_rdp_relay.py`'s three parameter/argparse
+  defaults, `relay/test_edy_rdp_relay.py`'s `_conn()` fixture, `README.md`,
+  `docs/SCENARIOS.md`, and (found by adversarial review — missed in the first pass)
+  `systemd/edy-rdp-relay.service.in`'s own `Environment=` fallback line, which `.env` normally
+  shadows but which would otherwise gate console-shadow access on the old group name on any
+  host where `EDY_RDP_SHADOW_GROUP` were ever absent from the effective `.env`.
+- **New migration (I55):** `deploy.sh` gained `migrate_shadow_group_rename()`, run
+  unconditionally right after the existing `migrate_group_rename()` on every deploy —
+  renames a real `rdp-shadow` group in place (GID and members preserved) unless
+  `cockpit-guac-rdp-shadow` already exists, and separately rewrites an `.env` that carries
+  the exact old default line to the new one, never touching a deliberately customized value.
+  Both halves are idempotent and, like `migrate_group_rename()`, never run against a
+  staged/DESTDIR test roundtrip's host.
+- **New capability (I55): `--with-users` now guarantees the shadow group exists.** A new
+  `ensure_shadow_group()`, gated behind the same `--with-users` flag `RELAY_GROUP`/
+  `RELAY_USER` already use, creates the resolved `EDY_RDP_SHADOW_GROUP` with `groupadd
+  --system` if it is non-empty and missing. Runs *after* the installed `install.sh`
+  completes (not beside `create_users()`), so it reads the final, reconciled `.env` rather
+  than guessing at a pre-reconciliation value.
+- **Docs:** `docs/KNOWN_ISSUES.md` I55 records the rename, the migration, and why the
+  `ensure_shadow_group()` call has to run after `install.sh` rather than beside
+  `create_users()`. `README.md` and `docs/SCENARIOS.md` updated to the new default and the
+  new `--with-users` behavior; `lib/edy-rdp-env.sh`'s `EDY_RDP_SHADOW_GROUP` validation
+  comment now notes `--with-users` as the other way the group comes to exist (the
+  no-existence-check validation logic itself is unchanged).
+- **Verification:** `run_tests.sh` green throughout (199 relay unit tests, unchanged —
+  only a test fixture default moved). `tests/installer_tests.sh` gained two tests:
+  `deploy_migrate_shadow_group_rename` and `deploy_ensure_shadow_group`, both driving the
+  real functions (extracted by a `sed` range, the same technique this suite's own
+  `load_manifest()` already uses) against fake `getent`/`groupmod`/`groupadd`/`say` shell
+  functions — real system commands are never invoked, so this suite's own "non-root,
+  nothing on the host touched" invariant holds.
+
 ## 1.9.3.20260929 - 2026-09-29
 
 Adds five new read-only checks to the Self Tests panel (I54), each turning something this

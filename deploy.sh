@@ -211,6 +211,48 @@ migrate_group_rename() {
     say renamed "group edy-rdp -> $RELAY_GROUP (GID and members preserved)"
 }
 
+# The shadow-group analogue: I50/1.8.0 shipped EDY_RDP_SHADOW_GROUP defaulting
+# to "rdp-shadow", chosen before the rename above; this brings it in line with
+# the same "cockpit-guac-rdp" convention. Two independent things, both
+# unconditional (no --with-users gate, for the same reason migrate_group_rename
+# above is unconditional - an already-deployed host must pick this up on its
+# next plain redeploy) and both idempotent:
+#
+#   a. an existing "rdp-shadow" group is renamed in place (same GID, same
+#      members) unless "cockpit-guac-rdp-shadow" already exists, in which case
+#      there is nothing left to do.
+#   b. this host's OWN .env, if it carries the old shipped default verbatim
+#      (a full-line match, not a substring one), is rewritten to the new
+#      default. That exact value can only have gotten into a deployed .env one
+#      way - an earlier deploy's install.sh reconciliation auto-filling it from
+#      .envdefault - so it must track the new default the same way (a) tracks
+#      the group that default used to name. An operator who deliberately chose
+#      some OTHER group name is never touched; an operator who happened to
+#      deliberately choose "rdp-shadow" itself is pointed at the new default
+#      too, which is safe either way (their group either already exists, and
+#      (a) already left it alone, or it does not, and this simply matches them
+#      to (a)'s target) - no extra logic is needed to tell the two apart.
+migrate_shadow_group_rename() {
+    # Same guard, same reason as migrate_group_rename() above: a staged/
+    # DESTDIR test roundtrip must never rename a real host's actual group or
+    # rewrite a real .env sitting outside the stage.
+    [[ -z "$D" ]] || return 0
+
+    if ! getent group cockpit-guac-rdp-shadow >/dev/null; then
+        if getent group rdp-shadow >/dev/null; then
+            groupmod -n cockpit-guac-rdp-shadow rdp-shadow \
+                || die "could not rename group rdp-shadow -> cockpit-guac-rdp-shadow. Fix by hand
+    (groupmod -n cockpit-guac-rdp-shadow rdp-shadow) and re-run. Nothing else was changed."
+            say renamed "group rdp-shadow -> cockpit-guac-rdp-shadow (GID and members preserved)"
+        fi
+    fi
+
+    if [[ -f "$ENVF" ]] && grep -qx 'EDY_RDP_SHADOW_GROUP=rdp-shadow' "$ENVF"; then
+        sed -i 's/^EDY_RDP_SHADOW_GROUP=rdp-shadow$/EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow/' "$ENVF"
+        say updated "$ENVF: EDY_RDP_SHADOW_GROUP rdp-shadow -> cockpit-guac-rdp-shadow"
+    fi
+}
+
 create_users() {
     getent group "$RELAY_GROUP" >/dev/null \
         || { groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"; }
@@ -218,6 +260,26 @@ create_users() {
         || { useradd --system --no-create-home --shell /usr/sbin/nologin \
                      -g "$RELAY_GROUP" "$RELAY_USER"; say created "user $RELAY_USER"; }
     ok "$RELAY_USER:$RELAY_GROUP present (uid $(id -u "$RELAY_USER"))"
+}
+
+# Guarantees the console shadow-gate's group exists under --with-users, the
+# reversal of I50/1.8.0's original "an operator's own, deliberate step"
+# decision (docs/KNOWN_ISSUES.md) - now mirroring how that same flag already
+# guarantees RELAY_GROUP/RELAY_USER. Called from do_deploy() AFTER the
+# installed install.sh runs, not beside create_users() above: create_users()
+# has to run BEFORE install.sh because install.sh's own preflight (check 8)
+# requires RELAY_GROUP/RELAY_USER to already exist, but .env has not been
+# placed or reconciled yet at that point - install.sh is what does that.
+# EDY_RDP_SHADOW_GROUP carries no such preflight requirement (lib/edy-rdp-
+# env.sh's validation deliberately has no getent-existence check for it), so
+# nothing forces this earlier, and reading $ENVF before install.sh has
+# reconciled it would guess at the wrong value for a host that customizes it.
+ensure_shadow_group() {
+    local g
+    g="$(env_get "$ENVF" EDY_RDP_SHADOW_GROUP 2>/dev/null || true)"
+    [[ -n "$g" ]] || return 0   # blanked = the gate is off; nothing to guarantee
+    getent group "$g" >/dev/null \
+        || { groupadd --system "$g"; say created "group $g"; }
 }
 
 pull_image() {
@@ -387,12 +449,17 @@ do_deploy() {
     step "configuration"
     migrate_legacy_env
     migrate_group_rename
+    migrate_shadow_group_rename
     ((WITH_USERS)) && { step "users"; create_users; }
 
     # install.sh BEFORE the image pull: it places .env, and GUACD_IMAGE is read
     # from that file. (Users before install.sh: its check 8 wants them.)
     step "running the INSTALLED install.sh (not this checkout copy)"
     DESTDIR="$D" "$ROOT_D/payload/install.sh"
+
+    # AFTER install.sh, not beside create_users() above - see ensure_shadow_group()'s
+    # own comment for why this one has to read the FINAL, reconciled .env.
+    ((WITH_USERS)) && { step "shadow group"; ensure_shadow_group; }
 
     ((WITH_IMAGE)) && { step "guacd image"; pull_image; }
 
