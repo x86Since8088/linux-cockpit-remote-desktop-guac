@@ -1,3 +1,30 @@
+## 1.10.2.20260930 - 2026-09-30
+
+New capability (I58): a "Type Clipboard" button next to Send/Receive clip, working around the confirmed
+upstream guacd/x11vnc bug where a browser→remote clipboard push is silently dropped (accepted on the wire,
+never applied on the guest — re-confirmed live today by cross-referencing a real browser trace against the
+relay's own per-session opcode tally, which showed zero `clipboard` instructions ever reaching it).
+
+- Reads the local clipboard exactly like "Send clip" does, then **types** the text into the session one
+  keysym at a time via `sendGuestKeyEvent` directly (the same one-shot injection `sendKeysymTap()` already
+  uses for the Win key), so it inherits the existing keycode/Shift corrections (I45) for any punctuation it
+  contains.
+- Character → keysym mirrors the vendored `Guacamole.Keyboard`'s own X11/Unicode convention exactly
+  (diffed against it over code points 0–0x400), with one deliberate fix: `"\n"`/`"\r"` are forced to the
+  real Return keysym (`0xFF0D`) instead of the vendored library's Linefeed (`0xFF0A`, a keysym with no key
+  on the Xvfb "us" keymap — verified with a standalone `vm` probe). CRLF pairs produce one Return.
+- Non-ASCII text needs no server-side change: x11vnc's `-add_keysyms` (already this build's default)
+  dynamically maps any keysym Xvfb doesn't have a key for.
+- **Adversarial review before merge found and fixed 4 real defects** in the first draft: injected typing
+  shared state with real physical keystrokes via `keyboard.press()`/`release()` (dropped/duplicated
+  keystrokes, now sends via `sendGuestKeyEvent` directly instead); code points 0x7F–0x9F mapped to the
+  wrong keysym; no reentrancy guard against double-clicking the button; an unbounded synchronous loop that
+  could hang the tab on a large clipboard (now chunked with a yield + progress status every 200 chars).
+  See I58 for the full detail.
+- New `tests/js/type_clipboard.test.js` (15 tests, TESTHOOK-verbatim-extracted like I45/I56's own tests),
+  mutation-tested, including regression tests for all 4 fixed defects. `run_tests.sh` green (35 JS tests,
+  up from 20).
+
 ## 1.10.1.20260929 - 2026-09-29
 
 Fixes a live-reported bug (I56): a held modifier (classically Alt, via Alt+Tab) "sticks" on the

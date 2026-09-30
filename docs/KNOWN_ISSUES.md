@@ -1532,3 +1532,73 @@ design, deserving its own careful fix (e.g. a generation counter so a stale `dis
 is no longer current and no-op) rather than a quick patch bolted onto an unrelated keyboard fix. Named
 here rather than silently left, per this project's own convention for a discovered-but-deferred gap (see
 I46 for the shape this takes elsewhere in this file).
+
+### I58 · New capability: "Type Clipboard" — keystroke-injection workaround for the broken native clipboard paste · Sev N/A · SHIPPED (1.10.2.20260930)
+Not a bug fix for the underlying issue (that bug is upstream, in guacd/x11vnc's own VNC clipboard
+handling — see the live-traced root-cause investigation, memory `cockpit-guac-rdp-send-clip-investigation`:
+the browser→remote clipboard push is accepted with no error and never actually applied on the guest, and
+was re-confirmed live on 2026-09-30 by cross-referencing a real browser trace, showing the JS side
+correctly writing to the outbound clipboard stream, against the relay's own per-connection `up={}` opcode
+tally at session close, which showed zero `clipboard` instructions ever reaching the relay from the browser
+across multiple real sessions). Since that path cannot be fixed from this project's side, a new "Type
+Clipboard" button sidesteps it entirely: it reads the local clipboard the same way "Send clip" does, then
+**types** the text into the session one keysym at a time via `sendGuestKeyEvent` directly — the same
+one-shot-injection call `sendKeysymTap()` already uses for the Win key, and NOT `keyboard.press()`/
+`keyboard.release()` (see the correction below) — inheriting `sendGuestKeyEvent`'s existing
+`KEYCODE_FIX`/`SHIFT_LEVEL` corrections (I45) for any punctuation the typed text happens to contain, for
+free.
+- **Character → keysym** mirrors the vendored `Guacamole.Keyboard`'s own (unused here) codepoint-to-keysym
+  function, extracted from `guacamole-common-js/all.min.js` and diffed against this implementation over
+  code points 0–0x400 before shipping: Latin-1 code points are their own keysym; C0 controls (0x00–0x1F)
+  **and the C1 control range (0x7F–0x9F)** map via the "function key" convention (`code point | 0xFF00`);
+  anything else is the "Unicode keysym" `0x01000000 | code point`.
+- **One deliberate deviation** from that vendored function: it maps `"\n"` to Linefeed (`0xFF0A`), a
+  keysym with no key on the Xvfb "us" keymap at all (verified with a standalone `vm` probe) — typing a
+  bare LF through it would silently do nothing. Both CR and LF are forced here to the real Return keysym
+  (`0xFF0D`), with the LF half of a CRLF pair skipped so Windows-sourced clipboard text doesn't send two
+  Enters per line.
+- **Non-ASCII characters need no bridge-side change.** x11vnc's `-add_keysyms` (confirmed, via `x11vnc
+  -help`, to be this build's own *default*) dynamically adds an unused keycode for any keysym Xvfb's
+  static "us" keymap doesn't already have one for.
+- **Four real defects found by adversarial review of the first draft, all fixed before merge:**
+  - **(High) `keyboard.press()`/`keyboard.release()` share state with REAL physical keystrokes.** The
+    first draft injected characters via `keyboard.press(ks); keyboard.release(ks)` on the same
+    `Guacamole.Keyboard` instance real typing drives. That instance's `pressed` map and its single
+    (not per-keysym) key-repeat timer pair are shared: injecting a keysym the user is physically holding
+    (e.g. holding Enter while pasted text also contains a newline) silently no-ops the injected press
+    while the injected release DOES fire, telling the guest the physical key was released while the user
+    still holds it — and, with no keysym collision at all, injecting even one character while an unrelated
+    real key is mid-auto-repeat permanently kills that key's repeat-to-guest stream via the shared timer.
+    Reproduced against the real vendored library. Fixed by calling `sendGuestKeyEvent(true, ks)` /
+    `sendGuestKeyEvent(false, ks)` directly — exactly what `sendKeysymTap()` already does — which never
+    touches `keyboard.pressed` or its timers.
+  - **(High) Wrong keysym for code points 0x7F–0x9F.** The first draft's Latin-1 range (`0x20`–`0xFF`)
+    incorrectly included DEL and the whole C1 control block as direct-value keysyms; the vendored
+    function carves that range out into the C0-style `|0xFF00` convention instead. A keysym like `0x7F`
+    has no defined X11 meaning, so text containing DEL or a C1 control byte (plausible from a
+    Windows-1252-as-Latin-1 mis-decode, common in terminal-copied text) would have silently mistyped.
+    Fixed to match the vendored function exactly.
+  - **(Medium) No reentrancy guard.** Clicking "Type Clipboard" twice in quick succession started two
+    independent `readText()`→type chains, typing the clipboard's text twice. Fixed with a `clipTypeBusy`
+    flag checked at entry and cleared on every completion path (success, empty clipboard, thrown
+    exception, rejected read, or the session ending mid-type).
+  - **(Medium) Unbounded synchronous loop could hang the tab on a large clipboard.** The first draft typed
+    the entire string in one synchronous pass — for a large payload (this feature's whole point is moving
+    text the broken native channel won't carry, which skews toward *larger* pastes) that blocks the main
+    thread for the whole operation with no progress shown and no way to interrupt it. Fixed by chunking
+    into 200-character bursts with a `setTimeout` yield between them (re-checking the session is still
+    live each chunk, and keeping a CRLF pair together across a chunk boundary), with a running
+    "Typing… N of M characters" status.
+  - **Also documented, not changed:** typing (not pasting) means an embedded Tab/Backspace/Escape/etc. in
+    the clipboard text acts as a real guest keypress (focus-next, delete-previous-char, …) rather than
+    literal text — noted in the button's own tooltip. Not exploitable (it's the user's own clipboard) and
+    not more surprising than the user's own physical keypress doing the same thing, just worth knowing
+    for TSV/indented-code content.
+- **Verification:** `tests/js/type_clipboard.test.js` (TESTHOOK-verbatim-extraction, like I45/I56's own
+  tests) covers the code-point→keysym mapping (Latin-1, its 0xFF/0x100 upper boundary, C0 controls and
+  their 0x1F boundary, the C1 control range and its 0x7F/0x9F boundaries, the Unicode plane), an empty
+  string, plain ASCII, a bare LF, a CRLF pair, a lone trailing CR, CR-followed-by-non-LF (proving the
+  collapse is exact, not a range), repeated CRLFs and bare CR-CR, a surrogate-pair character, a lone
+  unpaired surrogate, and a mixed multi-line/multi-script string — 15 tests, all mutation-tested,
+  including re-verifying each of the three defects above now fails the specific test added to catch it.
+  `run_tests.sh` green throughout (35 JS tests, up from 20).
