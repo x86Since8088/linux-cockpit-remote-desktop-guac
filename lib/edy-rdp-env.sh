@@ -168,7 +168,8 @@ env_check_values() {
           EDY_RDP_REMOTE_ADMIN_ONLY|EDY_RDP_DESKUI_ENABLE)
             case "$v" in ''|0|1) ;; *) printf '%s: must be empty, 0 or 1\n' "$k"; rc=1 ;; esac ;;
           EDY_RDP_PULSE_SEAT_UID)
-            [[ "$v" =~ ^[0-9]+$ ]] || { printf '%s: must be a numeric uid\n' "$k"; rc=1; } ;;
+            [[ "$v" == auto || "$v" =~ ^[0-9]+$ ]] \
+                || { printf '%s: must be "auto" or a numeric uid\n' "$k"; rc=1; } ;;
           EDY_RDP_PULSE_SEAT_SOCKET)
             [[ -z "$v" || "$v" == /* ]] || { printf '%s: must be an absolute path\n' "$k"; rc=1; } ;;
           PULSE_SERVER)

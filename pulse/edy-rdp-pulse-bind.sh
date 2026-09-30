@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
-# edy-rdp-pulse-bind [--seat-uid N] [--check] — bind the seat's PulseAudio socket into
-# the SHARED directory the guacd container mounts, so desktop audio reaches guacd.
+# edy-rdp-pulse-bind [--seat-uid N] [--auto-restart-guacd] [--check] — bind the seat's
+# PulseAudio socket into the SHARED directory the guacd container mounts, so desktop
+# audio reaches guacd, and (I59) resolve WHICH sink to record.
+#
+# I59: WHY "AUTO" AND NOT A FIXED HOSTNAME/SINK
+#   Both "which uid is the seat" and "which sink that uid plays to" used to be a
+#   one-time, hand-typed operator step (docs/AUDIO.md's old "seat setup"): find the
+#   sink with `pactl get-default-sink`, paste "<name>.monitor" into PULSE_SOURCE,
+#   restart guacd. That silently goes stale the moment the audio topology changes
+#   (a monitor disconnects, a different sink becomes default, or - the case that
+#   found this - the sink named in .env simply is not the one actually live), and it
+#   only ever named ONE fixed uid, so it could reflect a mirrored desktop login OR
+#   the GDM greeter but never both as the operator actually switches between them.
+#   EDY_RDP_PULSE_SEAT_UID=auto (the new default) instead re-resolves, every time
+#   this script runs, WHICHEVER session is actually active on seat0 right now via
+#   `loginctl` (the greeter before login, whoever's logged in after) - see
+#   resolve_active_seat_uid() below. PULSE_SOURCE=auto (opt-in; unset still means
+#   "no audio channel", unchanged) similarly re-resolves that seat's OWN current
+#   default sink via `pactl get-default-sink` over the just-bound socket - see
+#   resolve_default_sink_monitor(). Either can still be pinned to a literal value,
+#   which is left completely alone (this script never overwrites an explicit pin).
 #
 # WHY A DIRECTORY, AND WHY SHARED (KNOWN_ISSUES I42)
 #   The seat's pulse socket lives under the user's XDG_RUNTIME_DIR (0700), which the
@@ -41,15 +60,28 @@
 # WHO RUNS IT
 #   - edy-rdp-guacd.service, ExecStartPre (NOT '-'-prefixed): prepares the shared root
 #     and binds the socket if the seat is already logged in. An absent seat socket is
-#     exit 0 - "no audio until login" is not a reason to keep guacd down.
-#   - edy-rdp-pulse-rebind@<uid>.service, started by the path unit at each login (and
-#     once by deploy.sh --with-units, for a seat that is logged in at deploy time:
-#     PathChanged= only ever fires for the NEXT change).
-#   - an operator, by hand: --check prints the plan without root and changes nothing.
+#     exit 0 - "no audio until login" is not a reason to keep guacd down. Never passes
+#     --auto-restart-guacd (it would be restarting the unit it is a prerequisite of).
+#   - edy-rdp-pulse-rebind@<uid>.service (EDY_RDP_PULSE_SEAT_UID pinned to a number):
+#     started by edy-rdp-pulse-seat@<uid>.path at each login, and once by deploy.sh
+#     --with-units for a seat logged in at deploy time.
+#   - edy-rdp-pulse-rebind-auto.service (EDY_RDP_PULSE_SEAT_UID=auto, the default):
+#     started by edy-rdp-pulse-seat-auto.path on ANY change under /run/user (a login
+#     or logout by anyone, on any seat - the least specific watch that still catches
+#     "the active seat0 session changed"; this script re-derives who that actually is
+#     rather than trusting which uid's directory changed), and once by deploy.sh
+#     --with-units. Passes --auto-restart-guacd: PULSE_SOURCE is a container start-time
+#     env var, so a resolved value that changed cannot reach an already-running guacd
+#     any other way (unlike the socket bind itself, which reaches it via mount
+#     propagation with no restart - see WHY A DIRECTORY above).
+#   - an operator, by hand: --check prints the plan, including what PULSE_SOURCE=auto
+#     would currently resolve to, without root and without changing anything.
 #
 # SEAT SOCKET PRECEDENCE
 #   EDY_RDP_PULSE_SEAT_SOCKET (non-empty, from the .env) > --seat-uid N
-#   > EDY_RDP_PULSE_SEAT_UID (from the .env) > 1000, each meaning /run/user/N/pulse/native.
+#   > EDY_RDP_PULSE_SEAT_UID (from the .env) > auto, each meaning /run/user/N/pulse/native.
+#   "auto" (the default) resolves via resolve_active_seat_uid() below; a numeric value
+#   pins a specific seat exactly as before I59.
 #
 # EXIT CODES
 #   0  bound, already bound, or seat socket absent (logged; no audio until login)
@@ -61,13 +93,15 @@ set -uo pipefail
 
 DIR="${EDY_RDP_PULSE_DIR:-/run/edy-rdp-pulse}"   # tests point this at a temp dir
 CHECK=0
+AUTO_RESTART=0
 SEAT_UID_ARG=""
 while (( $# )); do
     case "$1" in
-        --seat-uid) SEAT_UID_ARG="${2:?--seat-uid needs a numeric uid}"; shift 2 ;;
+        --seat-uid) SEAT_UID_ARG="${2:?--seat-uid needs a numeric uid or 'auto'}"; shift 2 ;;
         --seat-uid=*) SEAT_UID_ARG="${1#*=}"; shift ;;
         --check) CHECK=1; shift ;;
-        -h|--help) printf 'usage: edy-rdp-pulse-bind [--seat-uid N] [--check]\n'; exit 0 ;;
+        --auto-restart-guacd) AUTO_RESTART=1; shift ;;
+        -h|--help) printf 'usage: edy-rdp-pulse-bind [--seat-uid N|auto] [--auto-restart-guacd] [--check]\n'; exit 0 ;;
         *) printf '[pulse-bind] unknown argument: %s (usage: edy-rdp-pulse-bind [--seat-uid N] [--check])\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -82,10 +116,55 @@ log() {
 }
 fail() { local rc="${2:-1}"; log "FAIL $1"; exit "$rc"; }
 
+# I59: the uid of whichever session is CURRENTLY active on seat0 - the GDM
+# greeter before anyone logs in, the logged-in user's own session after (which
+# is exactly "GDM and mirroring scenarios" without needing to know which one it
+# is ahead of time). Read-only (loginctl queries, no writes), so it is safe to
+# call under --check too. Prints nothing and returns 1 if loginctl is missing,
+# errors, or no session is both on seat0 and Active=yes (e.g. a headless host
+# with no display manager at all) - the caller falls back to a fixed uid.
+resolve_active_seat_uid() {
+    command -v loginctl >/dev/null 2>&1 || return 1
+    local sid seat active uid k v
+    while read -r sid _; do
+        [[ -n "$sid" ]] || continue
+        seat=""; active=""; uid=""
+        while IFS='=' read -r k v; do
+            case "$k" in Seat) seat="$v" ;; Active) active="$v" ;; User) uid="$v" ;; esac
+        done < <(loginctl show-session "$sid" -p Seat -p Active -p User 2>/dev/null)
+        [[ "$seat" == seat0 && "$active" == yes && "$uid" =~ ^[0-9]+$ ]] || continue
+        printf '%s\n' "$uid"
+        return 0
+    done < <(loginctl list-sessions --no-legend 2>/dev/null)
+    return 1
+}
+# I59: the seat's OWN current default sink, over the (already vetted/bound)
+# socket path given in $1 - never a microphone, same "playing on the desktop"
+# meaning as the manual `pactl get-default-sink` step in docs/AUDIO.md. Prints
+# nothing and returns 1 if pactl is missing, the socket refuses the connection
+# (nobody there yet, or it is not actually a pulse socket), or no sink is set.
+resolve_default_sink_monitor() {
+    command -v pactl >/dev/null 2>&1 || return 1
+    local sink
+    sink="$(PULSE_SERVER="unix:$1" pactl get-default-sink 2>/dev/null)" || return 1
+    [[ -n "$sink" ]] || return 1
+    printf '%s.monitor\n' "$sink"
+}
+
 # --- resolve the seat socket -------------------------------------------------
-UID_="${SEAT_UID_ARG:-${EDY_RDP_PULSE_SEAT_UID:-1000}}"
+UID_="${SEAT_UID_ARG:-${EDY_RDP_PULSE_SEAT_UID:-auto}}"
+if [[ "$UID_" == auto ]]; then
+    resolved="$(resolve_active_seat_uid || true)"
+    if [[ -n "$resolved" ]]; then
+        log "auto: resolved the active seat0 session to uid $resolved"
+        UID_="$resolved"
+    else
+        UID_=1000
+        log "auto: no session is both on seat0 and active (loginctl) - falling back to uid $UID_"
+    fi
+fi
 case "$UID_" in
-    ''|*[!0-9]*) fail "seat uid must be numeric, got '$UID_'" 2 ;;
+    ''|*[!0-9]*) fail "seat uid must be numeric or 'auto', got '$UID_'" 2 ;;
 esac
 OVERRIDE=0
 if [[ -n "${EDY_RDP_PULSE_SEAT_SOCKET:-}" ]]; then
@@ -134,11 +213,51 @@ target_check() {
     return 0
 }
 
+# I59: resolves and, unless $2=preview, PERSISTS PULSE_SOURCE for this seat when
+# .env opted in (PULSE_SOURCE=auto); leaves a pin or "audio off" (unset) alone,
+# and cleans up a stale generated file left by an EARLIER auto run so "audio off"
+# always really means off regardless of history. $1 = the socket path to query
+# (the bound $T once live, or $SOCKET itself for a --check preview before
+# anything is bound). Restarts guacd (--auto-restart-guacd only) so an
+# already-running container picks up a value that changed - PULSE_SOURCE is a
+# container start-time env var, so mount propagation (which is what lets the
+# SOCKET bind reach a running container with no restart) cannot carry this.
+resolve_and_persist_source() {
+    local sock="$1" preview="${2:-}" src_file="$DIR/pulse-source.env" new_source old_source
+    if [[ "${PULSE_SOURCE:-}" == auto ]]; then
+        new_source="$(resolve_default_sink_monitor "$sock" || true)"
+        if [[ -z "$new_source" ]]; then
+            log "PULSE_SOURCE=auto: could not resolve a default sink over $sock yet (pactl failed, or nothing bound) - unchanged"
+            return 0
+        fi
+        if [[ -n "$preview" ]]; then
+            log "plan: PULSE_SOURCE=auto -> would resolve to $new_source"
+            return 0
+        fi
+        old_source=""
+        [[ -f "$src_file" ]] && old_source="$(sed -n 's/^PULSE_SOURCE=//p' "$src_file")"
+        [[ "$new_source" == "$old_source" ]] && return 0
+        printf 'PULSE_SOURCE=%s\n' "$new_source" > "$src_file.tmp" && mv -f -- "$src_file.tmp" "$src_file"
+        log "resolved PULSE_SOURCE=$new_source (was '${old_source:-<none>}')"
+        if (( AUTO_RESTART )); then
+            if systemctl try-restart edy-rdp-guacd.service 2>/dev/null; then
+                log "restarted edy-rdp-guacd.service to pick up the new PULSE_SOURCE"
+            else
+                log "edy-rdp-guacd.service try-restart did not run it (not currently active)"
+            fi
+        fi
+    elif [[ -z "$preview" && -e "$src_file" ]]; then
+        rm -f -- "$src_file"
+        log "removed stale generated $src_file (PULSE_SOURCE is not 'auto')"
+    fi
+}
+
 # --- --check: the plan, no root, no writes -----------------------------------
 if (( CHECK )); then
     seat_check   || fail "$SEAT_STATE"
     target_check || fail "$TGT_STATE"
     log "plan: dir=$DIR seat=$SOCKET ($SEAT_STATE) target=$T ($TGT_STATE)"
+    [[ "$SEAT_STATE" == exists ]] && resolve_and_persist_source "$SOCKET" preview
     log "check: no changes made"
     exit 0
 fi
@@ -165,6 +284,7 @@ fi
 seat_check || fail "$SEAT_STATE"
 if [[ "$SEAT_STATE" == absent ]]; then
     log "seat socket absent ($SOCKET) - no audio until a seat login; edy-rdp-pulse-seat@${UID_}.path binds it then"
+    resolve_and_persist_source "$SOCKET"
     exit 0
 fi
 
@@ -178,6 +298,7 @@ want="$(stat -c '%d:%i' -- "$SOCKET" 2>/dev/null || true)"
 if [[ "$TGT_STATE" == mounted ]]; then
     if [[ "$(stat -c '%d:%i' -- "$T" 2>/dev/null)" == "$want" ]]; then
         log "already bound (unchanged)"
+        resolve_and_persist_source "$T"
         exit 0
     fi
     err="$(umount -- "$T" 2>&1)" || fail "umount $T: $err"
@@ -195,4 +316,5 @@ if [[ "$got" != "socket $UID_ $want" ]]; then
     fail "$T after the bind is '${got:-unreadable}', not the vetted seat socket (socket $UID_ $want) - undone"
 fi
 log "bound $SOCKET -> $T"
+resolve_and_persist_source "$T"
 exit 0

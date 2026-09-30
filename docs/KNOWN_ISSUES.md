@@ -1602,3 +1602,60 @@ free.
   unpaired surrogate, and a mixed multi-line/multi-script string — 15 tests, all mutation-tested,
   including re-verifying each of the three defects above now fails the specific test added to catch it.
   `run_tests.sh` green throughout (35 JS tests, up from 20).
+
+### I59 · `PULSE_SOURCE`/seat uid dynamically resolved instead of a hand-typed, go-stale-able pin · Sev N/A (was a live bug on edt1) · SHIPPED (1.10.3.20260930)
+Found while diagnosing a live report of no session audio ("the sound dilemma") alongside I58: edt1's
+deployed `.env` had `PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor`, a real, specific sink
+name — but the host's actual live PipeWire (as uid 1000, the fixed `EDY_RDP_PULSE_SEAT_UID` default) had
+only **one** sink, PipeWire's own `auto_null` fallback ("Dummy Output"): the named HDMI monitor no longer
+existed at all, so guacd's audio capture had nothing valid to bind to. Separately, uid 1000 turned out not
+even to be the right seat to be listening to: `loginctl` showed the GDM greeter's own session (a distinct,
+stable system account, `gdm-greeter`) as the one actually active on `seat0`, and **its** PipeWire instance
+had a real, working USB speaker device — the audio was there, just under a different uid's session than the
+one hardcoded in `.env`.
+- **Root cause, generalized:** both "which uid is the seat" (`EDY_RDP_PULSE_SEAT_UID`, previously a fixed
+  number, default `1000`) and "which sink that uid plays to" (`PULSE_SOURCE`, previously a hand-typed,
+  one-time `pactl get-default-sink` paste) were static configuration for something that is not static: the
+  active seat0 session can be the GDM greeter or any of several human users over time, and a sink can
+  disconnect or a different one can become default independent of any of this project's own code.
+- **Fix: `EDY_RDP_PULSE_SEAT_UID=auto` and `PULSE_SOURCE=auto`, both now the default.** `edy-rdp-pulse-bind`
+  (unconditionally, on every guacd start, and on every login/logout via a new `edy-rdp-pulse-seat-auto.path`
+  → `edy-rdp-pulse-rebind-auto.service` pair) resolves the uid via `loginctl` (whichever session is
+  `Seat=seat0`+`Active=yes` right now — covering the GDM greeter and a mirrored human login as the SAME
+  mechanism, not two separate code paths, and falling back to uid 1000 if no such session exists at all)
+  and the sink via `pactl get-default-sink` run directly over that uid's own socket. The resolved
+  `PULSE_SOURCE` is written to a generated file, `/run/edy-rdp-pulse/pulse-source.env`, which
+  `edy-rdp-guacd.service` now loads as a second `EnvironmentFile=` — because unlike the socket bind (which
+  reaches an already-running container via the existing shared-mount propagation, I42), `PULSE_SOURCE` is a
+  container **start-time** env var, so a changed value can only reach guacd by restarting it. The new
+  `-auto` rebind service does that restart, with `systemctl try-restart` (a stopped guacd is left stopped)
+  and only when the resolved value actually changed — `edy-rdp-guacd`'s own `ExecStartPre` never restarts
+  itself, it just re-resolves and re-binds on every start it was already going to make anyway.
+- **An explicit pin is never touched.** A numeric `EDY_RDP_PULSE_SEAT_UID` or a literal `PULSE_SOURCE=
+  <sink>.monitor` keeps exactly the pre-I59 behavior (docs/AUDIO.md's "Pinning a specific device"),
+  including the exact same `edy-rdp-pulse-seat@<uid>.path` mechanism unchanged. Leaving `PULSE_SOURCE`
+  unset (commented out, the default) still means no audio channel at all — unchanged — and a stale
+  generated file left by an *earlier* auto run is actively deleted in that case, so "audio off" cannot
+  accidentally resume streaming just because it once was.
+- **Migration.** `deploy.sh`'s new `migrate_pulse_auto_defaults()` (same idiom, same unconditional/exact-
+  full-line-match guard as I55's `migrate_shadow_group_rename()`) rewrites a deployed `.env` to `auto` for
+  either key ONLY when it still carries the exact old shipped default verbatim (`EDY_RDP_PULSE_SEAT_UID=
+  1000`, or `PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor` — the same string that has
+  always been the `.envdefault` example) — a deliberately customized value, even one that happens to equal
+  either of those, is indistinguishable from "never customized" this way and is left alone either way it
+  goes, which is the correct, safe side to err on.
+- **Known, accepted gap:** the login/logout-triggered mechanism reacts to the *active seat changing*, not
+  a same-uid mid-session change (the already-active user plugs in a new USB headset). Nothing currently
+  re-resolves for that short of a guacd restart. Named here rather than silently left (see I57 for the
+  shape this takes elsewhere).
+- **Verification:** new `pulse_bind_auto_resolves_seat_uid` and `pulse_bind_auto_resolves_source_preview`
+  in `tests/installer_tests.sh` (hermetic: a fake `loginctl`/`pactl` earlier in `PATH`), covering the
+  greeter-active case, the no-active-session fallback, a seat-less-but-"active" session correctly excluded
+  by the `Seat=seat0` filter specifically (not just the `Active=yes` one), an explicit `--seat-uid` never
+  triggering auto-resolution at all, and a pin/unset `PULSE_SOURCE` never being previewed as `auto` —
+  every one of these mutation-tested. New `deploy_migrate_pulse_auto_defaults` mirrors I55's own migration
+  test structure. `run_tests.sh` green throughout. **Live-verified against edt1's actual current state**
+  (read-only `--check` queries, no host state changed by the verification itself): with nobody logged in
+  at the physical console, `EDY_RDP_PULSE_SEAT_UID=auto` correctly resolved to the GDM greeter's uid, and
+  `PULSE_SOURCE=auto` correctly resolved to that session's real USB speaker device — exactly the audio the
+  fixed, stale `.env` value was missing.

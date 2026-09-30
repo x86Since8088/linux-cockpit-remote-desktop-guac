@@ -1,0 +1,16 @@
+[Unit]
+Description=edy-rdp resolve and bind the currently active seat's pulse audio
+
+[Service]
+Type=oneshot
+# EDY_RDP_PULSE_SEAT_UID (if pinned to a number rather than 'auto') and
+# EDY_RDP_PULSE_SEAT_SOCKET still win over auto-resolution - the script itself
+# decides that, this unit just needs the .env in its environment to see them.
+# '-' keeps the unit startable on a host with no .env yet.
+EnvironmentFile=-@ENV_FILE@
+# --auto-restart-guacd: unlike the socket bind (which reaches a running
+# container via mount propagation with no restart), PULSE_SOURCE is a
+# container start-time env var - a resolved value that changed can only reach
+# guacd by restarting it. edy-rdp-guacd.service's OWN ExecStartPre never passes
+# this (it would be restarting the unit it is a prerequisite of).
+ExecStart=@LIBEXEC@/edy-rdp-pulse-bind --auto-restart-guacd

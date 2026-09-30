@@ -124,29 +124,42 @@ GUACD_ENTRYPOINT=/usr/local/sbin/guacd
 # socket not owned by the seat uid: root mounts nothing it has not vetted), and the
 # container mounts that directory read-only, as a slave, at /run/pulse - so guacd
 # sees /run/pulse/native and can write nothing back. Because the directory is
-# shared, a bind done at LOGIN (edy-rdp-pulse-seat@<uid>.path watches
-# /run/user/<uid>/pulse and fires when 'native' appears) propagates live into the
-# running container: audio works for the next session, no guacd restart. (A TCP
-# endpoint was tried first but pipewire-pulse does not deliver recording audio
-# over module-native-protocol-tcp.)
-# To enable:
-#   1. Find the monitor of the sink the desktop plays to, as the seat user:
-#        pactl get-default-sink          # e.g. alsa_output.pci-0000_01_00.1.hdmi-stereo
-#      then append ".monitor" for PULSE_SOURCE below.
-#   2. Uncomment PULSE_SERVER + PULSE_SOURCE, then: systemctl restart edy-rdp-guacd
+# shared, a bind done at LOGIN propagates live into the running container: audio
+# works for the next session, no guacd restart. (A TCP endpoint was tried first
+# but pipewire-pulse does not deliver recording audio over
+# module-native-protocol-tcp.)
 #
-# Use an EXPLICIT monitor name, NOT the @DEFAULT_MONITOR@ alias: that alias does
-# not resolve on pipewire-pulse and records silence. A sink's ".monitor" is what
-# is PLAYING on the desktop -- never a microphone. Left unset = no audio channel.
+# To enable: uncomment PULSE_SERVER + PULSE_SOURCE below, then
+# systemctl restart edy-rdp-guacd (or re-run deploy.sh --with-units on a fresh
+# install). PULSE_SOURCE=auto (I59, the default once enabled) re-resolves, on
+# every seat login/logout and every guacd start, WHICHEVER sink is actually
+# default for WHICHEVER session is active on seat0 right now (the GDM greeter
+# before anyone logs in, the logged-in user's own session after - "GDM and
+# mirroring scenarios" without needing to know which one it is ahead of time),
+# via `pactl get-default-sink` over that seat's own socket. To pin a specific
+# device instead regardless of who is active, name its monitor explicitly:
+#   pactl get-default-sink          # (as the seat user) e.g. alsa_output.pci-0000_01_00.1.hdmi-stereo
+#   PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor
+# Use an EXPLICIT monitor name or "auto", NOT the @DEFAULT_MONITOR@ alias: that
+# alias does not resolve on pipewire-pulse and records silence. A sink's
+# ".monitor" is what is PLAYING on the desktop -- never a microphone. Left
+# unset (commented out, the default) = no audio channel at all, unchanged by
+# any of the above.
 #
-# Numeric uid of the SEAT user whose pulse socket carries desktop audio. deploy.sh
-# --with-units enables edy-rdp-pulse-seat@<this uid>.path, which binds
-# /run/user/<uid>/pulse/native into the container's /run/pulse the moment it appears.
-EDY_RDP_PULSE_SEAT_UID=1000
+# The uid whose pulse socket carries desktop audio. "auto" (I59, the default)
+# re-resolves it the same way as PULSE_SOURCE above: deploy.sh --with-units
+# enables edy-rdp-pulse-seat-auto.path, which watches for ANY login/logout and
+# re-derives who is actually active via loginctl on every one (a login/logout
+# by some unrelated account on a multi-user host is a harmless no-op, not a
+# wrong bind). Pin a specific uid instead to always mirror ONE particular
+# seat regardless of who else is active: deploy.sh --with-units then instead
+# enables edy-rdp-pulse-seat@<this-uid>.path, which only reacts to that one
+# uid's own login/logout (the pre-I59 behavior, unchanged).
+EDY_RDP_PULSE_SEAT_UID=auto
 # Full path override of that seat socket (wins over the uid above when set).
 #EDY_RDP_PULSE_SEAT_SOCKET=/run/user/1000/pulse/native
 #PULSE_SERVER=unix:/run/pulse/native
-#PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor
+#PULSE_SOURCE=auto
 # Upgrading from 1.3.x: PULSE_SERVER=unix:/run/pulse.sock is refused as stale - change it to unix:/run/pulse/native.
 
 # --- self-update (check for / apply / roll back a newer tagged Release) -----

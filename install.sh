@@ -82,8 +82,11 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        edy-rdp-unlock@.service edy-rdp-waylandvnc@.service edy-rdp-deskui@.service
        # Audio: a path unit per seat uid that binds the seat's pulse socket into the
        # SHARED /run/edy-rdp-pulse the moment it appears (login), so it propagates into
-       # the running guacd container without a restart (KNOWN_ISSUES I42).
+       # the running guacd container without a restart (KNOWN_ISSUES I42). The -auto
+       # pair (no %i) is what EDY_RDP_PULSE_SEAT_UID=auto (the default, I59) actually
+       # enables; the %i-templated pair stays for a pinned, explicit-uid seat.
        edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service
+       edy-rdp-pulse-seat-auto.path edy-rdp-pulse-rebind-auto.service
        # Self-update: deliberately NOT templated (no %i) -- see
        # systemd/edy-rdp-selfupdate-apply.service.in for why that is a stronger
        # property here than the %i-templated units above.

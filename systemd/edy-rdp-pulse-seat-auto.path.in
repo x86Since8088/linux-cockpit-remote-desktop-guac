@@ -1,0 +1,38 @@
+[Unit]
+Description=edy-rdp watch for any login/logout (audio auto-follows the active seat)
+# I59: what EDY_RDP_PULSE_SEAT_UID=auto (the default) actually enables, in place
+# of edy-rdp-pulse-seat@<uid>.path (which stays available for a PINNED, explicit
+# uid). Fires edy-rdp-pulse-rebind-auto.service on any change under /run/user -
+# the least specific watch that still covers "the active seat0 session changed",
+# since which uid that even IS can change (the GDM greeter's own uid before a
+# login, a human's uid after) and systemd path units cannot watch a variable
+# path. The rebind service re-derives who is actually active via loginctl on
+# every run rather than trusting which uid's directory changed, so a login or
+# logout by some UNRELATED account on this host (there are several on edt1 -
+# other podman-* service users, another human user) is a harmless no-op wakeup,
+# not a wrong bind: it costs one loginctl query and, if nothing is actually
+# different, no write and no guacd restart.
+#
+# PathChanged=, not PathExists=, for the same busy-loop reason as
+# edy-rdp-pulse-seat@.path (see that unit's own comment): PathExists= is
+# re-evaluated the instant the triggered oneshot exits, so a directory that
+# still exists (/run/user always does) would restart the service in a tight
+# loop and trip StartLimitBurst. PathChanged= is an inotify watch: it fires
+# once per event (a subdirectory created or removed), never for a state.
+#
+# Known, accepted gap: this fires on LOGIN/LOGOUT transitions, not on a
+# same-uid mid-session change (e.g. the already-active user plugs in a new USB
+# headset). edy-rdp-guacd.service's own ExecStartPre re-resolves on every guacd
+# (re)start regardless, so a restart (deploy, reboot, an operator's own
+# systemctl restart) also self-heals this; nothing else currently triggers a
+# fresh resolve mid-session. Named here rather than silently left (I59).
+#
+# No placeholder in this file; it is still a .in so it renders and is placed
+# like every other unit (one path through install.sh, one manifest entry).
+
+[Path]
+PathChanged=/run/user
+Unit=edy-rdp-pulse-rebind-auto.service
+
+[Install]
+WantedBy=multi-user.target

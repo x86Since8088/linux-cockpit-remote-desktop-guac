@@ -1,3 +1,26 @@
+## 1.10.3.20260930 - 2026-09-30
+
+Fixes a live-reported bug (I59): edt1's `PULSE_SOURCE` named a sink that no longer existed on the host at
+all, and the fixed seat uid it was bound to (1000) turned out not to be the actually-active session anyway
+— the GDM greeter's own session was, and it had a real, working USB speaker device.
+
+- `EDY_RDP_PULSE_SEAT_UID=auto` and `PULSE_SOURCE=auto` are now the defaults. Both re-resolve dynamically:
+  the uid via `loginctl` (whichever session is active on `seat0` right now — the GDM greeter before a
+  login, a human's own session after, as ONE mechanism rather than two separate code paths), the sink via
+  `pactl get-default-sink` over that uid's own socket. Re-resolves on every login/logout (a new
+  `edy-rdp-pulse-seat-auto.path` → `edy-rdp-pulse-rebind-auto.service` pair) and on every guacd start.
+- The resolved `PULSE_SOURCE` lands in a new generated file guacd's unit loads as a second
+  `EnvironmentFile=`, since (unlike the socket bind) it is a container start-time env var — a changed
+  value can only reach guacd by restarting it, which the new rebind service does, only when it changed.
+- An explicit pin (a numeric seat uid, or a literal sink name) is completely unaffected — same behavior as
+  before. Leaving `PULSE_SOURCE` unset still means no audio channel at all.
+- `deploy.sh` migrates an already-deployed `.env` to `auto` for either key, but ONLY when it still carries
+  the exact old shipped default verbatim — any deliberately customized value is left alone.
+- New `pulse_bind_auto_resolves_seat_uid`, `pulse_bind_auto_resolves_source_preview`, and
+  `deploy_migrate_pulse_auto_defaults` in `tests/installer_tests.sh`, mutation-tested. Live-verified
+  (read-only) against edt1's actual current state: correctly resolved to the GDM greeter's uid and its
+  real USB speaker device.
+
 ## 1.10.2.20260930 - 2026-09-30
 
 New capability (I58): a "Type Clipboard" button next to Send/Receive clip, working around the confirmed
