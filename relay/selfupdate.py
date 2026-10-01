@@ -58,6 +58,7 @@ ROLLBACK_UNIT = "edy-rdp-selfupdate-rollback.service"
 APPLY_TIMEOUT = 300     # network fetch + extract + deploy.sh + restart + health-check(+rollback)
 ROLLBACK_TIMEOUT = 120
 RELAY_UNIT = "edy-rdp-relay.service"
+FIREWALL_UNIT = "edy-rdp-firewall.service"
 
 HEALTH_TOTAL_TIMEOUT = 20      # total time to wait for the relay to come back healthy
 HEALTH_ATTEMPT_TIMEOUT = 3     # per-attempt (systemctl is-active / control-socket ping)
@@ -575,7 +576,36 @@ def swap_payload_and_install(root, payload_name, timeout=150):
     if p.returncode != 0:
         tail = p.stdout.decode("utf-8", "replace")[-2000:] if p.stdout else ""
         return (False, "install.sh exited %d:\n%s" % (p.returncode, tail))
-    return (True, "payload -> %s (install.sh completed)" % payload_name)
+    fw = refresh_active_firewall()
+    return (True, "payload -> %s (install.sh completed%s)" % (payload_name, fw))
+
+
+def refresh_active_firewall(timeout=30):
+    """KNOWN_ISSUES I61. install.sh COPIES the nft rules and the reserved-ports
+    sysctl drop-in but never touches running state; the kernel reads them only
+    when edy-rdp-firewall.service starts or reloads. deploy.sh reloads an
+    already-active unit itself (refresh_active_firewall() there), but a payload
+    swap here runs install.sh DIRECTLY - so without this, a rollback would leave
+    the files of one version on disk and the rules of another in force until the
+    next reboot. Same contract as deploy.sh's: only an ALREADY-active unit is
+    touched, and reload-or-restart is an atomic nft replace on a unit that has
+    ExecReload= (1.10.7+); an older unit file falls back to a restart. Never
+    raises: a failure is reported in the returned suffix, and install.sh
+    --verify names the drift."""
+    try:
+        if subprocess.run(["systemctl", "is-active", "-q", FIREWALL_UNIT],
+                          timeout=timeout, check=False).returncode != 0:
+            return ""
+        subprocess.run(["systemctl", "daemon-reload"], timeout=timeout, check=False)
+        r = subprocess.run(["systemctl", "reload-or-restart", FIREWALL_UNIT],
+                           timeout=timeout, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            return "; %s reload FAILED: %s" % (
+                FIREWALL_UNIT, (r.stderr or b"").decode("utf-8", "replace").strip()[:200])
+        return "; %s reloaded" % FIREWALL_UNIT
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "; %s reload FAILED: %s" % (FIREWALL_UNIT, exc)
 
 
 def daemon_reload(timeout=30):

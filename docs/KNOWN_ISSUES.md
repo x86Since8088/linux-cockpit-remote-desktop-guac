@@ -1828,7 +1828,11 @@ rules, and gained an `ExecReload=` that re-applies everything with no window (ea
 atomic `nft -f` replace). `deploy.sh` reloads an ALREADY-active firewall unit on every deploy — with or
 without `--with-units`, so self-update (which never passes it) gets the new rules too — and
 `--with-units` uses `enable` + `reload-or-restart` instead of `enable --now`, which was a no-op on the
-active oneshot and would have left the stateless rule loaded until the next reboot.
+active oneshot and would have left the stateless rule loaded until the next reboot. Self-update's
+rollback paths (automatic, on a failed health check, and `edy-rdp-selfupdate-rollback.service`) swap the
+payload and run `install.sh` directly rather than `deploy.sh`, so `relay/selfupdate.py`
+`swap_payload_and_install()` now does the same reload of an already-active firewall unit (found by a
+cross-model review of this fix; covered by `relay/test_selfupdate.py` `SwapRefreshesActiveFirewall`).
 `install.sh --verify` checks that the live `ip_local_reserved_ports` covers the range, warns when another
 sysctl.d file also sets that key (the kernel keeps one list and the last writer replaces it whole), and,
 as root, that the LOADED `edy_rdp_headless` table is the stateful one.

@@ -13,7 +13,8 @@ destination. On edt1 that flapped edy-proxy-go's public front-door VIP ~30 times
   `--uninstall` (which also releases the live reservation when it is exactly ours).
 - `edy-rdp-firewall.service` applies the sysctl and has an atomic `ExecReload=`; `deploy.sh` reloads an
   already-active firewall unit on every deploy (self-update included) and `--with-units` no longer
-  relies on `enable --now`, which never re-read the rules on an upgraded host.
+  relies on `enable --now`, which never re-read the rules on an upgraded host. Self-update's rollback
+  paths, which run install.sh directly, do the same reload (`relay/selfupdate.py`).
 - `install.sh --verify`: live reservation covers the range; warns on a competing sysctl.d writer of the
   key; as root, the LOADED headless table is the stateful one.
 - New `tests/headless_nft_test.sh`, including a kernel test in a throwaway unprivileged user+net
