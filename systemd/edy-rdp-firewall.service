@@ -1,8 +1,8 @@
 [Unit]
-Description=edy-rdp nftables rules (guacd owner-match + headless loopback)
+Description=edy-rdp nftables rules (guacd owner-match + headless loopback) and reserved session ports
 # Load BEFORE guacd/relay so 4822 is never briefly world-reachable on boot.
 Before=edy-rdp-guacd.service edy-rdp-relay.service
-After=nftables.service network-pre.target
+After=nftables.service network-pre.target systemd-sysctl.service
 Wants=network-pre.target
 
 [Service]
@@ -13,8 +13,24 @@ ExecStartPre=-/usr/sbin/nft delete table inet edy_rdp_guacd
 ExecStartPre=-/usr/sbin/nft delete table inet edy_rdp_headless
 ExecStart=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-guacd.nft
 ExecStart=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-headless.nft
+# Take the headless session ports out of the ephemeral allocator NOW, not only
+# at the next boot's systemd-sysctl (KNOWN_ISSUES I61). '-': a host that refuses
+# the write (a container without a writable /proc/sys) must still get its
+# firewall; install.sh --verify reports the reservation as missing instead.
+ExecStart=-/usr/sbin/sysctl -q -p /etc/sysctl.d/90-edy-rdp-headless.conf
+# Reload = re-apply the files as installed, with NO window: each .nft file is an
+# atomic replace (`table; delete table; table {...}` is one nft transaction), so
+# unlike a restart (ExecStop deletes both tables first) the guards never drop.
+# deploy.sh reloads an already-active unit on every deploy, so an upgrade that
+# changes a rule is enforced at once instead of at the next reboot.
+ExecReload=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-guacd.nft
+ExecReload=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-headless.nft
+ExecReload=-/usr/sbin/sysctl -q -p /etc/sysctl.d/90-edy-rdp-headless.conf
 ExecStop=-/usr/sbin/nft delete table inet edy_rdp_guacd
 ExecStop=-/usr/sbin/nft delete table inet edy_rdp_headless
+# ExecStop deliberately leaves the port reservation in place: reserving ports
+# no daemon is listening on costs nothing, and un-reserving them is uninstall's
+# job (install.sh --uninstall), not a stop's.
 
 [Install]
 WantedBy=multi-user.target

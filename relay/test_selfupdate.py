@@ -195,6 +195,73 @@ class RollbackCandidate(unittest.TestCase):
         self.assertIsNone(su.version_from_payload_name(None))
 
 
+# --- I61: a payload swap re-applies an already-active firewall unit ----------
+
+
+class SwapRefreshesActiveFirewall(unittest.TestCase):
+    """swap_payload_and_install() runs install.sh directly (rollback paths),
+    which only COPIES the nft rules / sysctl drop-in. It must then reload an
+    already-active edy-rdp-firewall.service so the kernel enforces the files on
+    disk - and must never start one that was not active. subprocess is mocked."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp, "payload-1.10.7.20261001"))
+        os.symlink("payload-1.10.7.20261001", os.path.join(self.tmp, "payload"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, firewall_active, reload_rc=0):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            rc = 0
+            if cmd[:2] == ["systemctl", "is-active"]:
+                rc = 0 if firewall_active else 3
+            elif cmd[:2] == ["systemctl", "reload-or-restart"]:
+                rc = reload_rc
+            return subprocess.CompletedProcess(cmd, rc, stdout=b"", stderr=b"boom")
+
+        with mock.patch.object(su.subprocess, "run", side_effect=fake_run):
+            ok, detail = su.swap_payload_and_install(self.tmp, "payload-1.10.7.20261001")
+        return ok, detail, calls
+
+    def test_active_firewall_is_reloaded_after_install(self):
+        ok, detail, calls = self._run(firewall_active=True)
+        self.assertTrue(ok)
+        self.assertTrue(calls[0][0].endswith("install.sh"))
+        self.assertIn(["systemctl", "reload-or-restart", su.FIREWALL_UNIT], calls)
+        self.assertLess(calls.index(["systemctl", "daemon-reload"]),
+                        calls.index(["systemctl", "reload-or-restart", su.FIREWALL_UNIT]))
+        self.assertIn("reloaded", detail)
+
+    def test_inactive_firewall_is_left_alone(self):
+        ok, detail, calls = self._run(firewall_active=False)
+        self.assertTrue(ok)
+        self.assertFalse(any("reload-or-restart" in c for c in calls))
+        self.assertFalse(any("start" in c for c in calls))
+
+    def test_reload_failure_is_reported_not_fatal(self):
+        ok, detail, calls = self._run(firewall_active=True, reload_rc=1)
+        self.assertTrue(ok)            # the swap itself succeeded
+        self.assertIn("reload FAILED", detail)
+
+    def test_failed_install_never_touches_the_firewall(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 1, stdout=b"FATAL x", stderr=b"")
+
+        with mock.patch.object(su.subprocess, "run", side_effect=fake_run):
+            ok, _ = su.swap_payload_and_install(self.tmp, "payload-1.10.7.20261001")
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)
+
+
 # --- check_latest_release (mocked urllib only) -------------------------------
 
 

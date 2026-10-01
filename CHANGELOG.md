@@ -1,3 +1,25 @@
+## 1.10.7.20261001 - 2026-10-01
+
+Fixes a host-wide networking defect (I61, Sev H) found by edy-proxy-go's R52 investigation on edt1: the
+headless session-port rule (`/etc/nftables.d/edy-rdp-headless.nft`) was stateless, and because
+33000-33999 lies inside the ephemeral port range it dropped the replies to every outbound TCP connection
+of the host whose local port landed there — ~3.5 % of all of them, in multi-second bursts per
+destination. On edt1 that flapped edy-proxy-go's public front-door VIP ~30 times a day.
+
+- `hardening/edy-rdp-headless.nft`: `ct state established,related accept` first; loopback accepted; the
+  drop is now `ct state new` only, so new off-box connections to a session port are still refused.
+- New `/etc/sysctl.d/90-edy-rdp-headless.conf` (`net.ipv4.ip_local_reserved_ports = 33000-33999`) takes
+  the session ports out of the ephemeral allocator. Installed/replaced by install.sh, removed by
+  `--uninstall` (which also releases the live reservation when it is exactly ours).
+- `edy-rdp-firewall.service` applies the sysctl and has an atomic `ExecReload=`; `deploy.sh` reloads an
+  already-active firewall unit on every deploy (self-update included) and `--with-units` no longer
+  relies on `enable --now`, which never re-read the rules on an upgraded host. Self-update's rollback
+  paths, which run install.sh directly, do the same reload (`relay/selfupdate.py`).
+- `install.sh --verify`: live reservation covers the range; warns on a competing sysctl.d writer of the
+  key; as root, the LOADED headless table is the stateful one.
+- New `tests/headless_nft_test.sh`, including a kernel test in a throwaway unprivileged user+net
+  namespace that reproduces the incident with the old rule and proves the new one fixes it.
+
 ## 1.10.6.20260930 - 2026-09-30
 
 New capability (I60): a "Logs…" button on the main Connect panel and both pop-out windows, opening a
