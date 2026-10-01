@@ -28,6 +28,9 @@
 #   that silently started all of that is not a deployment anyone should run
 #   twice. Copying files and rendering units is safe and is the default; changing
 #   what this host is RUNNING is opt-in, per flag, and named in the output.
+#   ONE exception, named in the output too: an edy-rdp-firewall.service that is
+#   ALREADY active is reloaded (atomically) on every deploy, so the rules and the
+#   reserved ports this deploy just installed are the ones in force (I61).
 #
 #   install.sh does none of it. It runs in both the dev and the deployed role,
 #   and a dev install that enabled edy-rdp-relay.service would put two relays on
@@ -430,6 +433,20 @@ migrate_legacy_env() {
     fi
 }
 
+refresh_active_firewall() {
+    [[ -z "$D" ]] || return 0
+    if systemctl is-active -q edy-rdp-firewall.service 2>/dev/null; then
+        step "refreshing the active firewall unit (rules + reserved ports, I61)"
+        # the unit file itself may have just changed (1.10.7 added ExecReload=)
+        systemctl daemon-reload || true
+        systemctl reload-or-restart edy-rdp-firewall.service \
+            && say reloaded "edy-rdp-firewall.service (atomic nft replace; reserved ports re-applied)" \
+            || warn "systemctl reload edy-rdp-firewall.service failed - the OLD rules may still be
+       loaded. Check: journalctl -u edy-rdp-firewall.service; nft list table inet edy_rdp_headless"
+    fi
+    return 0
+}
+
 preflight() {
     printf 'deploy pre-flight\n'
     [[ -f "$SRC/install.sh" && -f "$SRC/$ENVDEFAULT" && -f "$SRC/$REQUIRES" && -f "$SRC/$REQUIREMENTS" ]] \
@@ -502,6 +519,17 @@ do_deploy() {
 
     ((WITH_IMAGE)) && { step "guacd image"; pull_image; }
 
+    # The one running-state change a plain deploy makes, and why (I61): install.sh
+    # has just COPIED the nft rules and the reserved-ports sysctl drop-in, but the
+    # kernel only reads them when edy-rdp-firewall.service starts or reloads. A
+    # deploy without --with-units - which is what self-update runs - would
+    # otherwise leave the new files on disk and the OLD rules in force until the
+    # next reboot; that is how a stateless rule can outlive the release that
+    # fixed it. Only a unit that is ALREADY active is touched (a host that never
+    # enabled it stays as it was), and reload is an atomic nft replace: no
+    # window, no session dropped.
+    ((WITH_UNITS)) || refresh_active_firewall
+
     STEP="pruning old payloads"
     local p keepers
     mapfile -t keepers < <(ls -1d "$ROOT_D"/payload-* 2>/dev/null | grep -v "payload-$VERSION\$" | sort -r)
@@ -515,7 +543,12 @@ do_deploy() {
         systemctl daemon-reload
         dbus-send --system --type=method_call --dest=org.freedesktop.DBus \
             / org.freedesktop.DBus.ReloadConfig 2>/dev/null || true
-        systemctl enable --now edy-rdp-firewall.service && say enabled edy-rdp-firewall.service
+        # enable, then reload-or-restart - NOT `enable --now`, which is a no-op on
+        # this already-active oneshot and would leave an upgraded host enforcing
+        # the OLD rules until reboot (I61). Inactive: this starts it.
+        systemctl enable edy-rdp-firewall.service \
+            && systemctl reload-or-restart edy-rdp-firewall.service \
+            && say enabled "edy-rdp-firewall.service (rules + reserved ports applied)"
         systemctl enable --now edy-rdp-guacd.service    && say enabled edy-rdp-guacd.service
         systemctl enable --now edy-rdp-relay.socket edy-rdp-control.socket \
                                edy-rdp-reaper.timer && say enabled "relay+control sockets, reaper timer"
@@ -587,6 +620,8 @@ deployed. This host no longer depends on the development share.
                  actually admits, and what console/remote/vnc need on top of it)
   verify:        ss -tlnp | grep 4822          (127.0.0.1 only)
                  nft list table inet edy_rdp_guacd
+                 nft list table inet edy_rdp_headless    (ct state established,related first)
+                 sysctl net.ipv4.ip_local_reserved_ports  (33000-33999)
                  ls -l /run/edy-rdp/guacd.sock
   rollback:      ln -sfn payload-<older> $ROOT/payload.new \\
                  && mv -T $ROOT/payload.new $ROOT/payload && $ROOT/payload/install.sh

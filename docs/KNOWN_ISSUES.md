@@ -253,7 +253,8 @@ FreeRDP3 guacd regressed 3389 rendering.
   and a pre-made one gets captured empty. An ephemeral gate credential is written to
   `/run/edy-rdp/headless/<uid>.env` (root:cockpit-guac-rdp 0640).
 * The ports are reachable only via loopback (`hardening/edy-rdp-headless.nft`, verified with a netns
-  test); guacd on the host dials 127.0.0.1:<port>.
+  test); guacd on the host dials 127.0.0.1:<port>. Since 1.10.7 that rule is STATEFUL and the range is
+  reserved from the ephemeral allocator — see I61 for what the original stateless rule broke.
 * The relay routes the **isolated** scenario to the CALLER'S OWN session: it starts the unit
   (polkit grant `edy-relay -> edy-rdp-headless@*`), reads port+cred, and REWRITES the guacd connect
   from the SO_PEERCRED identity. The browser supplies and sees no credential; a caller can only reach
@@ -1780,3 +1781,68 @@ component) with:
   a `journalctl -o short-iso` line into timestamp + message) — including empty/blank input, a line with no
   whitespace at all (the whole line is kept as the message rather than silently dropped), and a message
   containing its own internal spaces not being re-split. `run_tests.sh` green throughout.
+
+### I61 · The headless session-port rule dropped replies to ~3.5 % of ALL the host's outbound TCP connections · Sev H · FIXED (1.10.7.20261001)
+Found by edy-proxy-go's R52 investigation on edt1 (its `go/docs/REMEDIATION-PLAN.md`, R52), not by this
+project. **Symptom on that host:** edy-proxy-go's public front-door VIP (192.168.2.16) moved off its
+preferred pod ~30 times in 24 h, each move undone 18 s later — every failure a `GET /up` probe timeout —
+and about 3.5 % of every host → pod connection hung for up to 7 s.
+
+**Root cause:** up to 1.10.6, `hardening/edy-rdp-headless.nft` (installed as
+`/etc/nftables.d/edy-rdp-headless.nft`, payloads 1.9.3 and 1.10.6 confirmed) was stateless:
+
+```
+iif "lo" tcp dport 33000-33999 accept
+tcp dport 33000-33999 drop
+```
+
+33000–33999 lies inside `net.ipv4.ip_local_port_range` (32768–60999). So `tcp dport 33000-33999` matches
+not only a NEW connection to a headless grd session port but also the SYN-ACK and every later reply of
+any OUTBOUND connection this host opened from an ephemeral port in that range — 1000 of the 28232
+ephemeral ports, ≈ 3.5 %. Linux walks ephemeral ports per destination, so once a destination's walk
+enters the range every new connection to it fails until the walk leaves it: the 8–25 s windows.
+**Evidence (2026-10-01, R52):** a tcpdump on podman2 and in the pod showed the pod's SYN-ACK reaching the
+host, and the host retransmitting its SYN (same sequence) for up to 7 s; all 29 retransmitting
+connections used local ports 33000–33999, and none of 9,079 others did.
+
+**Fix (two layers, either alone stops the incident):**
+- The rule is stateful: `ct state established,related accept` is the FIRST rule of the chain, loopback
+  is still accepted, and the drop is scoped to `ct state new` — a new off-box connection to a session
+  port is still dropped, which is all this table was ever for. INVALID packets are deliberately not
+  dropped here: they cannot open a connection to a listener (the kernel answers RST or discards them),
+  and dropping them would re-expose outbound flows that conntrack's window tracking misjudges.
+- The range is reserved from the ephemeral allocator: `/etc/sysctl.d/90-edy-rdp-headless.conf`
+  (`net.ipv4.ip_local_reserved_ports = 33000-33999`, shipped as
+  `hardening/edy-rdp-headless-sysctl.conf`), so an outbound connection is never handed a session port
+  at all — which also stops an outbound connection squatting the port a session's grd is about to
+  bind. Explicit `bind()` to a reserved port still works, so grd is unaffected. Chosen over moving the
+  session range below 32768: `ip_local_port_range` is a host tunable, so "outside the range" is not
+  a property this project can guarantee, while a reservation holds whatever the range is; and the
+  33000 + uid − 1000 port is already baked into the headless/reaper/relay code and into every
+  existing user's headless grd config (`grdctl --headless rdp set-port`).
+
+**Install / upgrade / uninstall:** the drop-in is a `SYSFILES` entry, so `install.sh` writes (and on an
+upgrade overwrites) both files and `--uninstall` removes both; uninstall also releases the live
+reservation when it is exactly ours. `edy-rdp-firewall.service` now applies the sysctl after loading the
+rules, and gained an `ExecReload=` that re-applies everything with no window (each `.nft` file is an
+atomic `nft -f` replace). `deploy.sh` reloads an ALREADY-active firewall unit on every deploy — with or
+without `--with-units`, so self-update (which never passes it) gets the new rules too — and
+`--with-units` uses `enable` + `reload-or-restart` instead of `enable --now`, which was a no-op on the
+active oneshot and would have left the stateless rule loaded until the next reboot.
+`install.sh --verify` checks that the live `ip_local_reserved_ports` covers the range, warns when another
+sysctl.d file also sets that key (the kernel keeps one list and the last writer replaces it whole), and,
+as root, that the LOADED `edy_rdp_headless` table is the stateful one.
+
+**Verification:** `tests/headless_nft_test.sh` (in `run_tests.sh`): static checks of the shipped rule and
+its range against the sysctl and the session port base; `install.sh`'s own `--verify` checker accepts the
+new rule and rejects the 1.10.6 one; a staged install over the old file replaces it and `--uninstall`
+removes both files; and, inside a throwaway unprivileged user+network namespace (never the host's
+firewall), the kernel lets a reply to an outbound connection from local port 33000/33005/33999 through,
+still drops a NEW off-box connection to a session-port listener, still admits loopback, reproduces the
+incident with the 1.10.6 rule (mutation check), and — with the drop-in applied and the ephemeral range
+narrowed to straddle the session range — never hands `connect()` a port in 33000–33999.
+
+**Not covered:** `hardening/edy-rdp-firewall.nft` (3389–3391, not installed) is outside the ephemeral
+range and unaffected. The wayland-vnc ports (34000 + uid − 1000) are bound to 127.0.0.1 with no firewall
+rule, so they have no reply-dropping problem, but they too sit inside the ephemeral range: an outbound
+connection can occupy one before wayvnc binds it. Reserving 34000–34999 as well is a candidate follow-up.

@@ -99,7 +99,10 @@ SYSFILES=(systemd/edy-rdp-tmpfiles.conf:/usr/lib/tmpfiles.d/edy-rdp.conf
           hardening/org.gnome.RemoteDesktop.handover.conf:/etc/dbus-1/system.d/org.gnome.RemoteDesktop.handover.conf
           hardening/edy-rdp-headless.rules:/etc/polkit-1/rules.d/49-edy-rdp-headless.rules
           hardening/edy-rdp-guacd.nft:/etc/nftables.d/edy-rdp-guacd.nft
-          hardening/edy-rdp-headless.nft:/etc/nftables.d/edy-rdp-headless.nft)
+          hardening/edy-rdp-headless.nft:/etc/nftables.d/edy-rdp-headless.nft
+          # Reserves the headless session ports (33000-33999) from the ephemeral
+          # allocator - KNOWN_ISSUES I61. Applied by edy-rdp-firewall.service.
+          hardening/edy-rdp-headless-sysctl.conf:/etc/sysctl.d/90-edy-rdp-headless.conf)
 SEEDS=()
 ENVDEFAULT=.envdefault
 REQUIRES=requires.txt          # OS prerequisites + guacd image (parsed by lib/edy-rdp-requires.sh)
@@ -308,6 +311,48 @@ render_sysfile_to_stdout() {
 # 1.3.0 to 1.3.2 (KNOWN_ISSUES I41). `|| true` is load-bearing here.
 leftover_placeholders() {   # $1 = file, or '-' for stdin; prints "@A@ @B@ " or nothing
     grep -v '^[[:space:]]*#' -- "${1:--}" | grep -o '@[A-Z_]\+@' | sort -u | tr '\n' ' ' || true
+}
+
+# KNOWN_ISSUES I61. The headless session ports (33000-33999) sit inside the
+# kernel's ephemeral range, so the headless input rule must be STATEFUL (accept
+# established/related before anything is dropped, drop only NEW connections) or
+# it black-holes the replies of this host's own outbound connections. Reads a
+# table on stdin - the shipped file or `nft list table` - and answers rc 0 when
+# an established/related accept comes before the first drop and every drop is
+# scoped to `ct state new`. Comments are stripped first: the file's own prose
+# says "drop" more than once. ALWAYS-defined exit status, never a bare grep.
+headless_rule_is_stateful() {
+    awk '{ sub(/#.*/, "") }
+         /ct state established,related accept/ && !est { est = NR }
+         /(^|[[:space:]])drop([[:space:]]*;?[[:space:]]*$)/ {
+             if (!first_drop) first_drop = NR
+             if ($0 !~ /ct state new[[:space:]]/) bad = 1 }
+         END { exit !(est && first_drop && est < first_drop && !bad) }'
+}
+
+# The reservation the sysctl drop-in asks for (net.ipv4.ip_local_reserved_ports),
+# read out of the file itself so there is one place the range is written.
+reserved_ports_wanted() {   # $1 = sysctl file; prints e.g. 33000-33999, or nothing
+    sed -n 's/^[[:space:]]*net[./]ipv4[./]ip_local_reserved_ports[[:space:]]*=[[:space:]]*//p' \
+        -- "$1" 2>/dev/null | tail -n 1 | tr -d '[:space:]' || true
+}
+
+# rc 0 when the kernel's live reserved list ($1, "a-b,c,...") covers every port
+# of $2 ("a-b,c,..."). Another reservation beside ours is fine; a gap is not.
+reserved_ports_cover() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+def ports(spec):
+    out = set()
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+want = ports(sys.argv[2])
+sys.exit(0 if want and want <= ports(sys.argv[1]) else 1)
+PY
 }
 
 libexec_src()  { printf '%s\n' "$SRC/${1%%:*}"; }
@@ -716,6 +761,49 @@ $(sed 's/^/    /' <<<"$plan")"
     else
         fail "prerequisites missing or below minimum: ${REQ_MISSING[*]} ${REQ_OUTDATED[*]} - the relay's bootstrap refuses to start. Fix: $(req_fix_command "${REQ_MISSING[@]}" "${REQ_OUTDATED[@]}")"
     fi
+    # 7. I61: the headless session ports are reserved from the ephemeral
+    #    allocator, and the headless rule the KERNEL holds is the stateful one.
+    #    The files can be right while the kernel is not: nft and sysctl read them
+    #    only when edy-rdp-firewall.service starts or reloads, and an upgrade that
+    #    stopped at `systemctl enable --now` (a no-op on an active oneshot) keeps
+    #    enforcing the old stateless rule until the next reboot.
+    local rsv_file="$D/etc/sysctl.d/90-edy-rdp-headless.conf" rsv_want rsv_live other loaded
+    if [[ -n "$D" ]]; then
+        say skipped "reserved session ports (staged)"
+    elif [[ ! -f "$rsv_file" ]]; then
+        say skipped "reserved session ports ($rsv_file is not installed - reported above)"
+    else
+        rsv_want="$(reserved_ports_wanted "$rsv_file")"
+        rsv_live="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports 2>/dev/null || true)"
+        if [[ -n "$rsv_want" ]] && reserved_ports_cover "$rsv_live" "$rsv_want"; then
+            ok "net.ipv4.ip_local_reserved_ports covers $rsv_want (live: $rsv_live)"
+        else
+            fail "net.ipv4.ip_local_reserved_ports is '${rsv_live}', which does not cover '${rsv_want}' - an outbound connection can be handed a headless session port (I61). Fix: systemctl reload edy-rdp-firewall.service"
+        fi
+        # The kernel keeps ONE list and every writer replaces it whole, so a second
+        # sysctl.d file setting the key silently wins or loses against ours at boot.
+        other="$(grep -lsE '^[[:space:]]*-?net[./]ipv4[./]ip_local_reserved_ports' \
+                   /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf \
+                   /usr/local/lib/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf 2>/dev/null \
+                 | grep -vxF "$rsv_file" | sort -u || true)"
+        [[ -z "$other" ]] || warn "net.ipv4.ip_local_reserved_ports is ALSO set by: $(tr '\n' ' ' <<<"$other")
+       The kernel holds one list and the last file (by name) replaces it whole at boot.
+       Merge every reservation, including $rsv_want, into ONE value."
+    fi
+    if   [[ -n "$D" ]];      then say skipped "loaded headless rule (staged)"
+    elif [[ $EUID -ne 0 ]];  then say skipped "loaded headless rule (needs root to list nftables)"
+    elif ! systemctl is-active -q edy-rdp-firewall.service 2>/dev/null; then
+         say skipped "loaded headless rule (edy-rdp-firewall.service not active)"
+    else
+        loaded="$(nft list table inet edy_rdp_headless 2>/dev/null || true)"
+        if [[ -z "$loaded" ]]; then
+            fail "table inet edy_rdp_headless is not loaded although edy-rdp-firewall.service is active (systemctl reload edy-rdp-firewall.service)"
+        elif headless_rule_is_stateful <<<"$loaded"; then
+            ok "loaded edy_rdp_headless rule is stateful (established/related accepted before a NEW-only drop)"
+        else
+            fail "the LOADED edy_rdp_headless rule is not stateful - it drops replies to this host's own outbound connections whose local port is 33000-33999 (I61). Fix: systemctl reload edy-rdp-firewall.service"
+        fi
+    fi
 }
 
 do_uninstall() {
@@ -738,6 +826,22 @@ do_uninstall() {
         systemctl reset-failed 2>/dev/null || true   # else a removed unit lingers as failed
     fi
     for f in "${SYSFILES[@]}"; do remove_file "$D${f#*:}"; done
+    # I61: removing the sysctl drop-in only stops the NEXT boot reserving the
+    # headless ports; the running kernel still holds the list. Release it - but
+    # only when the live value is exactly what our drop-in asked for. Anything
+    # else is a list somebody else has written into since, and is theirs.
+    if [[ -z "$D" ]]; then
+        local rsv_want rsv_live
+        rsv_want="$(reserved_ports_wanted "$SRC/hardening/edy-rdp-headless-sysctl.conf")"
+        rsv_live="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports 2>/dev/null || true)"
+        if [[ -n "$rsv_want" && "$rsv_live" == "$rsv_want" ]]; then
+            { printf '\n' > /proc/sys/net/ipv4/ip_local_reserved_ports; } 2>/dev/null \
+                && say released "net.ipv4.ip_local_reserved_ports ($rsv_want)" \
+                || warn "could not clear net.ipv4.ip_local_reserved_ports ($rsv_want); it lapses at reboot"
+        elif [[ -n "$rsv_live" ]]; then
+            say kept "net.ipv4.ip_local_reserved_ports=$rsv_live (not exactly ours, '$rsv_want'; not touched)"
+        fi
+    fi
     for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do n="$(libexec_name "$f")"; remove_link "$LIBEXECDIR_D/$n"; done
     # A __pycache__ left by a version that ran before PYTHONDONTWRITEBYTECODE.
     # Swept file by file and then rmdir'd - NOT `rm -r`, which is banned under

@@ -6,7 +6,8 @@
 # and so does tests/installer_tests.sh: a staged (DESTDIR) install of a temp
 # copy of this tree, run to completion, then --verify, .env placement and
 # validation, requires.txt parsing, the bootstrap's venv decision and the
-# pulse-bind plan. All non-root, nothing on the host touched.
+# pulse-bind plan. All non-root, nothing on the host touched. And
+# tests/headless_nft_test.sh (I61), whose kernel half runs in a private netns.
 set -Eeuo pipefail
 SRC="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # The greps below name paths relative to the repo root; run from anywhere.
@@ -146,6 +147,15 @@ echo "== installer / env / requires / bootstrap / pulse-bind =="
 # copy (the I41 regression test), .env placement/reconcile/refusal, the requires
 # lib, the bootstrap's venv path with a wheel the test builds, pulse-bind --check.
 bash "$SRC/tests/installer_tests.sh" || { echo "  FAIL"; fail=1; }
+
+echo "== headless session-port firewall: stateful rule + reserved ports (I61) =="
+# tests/headless_nft_test.sh: the shipped nft rule accepts ct established,related
+# before a NEW-only drop, install.sh ships/replaces/removes it and the sysctl
+# drop-in, and - inside a throwaway unprivileged user+net namespace, never the
+# host's - the kernel lets a reply to an outbound connection from 33005 through,
+# still drops a new off-box connection to a session port, and the 1.10.6 rule
+# reproduces the incident. The kernel half SKIPs where userns are unavailable.
+bash "$SRC/tests/headless_nft_test.sh" || { echo "  FAIL"; fail=1; }
 
 echo "== Playwright end-to-end (external harness, if present) =="
 # The browser suite lives in the working-tree harness cockpit-e2e/ (outside this
