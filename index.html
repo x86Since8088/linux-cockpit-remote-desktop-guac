@@ -18,6 +18,7 @@
     <button class="tab" id="tab-deskui" data-panel="panel-deskui">Desktop UI</button>
     <button class="tab" id="tab-update" data-panel="panel-update">Update<span id="update-badge" class="badge-dot" hidden></span></button>
     <button class="tab" id="tab-selftests" data-panel="panel-selftests">Self Tests</button>
+    <button class="tab" id="tab-architecture" data-panel="panel-architecture">Architecture</button>
   </div>
 
   <section id="panel-connect" class="panel">
@@ -188,6 +189,85 @@
     </table>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.7.20261001</span></footer>
+  <section id="panel-architecture" class="panel" hidden>
+    <div class="arch">
+      <h2>How a connection reaches a desktop</h2>
+      <p>Opening this tab leaves a live connection on Connect running. The browser never talks to guacd or to gnome-remote-desktop. Cockpit's HTTPS session carries the frames to a local relay, and the relay is the only program allowed to open guacd.</p>
+      <pre>browser
+  Cockpit HTTPS (your Cockpit login)
+    cockpit-bridge, running as you
+      edy-rdp-relay on /run/edy-rdp/guacd.sock
+        the kernel reports your uid (SO_PEERCRED)
+        nftables admits only the relay user to 127.0.0.1:4822
+          guacd
+            RDP session: x11vnc → Xvfb ← xfreerdp3 → gnome-remote-desktop
+            VNC session: guacd's own VNC client, no FreeRDP bridge</pre>
+      <p>Each RDP connection gets its own bridge. <code>xfreerdp3</code> speaks to gnome-remote-desktop and draws into a private <code>Xvfb</code>, and <code>x11vnc</code> publishes that screen on a loopback port with a per-connection password. guacd's built-in RDP client cannot complete this handshake, which is why the bridge exists. Closing the connection removes the bridge. The desktop behind it stays.</p>
+
+      <h2>Session choices</h2>
+      <table>
+        <thead><tr><th>Session</th><th>Where it connects</th><th>What you get</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Login screen</td>
+            <td><code>127.0.0.1:3390</code>, NLA, server-held door key</td>
+            <td>The GDM greeter. After you sign in, your desktop. That desktop is a headless session with no seat, so it is not the physical monitor.</td>
+          </tr>
+          <tr>
+            <td>Console</td>
+            <td><code>127.0.0.1:3389</code>, NLA, mirror of the physical screen</td>
+            <td>The screen on the machine. Requires administrative access, and the shadow group when someone else is signed in at the seat. With nobody signed in on the physical seat, Connect opens the login screen instead. A headless desktop from the login screen has no seat, so it does not count as someone being at the console.</td>
+          </tr>
+          <tr>
+            <td>Virtual monitor</td>
+            <td><code>127.0.0.1:3389</code>, NLA, extend</td>
+            <td>An extra monitor inside your own logged-in session.</td>
+          </tr>
+          <tr>
+            <td>Isolated session</td>
+            <td><code>127.0.0.1</code>, port <code>33000 + (uid − 1000)</code></td>
+            <td>Your own headless GNOME desktop, started on demand. The relay supplies the credential from your Cockpit identity. The first start takes about 20 seconds. A reconnect inside the idle window returns to the same desktop.</td>
+          </tr>
+          <tr>
+            <td>Wayland desktop</td>
+            <td><code>127.0.0.1</code>, port <code>34000 + (uid − 1000)</code></td>
+            <td>Your own sway desktop over VNC. No door key. Loopback only, and guacd connects to it directly.</td>
+          </tr>
+          <tr>
+            <td>Remote host (RDP)</td>
+            <td>The IPv4 address you type</td>
+            <td>That computer's RDP server. The address has to be on the administrator's allow-list. The certificate is stored on first use.</td>
+          </tr>
+          <tr>
+            <td>Remote host (VNC)</td>
+            <td>The IPv4 address you type</td>
+            <td>That VNC server, dialed by guacd directly, on the same allow-list. A password is sent only if that server asks for one.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Login screen, and the desktop it opens</h2>
+      <p>The door key lets the connection in. The password you type at the greeter is what signs you in. gnome-remote-desktop then moves that connection from the greeter onto your desktop: first onto a headless greeter, then onto the handover daemon inside your session.</p>
+      <p>The session keeps running if the browser connection dies. The window can keep showing the last frame after the bridge is gone. Mouse and keyboard work only while a connection is attached. When the sign-in connection drops on its own, this page opens one new connection to port 3390, and gnome-remote-desktop hands it to the desktop you already signed into. The session stays logged in. Disconnect, an explained error, and a second drop before the new connection has been up for 15 seconds leave the page disconnected. Changing sound or resolution reconnects on its own and does not use this follow.</p>
+
+      <h2>What a disconnect removes</h2>
+      <ul>
+        <li>Removed with the connection: the FreeRDP bridge (<code>xfreerdp3</code>, <code>Xvfb</code>, <code>x11vnc</code>) and the guacd client.</li>
+        <li>Left running: your desktop session and its gnome-shell. After a login-screen sign-in, the handover daemon stays too.</li>
+        <li>Active Sessions reads the relay's list in <code>/run/edy-rdp/state/sessions.json</code>. That file lives on a tmpfs and is empty after a reboot, together with every bridge.</li>
+      </ul>
+
+      <h2>Who is allowed through</h2>
+      <ul>
+        <li>The <code>cockpit-guac-rdp</code> group is required to open the relay socket.</li>
+        <li>Console, the login screen, and remote hosts require Cockpit administrative access. The relay checks a proof from the server, not the state of a control on this page.</li>
+        <li>Mirroring a physical screen where someone else is signed in also requires the shadow group.</li>
+        <li>An isolated session and a Wayland desktop are started for the uid the kernel reported. The page cannot aim them at another user.</li>
+        <li>A remote host must be an IPv4 address listed in <code>EDY_RDP_REMOTE_ALLOW</code>. An empty list denies every remote target. guacd itself is never published on a host port.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.8.20261003</span></footer>
 </body>
 </html>

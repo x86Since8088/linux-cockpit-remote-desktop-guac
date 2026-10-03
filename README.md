@@ -21,7 +21,8 @@ require typing the host's name to confirm. See
 [docs/DESKTOP-UI-CONTROL.md](docs/DESKTOP-UI-CONTROL.md).
 
 Traffic rides Cockpit's own HTTPS; guacd is reached only through a local relay over an
-AF_UNIX socket. See [docs/SCENARIOS.md](docs/SCENARIOS.md) for screenshots and
+AF_UNIX socket. The same path is on the page's Architecture tab. See
+[docs/SCENARIOS.md](docs/SCENARIOS.md) for screenshots and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data path.
 
 ## How it connects (FreeRDP3 bridge)

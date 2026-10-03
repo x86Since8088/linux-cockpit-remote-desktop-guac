@@ -1475,6 +1475,20 @@
     // physical_session_locked(): a probe error, non-answer or timeout means
     // "connect to console as asked" -- it never blocks a normal connect.
     var CONSOLE_PROBE_MS = 4000;
+    // TESTHOOK:GREETERFOLLOW:BEGIN -- tests/js/greeter_follow.test.js extracts
+    // this verbatim. A greeter connection that drops on its own (the handover
+    // onto the desktop, or the relay being restarted under it) is followed by
+    // one fresh connection to the same sign-in door. That is the reconnect
+    // that lands on the desktop the user just signed into. A Disconnect click
+    // disarms it, an explained error does not follow, and a second drop before
+    // the new connection has been up for a while does not loop.
+    function shouldFollowGreeterDrop(scenario, errored, armed, follows) {
+        return scenario === "greeter" && !errored && !!armed && follows < 1;
+    }
+    // TESTHOOK:GREETERFOLLOW:END
+    var greeterFollowArmed = false;
+    var greeterFollows = 0;
+    var greeterStableTimer = null;
     function resolveConsoleFallback(key) {
         if (key !== "console") return cockpit.resolve(key);
         setStatus("Checking who is signed in on the physical console…");
@@ -1576,6 +1590,10 @@
 
     function start(key, cred, sessiontoken, geomOverride) {
         activeKey = key;
+        // Arm only for the sign-in door. Sound/resolution reconnects and the
+        // Disconnect button clear this before they tear the tunnel down, so
+        // those do not also schedule a follow.
+        greeterFollowArmed = (key === "greeter");
         var t = TARGETS[key], box = $("display");
         var winW = Math.max(box.clientWidth, 640), winH = Math.max(box.clientHeight, 480);
         // Geometry sent to the backend; the browser always scales the result to the
@@ -1706,14 +1724,37 @@
         client.onstatechange = function (s) {
             if (s === 3) { currentUuid = (tunnel && tunnel.uuid ? String(tunnel.uuid) : "").replace(/^\$/, ""); }
             if (s === 3) applyScale();
-            if (s === 3) setStatus(
+            if (s === 3) {
+                if (key === "greeter") {
+                    greeterFollowArmed = true;
+                    if (greeterStableTimer) clearTimeout(greeterStableTimer);
+                    // A connection that stays up is a real desktop session. A later
+                    // drop may follow once more; a drop during the handover may not
+                    // chain into a reconnect loop.
+                    greeterStableTimer = setTimeout(function () { greeterFollows = 0; }, 15000);
+                }
+                setStatus(
                 key === "isolated" ? "Connected to your isolated desktop."
                 : key === "console" ? "Connected to the physical console."
                 : key === "greeter" ? "Connected to the sign-in screen."
                 : key === "vnc"     ? ("Connected to VNC at " + $("host").value.trim() + ".")
             : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
                 : "Connected to your virtual monitor.", "ok");
-            else if (s === 5) { if (!errored) setStatus("Disconnected."); teardown(true); }
+            }
+            else if (s === 5) {
+                var follow = shouldFollowGreeterDrop(key, errored, greeterFollowArmed, greeterFollows);
+                if (follow) {
+                    greeterFollows++;
+                    greeterFollowArmed = false;
+                    setStatus("Sign-in connection dropped. Reconnecting to the desktop…");
+                    showToast("Reconnecting to the desktop you just signed into.");
+                    teardown(true);
+                    window.setTimeout(function () { connect("greeter"); }, 400);
+                } else {
+                    if (!errored) setStatus("Disconnected.");
+                    teardown(true);
+                }
+            }
         };
 
         setStatus("Opening a channel to the relay…");
@@ -2679,7 +2720,7 @@
     // Tab names as they appear in the URL hash (?tab=connect etc.) -- the main
     // page only; pop-outs never show tabs at all (html.monitor .tabs is
     // display:none), so this never runs there.
-    var TAB_NAMES = ["connect", "sessions", "deskui", "update", "selftests"];
+    var TAB_NAMES = ["connect", "sessions", "deskui", "update", "selftests", "architecture"];
     function selectTab(id) {
         var name = id.replace(/^tab-/, "");
         TAB_NAMES.forEach(function (n) {
@@ -2813,6 +2854,7 @@
         $("tab-deskui").addEventListener("click", function () { selectTab("tab-deskui"); });
         $("tab-update").addEventListener("click", function () { selectTab("tab-update"); });
         $("tab-selftests").addEventListener("click", function () { selectTab("tab-selftests"); });
+        $("tab-architecture").addEventListener("click", function () { selectTab("tab-architecture"); });
         $("run-tests").addEventListener("click", runSelfTests);
         $("refresh").addEventListener("click", renderSessions);
         // Desktop UI panel
@@ -2850,6 +2892,7 @@
             if (client && activeKey) {
                 setStatus(soundOn ? "Enabling sound…" : "Muting sound…");
                 trace("sound", "toggle reconnect: dropping and re-establishing " + activeKey + " to renegotiate enable-audio");
+                greeterFollowArmed = false;
                 teardown(true);
                 window.setTimeout(function () { connect(activeKey); }, 80);
             }
@@ -2872,6 +2915,7 @@
         $("resolution").addEventListener("change", function () {
             if (client && activeKey) {
                 setStatus("Applying resolution…");
+                greeterFollowArmed = false;
                 teardown(true);
                 window.setTimeout(function () { connect(activeKey); }, 80);
             }
@@ -2904,6 +2948,7 @@
             // reconnectable until the session TTL. Explicit desktop kill remains
             // available via the Sessions tab's Terminate button.
             setStatus("Disconnecting…");
+            greeterFollowArmed = false;
             teardown(false);
         });
         $("addmon").addEventListener("click", openMonitorWindow);

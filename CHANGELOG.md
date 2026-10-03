@@ -1,3 +1,15 @@
+## 1.10.8.20261003 - 2026-10-03
+
+When the sign-in connection drops on its own after a GDM login, the page reconnects
+to that same door once instead of leaving the last desktop frame with no input (I62).
+Disconnect, an explained error, and a second drop before the new connection has been
+up for 15 seconds do not start another attempt. Sound and resolution changes still
+reconnect on their own.
+
+The Remote Desktop page has an Architecture tab. It shows the browser-to-desktop
+path, which door each Session choice uses, and what stays up when the connection
+drops. Opening the tab does not start or stop a session.
+
 ## 1.10.7.20261001 - 2026-10-01
 
 Fixes a host-wide networking defect (I61, Sev H) found by edy-proxy-go's R52 investigation on edt1: the
