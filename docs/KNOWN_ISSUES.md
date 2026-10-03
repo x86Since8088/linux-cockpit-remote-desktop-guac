@@ -1850,3 +1850,24 @@ narrowed to straddle the session range — never hands `connect()` a port in 330
 range and unaffected. The wayland-vnc ports (34000 + uid − 1000) are bound to 127.0.0.1 with no firewall
 rule, so they have no reply-dropping problem, but they too sit inside the ephemeral range: an outbound
 connection can occupy one before wayvnc binds it. Reserving 34000–34999 as well is a candidate follow-up.
+
+### I62 · Greeter login shows the desktop, then mouse and keyboard do nothing until the pop-out is restarted · Sev M · FIXED (1.10.8.20261003)
+Reported on edt1 2026-10-03. The sign-in screen (scenario `greeter`, port 3390) accepts
+mouse and keyboard. After the GDM password, eddie's desktop is presented and neither
+mouse nor keyboard reaches it. Closing and reopening the pop-out restores both.
+
+**What the live session showed.** The first connection did hand the client from the
+system daemon to the greeter and then to the user session (`Added virtual monitor
+Meta-0` on the headless `gnome-shell`, "No seat assigned"). Eleven seconds later
+`edy-rdp-relay.service` was stopped, xfreerdp was signalled, and gnome-shell logged
+`Removed virtual monitor Meta-0`. The browser kept the last frame. A pop-out restart
+at 13:02 opened a new greeter bridge, repeated the same handover onto the existing
+session 10, added the virtual monitor again, and input worked. Session 10 stayed up
+the whole time (`Remote=yes`, no seat). Nothing was rolled back to the greeter.
+
+**Fix:** an unexpected drop of a `greeter` connection (not Disconnect, not an explained
+error) schedules one fresh `connect("greeter")`. That is the same reconnect the pop-out
+restart performed, and grd attaches it to the desktop that already exists. A second drop
+before that connection has been up for 15 seconds does not chain. Sound and resolution
+reconnects disarm the follow so they do not double-connect. `shouldFollowGreeterDrop`
+is covered by `tests/js/greeter_follow.test.js`.
