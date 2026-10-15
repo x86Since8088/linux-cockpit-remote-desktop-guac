@@ -193,15 +193,204 @@
     <div class="arch">
       <h2>How a connection reaches a desktop</h2>
       <p>Opening this tab leaves a live connection on Connect running. The browser never talks to guacd or to gnome-remote-desktop. Cockpit's HTTPS session carries the frames to a local relay, and the relay is the only program allowed to open guacd.</p>
-      <pre>browser
-  Cockpit HTTPS (your Cockpit login)
-    cockpit-bridge, running as you
-      edy-rdp-relay on /run/edy-rdp/guacd.sock
-        the kernel reports your uid (SO_PEERCRED)
-        nftables admits only the relay user to 127.0.0.1:4822
-          guacd
-            RDP session: x11vnc → Xvfb ← xfreerdp3 → gnome-remote-desktop
-            VNC session: guacd's own VNC client, no FreeRDP bridge</pre>
+      <div class="arch-flow">
+        <ul class="arch-key">
+          <li><span class="swatch ours"></span> Code in this plugin</li>
+          <li><span class="swatch stock"></span> Unmodified dependency</li>
+          <li><span class="swatch patch"></span> Dependency with a local patch on this host</li>
+        </ul>
+        <div class="arch-modes" role="radiogroup" aria-label="Which session to follow">
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-greeter" checked> Login screen</label>
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-console"> Console</label>
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-virtual"> Virtual monitor</label>
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-isolated"> Isolated</label>
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-wayland"> Wayland</label>
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-rrdp"> Remote RDP</label>
+          <label class="arch-mode"><input type="radio" name="arch-path" id="arch-vnc"> Remote VNC</label>
+        </div>
+        <div class="arch-scroll">
+        <svg class="arch-svg" viewBox="0 0 860 480" role="img" aria-labelledby="arch-svg-title arch-svg-desc">
+          <!--
+          Architecture flow SVG. Update this comment when you move a node.
+
+          Grid (viewBox 0 0 860 480, origin top-left, y grows down):
+            Row 1 y=36 h=64 w=136. x = 16, 180, 344, 508, 672.
+            Right edges (x+136): 152, 316, 480, 644, 808. Midline y=68.
+            Row-1 wires run on y=68 from (right edge + 4) to (next x - 4).
+            guacd center x=740, bottom y=100.
+            Bridge frame x=16 y=128 w=500 h=156. Right edge x=516.
+            Chips inside the bridge: y=178 h=52 w=140 at x=32, 186, 340.
+            grd / remote-server slot: x=536 y=146 w=280 h=68.
+            Destination slot: x=536 y=230 w=280 h=58.
+            VNC frame: x=16 y=348 w=800 h=116.
+            VNC rail: x=844, from guacd's right edge (808, 68) down to (844, 390).
+
+          Classes (CSS in guac-rdp.css, keyed off the radios above):
+            n-ours    code this repository ships and runs
+            n-stock   a program we do not modify
+            n-patched gnome-remote-desktop on edt1 (patches/grd-handover-method-call.patch,
+                      apt hold). Not the distro binary, and not a file deploy.sh compiles.
+            lane-rdp  the FreeRDP bridge and the desktop it reaches
+            lane-vnc  Wayland and remote VNC, which never start the bridge
+            wire-common  always on the path (page through guacd)
+            wire-rdp / wire-vnc  one of these two is the live tail
+
+          Ids arch-n-* and the radio ids (arch-greeter, arch-console, arch-virtual,
+          arch-isolated, arch-wayland, arch-rrdp, arch-vnc) are the contract.
+          Do not rename them without updating guac-rdp.css.
+
+          Timeline: .seq glows in order. animation-delay is 0.4s times the hop
+          number in the class (seq-0, seq-1, ...). .wire dashes travel the same
+          order. prefers-reduced-motion stops both and leaves the active path drawn.
+          Wayland and remote VNC dim lane-rdp and light lane-vnc. Remote RDP hides
+          arch-n-grd and shows arch-n-remote-rdp in that same slot.
+          -->
+          <title id="arch-svg-title">How a Remote Desktop connection is built</title>
+          <desc id="arch-svg-desc">Solid boxes are code in this plugin. Dashed boxes are unmodified programs. The amber box is gnome-remote-desktop, which carries a local handover patch on this host. A pulse travels from this page through Cockpit, the relay, the firewall rule, and guacd. Login screen, console, virtual monitor, isolated, and remote RDP continue through the bridge. Wayland and remote VNC stop at guacd.</desc>
+          <defs>
+            <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="context-stroke"/>
+            </marker>
+          </defs>
+
+          <!-- Row 1 wires. Endpoints are the row-1 edges listed in the header comment. -->
+          <path class="wire wire-common" marker-end="url(#arch-arrow)" d="M156 68 H176"/>
+          <path class="wire wire-common" marker-end="url(#arch-arrow)" d="M320 68 H340"/>
+          <path class="wire wire-common" marker-end="url(#arch-arrow)" d="M484 68 H504"/>
+          <path class="wire wire-common" marker-end="url(#arch-arrow)" d="M648 68 H668"/>
+          <!-- guacd bottom (740,100) into the bridge frame (mid x=266). -->
+          <path class="wire wire-rdp" marker-end="url(#arch-arrow)" d="M740 100 V116 H266 V128"/>
+          <!-- bridge right edge (516,203) into the grd slot (536,180). -->
+          <path class="wire wire-rdp" marker-end="url(#arch-arrow)" d="M516 203 H536"/>
+          <!-- grd slot bottom (676,214) into the destination slot (676,230). -->
+          <path class="wire wire-rdp" marker-end="url(#arch-arrow)" d="M676 214 V230"/>
+          <!-- guacd right edge, down the rail x=844, into the VNC frame. -->
+          <path class="wire wire-vnc" marker-end="url(#arch-arrow)" d="M808 68 H844 V390 H816"/>
+
+          <!-- seq-0. This page. OURS. -->
+          <g id="arch-n-page" class="n-ours seq seq-0">
+            <rect x="16" y="36" width="136" height="64" rx="8"/>
+            <text x="84" y="62" text-anchor="middle">This page</text>
+            <text x="84" y="82" text-anchor="middle" class="sub">this plugin</text>
+          </g>
+          <!-- seq-1. Cockpit carries the frames. UNMODIFIED. -->
+          <g id="arch-n-cockpit" class="n-stock seq seq-1">
+            <rect x="180" y="36" width="136" height="64" rx="8"/>
+            <text x="248" y="62" text-anchor="middle">Cockpit</text>
+            <text x="248" y="82" text-anchor="middle" class="sub">unmodified</text>
+          </g>
+          <!-- seq-2. edy-rdp-relay. OURS. SO_PEERCRED lives here. -->
+          <g id="arch-n-relay" class="n-ours seq seq-2">
+            <rect x="344" y="36" width="136" height="64" rx="8"/>
+            <text x="412" y="62" text-anchor="middle">Relay</text>
+            <text x="412" y="82" text-anchor="middle" class="sub">this plugin</text>
+          </g>
+          <!-- seq-3. Our nftables rules. The nftables program itself is not ours. -->
+          <g id="arch-n-nft" class="n-ours seq seq-3">
+            <rect x="508" y="36" width="136" height="64" rx="8"/>
+            <text x="576" y="62" text-anchor="middle">Firewall rule</text>
+            <text x="576" y="82" text-anchor="middle" class="sub">this plugin</text>
+          </g>
+          <!-- seq-4. guacd. UNMODIFIED. Last common hop. -->
+          <g id="arch-n-guacd" class="n-stock seq seq-4">
+            <rect x="672" y="36" width="136" height="64" rx="8"/>
+            <text x="740" y="62" text-anchor="middle">guacd</text>
+            <text x="740" y="82" text-anchor="middle" class="sub">unmodified</text>
+          </g>
+
+          <!-- lane-rdp. The bridge script is ours. The three programs it starts are not. -->
+          <g class="lane-rdp" id="arch-lane-rdp">
+            <rect class="n-frame" x="16" y="128" width="500" height="156" rx="10"/>
+            <text x="32" y="150">Bridge script</text>
+            <text x="148" y="150" class="sub">this plugin</text>
+            <g class="n-stock seq seq-5" id="arch-n-xvfb">
+              <rect x="32" y="178" width="140" height="52" rx="8"/>
+              <text x="102" y="200" text-anchor="middle">Xvfb</text>
+              <text x="102" y="218" text-anchor="middle" class="sub">unmodified</text>
+            </g>
+            <g class="n-stock seq seq-5" id="arch-n-x11vnc">
+              <rect x="186" y="178" width="140" height="52" rx="8"/>
+              <text x="256" y="200" text-anchor="middle">x11vnc</text>
+              <text x="256" y="218" text-anchor="middle" class="sub">unmodified</text>
+            </g>
+            <g class="n-stock seq seq-5" id="arch-n-xfreerdp">
+              <rect x="340" y="178" width="140" height="52" rx="8"/>
+              <text x="410" y="200" text-anchor="middle">xfreerdp3</text>
+              <text x="410" y="218" text-anchor="middle" class="sub">unmodified</text>
+            </g>
+            <text x="32" y="262" class="sub">Started by the script. The packages are not modified.</text>
+          </g>
+
+          <!-- seq-6. Local gnome-remote-desktop. PATCHED on this host. Hidden for remote RDP. -->
+          <g id="arch-n-grd" class="n-patched lane-rdp seq seq-6">
+            <rect x="536" y="146" width="280" height="68" rx="8"/>
+            <text x="676" y="172" text-anchor="middle">gnome-remote-desktop</text>
+            <text x="676" y="194" text-anchor="middle" class="sub">local handover patch</text>
+          </g>
+          <!-- Same slot, remote RDP only. Their server, not our patch. -->
+          <g id="arch-n-remote-rdp" class="n-stock seq seq-6">
+            <rect x="536" y="146" width="280" height="68" rx="8"/>
+            <text x="676" y="172" text-anchor="middle">Their RDP server</text>
+            <text x="676" y="194" text-anchor="middle" class="sub">unmodified</text>
+          </g>
+
+          <!-- seq-7. What the chosen session actually shows. One label per radio. -->
+          <g id="arch-n-dest" class="lane-rdp seq seq-7">
+            <rect x="536" y="230" width="280" height="58" rx="8"/>
+            <g class="dest dest-greeter">
+              <text x="676" y="254" text-anchor="middle">Your desktop</text>
+              <text x="676" y="274" text-anchor="middle" class="sub">existing session after sign-in</text>
+            </g>
+            <g class="dest dest-console">
+              <text x="676" y="254" text-anchor="middle">Physical screen</text>
+              <text x="676" y="274" text-anchor="middle" class="sub">port 3389, mirror</text>
+            </g>
+            <g class="dest dest-virtual">
+              <text x="676" y="254" text-anchor="middle">Extra monitor</text>
+              <text x="676" y="274" text-anchor="middle" class="sub">port 3389, extend</text>
+            </g>
+            <g class="dest dest-isolated">
+              <text x="676" y="254" text-anchor="middle">Your headless GNOME</text>
+              <text x="676" y="274" text-anchor="middle" class="sub">port 33000 + (uid − 1000)</text>
+            </g>
+            <g class="dest dest-rrdp">
+              <text x="676" y="254" text-anchor="middle">Dialed by xfreerdp3</text>
+              <text x="676" y="274" text-anchor="middle" class="sub">certificate stored on first use</text>
+            </g>
+          </g>
+
+          <!-- lane-vnc. guacd's own VNC client. The bridge stays dark. -->
+          <g class="lane-vnc" id="arch-lane-vnc">
+            <rect class="n-frame-quiet" x="16" y="348" width="800" height="116" rx="10"/>
+            <text x="32" y="372">VNC path. guacd connects itself. The bridge is not started.</text>
+            <g class="n-ours seq seq-5" id="arch-n-wl-start">
+              <rect x="32" y="390" width="200" height="52" rx="8"/>
+              <text x="132" y="412" text-anchor="middle">Wayland starter</text>
+              <text x="132" y="430" text-anchor="middle" class="sub">this plugin</text>
+            </g>
+            <g class="n-stock seq seq-6" id="arch-n-wayvnc">
+              <rect x="252" y="390" width="220" height="52" rx="8"/>
+              <text x="362" y="412" text-anchor="middle">sway and wayvnc</text>
+              <text x="362" y="430" text-anchor="middle" class="sub">unmodified</text>
+            </g>
+            <g class="n-stock seq seq-6" id="arch-n-remote-vnc">
+              <rect x="492" y="390" width="220" height="52" rx="8"/>
+              <text x="602" y="412" text-anchor="middle">Their VNC server</text>
+              <text x="602" y="430" text-anchor="middle" class="sub">unmodified</text>
+            </g>
+          </g>
+        </svg>
+        </div>
+        <div class="arch-caps" aria-live="polite">
+          <p class="arch-cap cap-greeter">Login screen uses the whole RDP bridge. This page, the relay, the firewall rule, and the bridge script are this plugin. Cockpit, guacd, Xvfb, x11vnc, and xfreerdp3 are unmodified. gnome-remote-desktop on this host carries the handover patch. After you sign in, the pulse is on the desktop you already have, and a later connection to port 3390 is handed back to that same session.</p>
+          <p class="arch-cap cap-console">Console uses the same bridge and lands on port 3389 as a mirror of the physical screen. It does not go through the greeter. The programs inside the bridge are still the unmodified packages.</p>
+          <p class="arch-cap cap-virtual">A virtual monitor uses the same bridge and asks port 3389 for an extra monitor inside your own session. The programs inside the bridge are unmodified.</p>
+          <p class="arch-cap cap-isolated">Isolated uses the same bridge to your own headless desktop on port 33000 + (uid − 1000). The headless starter is this plugin. Xvfb, x11vnc, xfreerdp3, and guacd are unmodified.</p>
+          <p class="arch-cap cap-wayland">Wayland stops at guacd. guacd speaks VNC, so the bridge stays dark. The Wayland starter is this plugin. sway and wayvnc are unmodified, on port 34000 + (uid − 1000).</p>
+          <p class="arch-cap cap-rrdp">Remote RDP still uses the bridge. Unmodified xfreerdp3 dials the address you typed. The relay, which is this plugin, checks that address against the allow-list before anything is started. Their RDP server is not our patched gnome-remote-desktop.</p>
+          <p class="arch-cap cap-vnc">Remote VNC stops at guacd, the same way Wayland does. guacd dials their VNC server. The bridge is not started. The allow-list check is still the relay.</p>
+        </div>
+      </div>
       <p>Each RDP connection gets its own bridge. <code>xfreerdp3</code> speaks to gnome-remote-desktop and draws into a private <code>Xvfb</code>, and <code>x11vnc</code> publishes that screen on a loopback port with a per-connection password. guacd's built-in RDP client cannot complete this handshake, which is why the bridge exists. Closing the connection removes the bridge. The desktop behind it stays.</p>
 
       <h2>Session choices</h2>
@@ -268,6 +457,6 @@
     </div>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.8.20261003</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.9.20261003</span></footer>
 </body>
 </html>
