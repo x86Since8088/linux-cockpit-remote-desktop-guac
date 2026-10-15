@@ -205,12 +205,14 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
    the category so the picture still reads without the colour. */
 :root {
   --arch-ours-fill: #e8f2fc;
-  --arch-ours-stroke: var(--accent);
+  --arch-accent: var(--accent);
+  --arch-ours-stroke: var(--arch-accent);
   --arch-patch-fill: #fbf3e4;
   --arch-patch-stroke: #8a5a00;
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    --arch-accent: #5b9fe8;
     --arch-ours-fill: #163044;
     --arch-patch-fill: #3a2e16;
     --arch-patch-stroke: #e0b15a;
@@ -223,11 +225,12 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
 .swatch.ours { background: var(--arch-ours-fill); border: 2px solid var(--arch-ours-stroke); }
 .swatch.stock { border: 2px dashed var(--muted); }
 .swatch.patch { background: var(--arch-patch-fill); border: 2px solid var(--arch-patch-stroke); }
+.swatch.frame { border: 1.5px solid var(--arch-ours-stroke); }
 .arch-modes { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .6rem; }
 .arch-mode { display: inline-flex; align-items: center; gap: .35rem;
              border: 1px solid var(--line); border-radius: 999px; padding: .15rem .65rem;
              font-size: .8rem; background: var(--panel); cursor: pointer; }
-.arch-mode:has(input:checked) { border-color: var(--accent); background: var(--arch-ours-fill); font-weight: 600; }
+.arch-mode:has(input:checked) { border-color: var(--arch-accent); background: var(--arch-ours-fill); font-weight: 600; }
 .arch-mode:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .arch-scroll { overflow-x: auto; }
 .arch-svg { width: 100%; min-width: 720px; height: auto; display: block; overflow: visible; }
@@ -239,9 +242,12 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
 .arch-svg .n-frame { fill: transparent; stroke: var(--arch-ours-stroke); stroke-width: 1.5; }
 .arch-svg .n-frame-quiet { fill: transparent; stroke: var(--line); stroke-width: 1.5; }
 .arch-svg .wire { fill: none; stroke: var(--line); stroke-width: 2; }
-.arch-svg .wire-common, .arch-svg .wire-rdp { stroke: var(--accent); }
+.arch-svg .wire-common, .arch-svg .wire-rdp { stroke: var(--arch-accent); }
 .arch-svg #arch-n-dest rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
 .arch-svg .dest { visibility: hidden; }
+.arch-svg .grd-sub { display: none; }
+.arch-flow:has(#arch-greeter:checked) .grd-sub-greeter,
+.arch-flow:not(:has(#arch-greeter:checked)) .grd-sub-other { display: inline; }
 .arch-flow:has(#arch-greeter:checked) .dest-greeter,
 .arch-flow:has(#arch-console:checked) .dest-console,
 .arch-flow:has(#arch-virtual:checked) .dest-virtual,
@@ -259,11 +265,14 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
 .arch-flow:has(#arch-vnc:checked) .wire-rdp { stroke: var(--line); animation: none; }
 .arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) .wire-vnc { stroke: var(--line); animation: none; }
 .arch-flow:has(#arch-wayland:checked) .wire-vnc,
-.arch-flow:has(#arch-vnc:checked) .wire-vnc { stroke: var(--accent); }
-/* Wayland lights its starter and wayvnc. Remote VNC lights their server. */
-.arch-flow:has(#arch-wayland:checked) #arch-n-remote-vnc,
-.arch-flow:has(#arch-vnc:checked) #arch-n-wl-start,
-.arch-flow:has(#arch-vnc:checked) #arch-n-wayvnc { opacity: .28; }
+.arch-flow:has(#arch-vnc:checked) .wire-vnc { stroke: var(--arch-accent); }
+/* The VNC slot holds wayvnc for Wayland and their server for Remote VNC. */
+.arch-svg #arch-n-remote-vnc { visibility: hidden; }
+.arch-flow:has(#arch-vnc:checked) #arch-n-wayvnc { visibility: hidden; }
+.arch-flow:has(#arch-vnc:checked) #arch-n-remote-vnc { visibility: visible; }
+.arch-flow:has(#arch-vnc:checked) #arch-n-wl-start { opacity: .28; }
+.arch-flow:has(#arch-wayland:checked) #arch-n-dest,
+.arch-flow:has(#arch-vnc:checked) #arch-n-dest { visibility: hidden; }
 .arch-cap { display: none; }
 .arch-flow:has(#arch-greeter:checked) .cap-greeter,
 .arch-flow:has(#arch-console:checked) .cap-console,
@@ -275,7 +284,7 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
 @keyframes arch-dash { to { stroke-dashoffset: -26; } }
 @keyframes arch-glow {
   0%, 18%, 100% { filter: none; }
-  8% { filter: drop-shadow(0 0 5px var(--accent)); }
+  8% { filter: drop-shadow(0 0 5px var(--arch-accent)); }
 }
 @media (prefers-reduced-motion: no-preference) {
   .arch-svg .wire-common,
@@ -293,9 +302,9 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
   .arch-svg .seq-5 { animation-delay: 2.0s; }
   .arch-svg .seq-6 { animation-delay: 2.4s; }
   .arch-svg .seq-7 { animation-delay: 2.8s; }
-  .arch-flow:has(#arch-wayland:checked) .lane-rdp .seq,
-  .arch-flow:has(#arch-vnc:checked) .lane-rdp .seq,
-  .arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) .lane-vnc .seq {
+  .arch-flow:has(#arch-wayland:checked) :is(.lane-rdp, .lane-rdp .seq),
+  .arch-flow:has(#arch-vnc:checked) :is(.lane-rdp, .lane-rdp .seq, #arch-n-wl-start),
+  .arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) :is(.lane-vnc, .lane-vnc .seq) {
     animation: none;
   }
 }
