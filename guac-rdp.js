@@ -89,6 +89,7 @@
 
     // Live gate flags for the Sound/Clipboard toggles (mirrored from the checkboxes).
     var clipboardOn = true, soundOn = false, traceOn = false, clipReadHandler = null;
+    var keyboardBlurHandler = null;   // releases stuck keys on focus loss -- see its own setup below
     var lastRemoteClip = null;   // newest text the session put on its clipboard (for the "Receive clipboard" button)
     function syncPassthroughFlags() {
         clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
@@ -106,8 +107,22 @@
     // two things. Trace lines are diagnostic text only, never the clipboard
     // CONTENTS themselves (byte counts, not the text) -- this toggle is meant
     // to be left on during a support session without exposing what was copied.
+    // Kept in memory (not just printed) so the "Logs…" viewer (see
+    // addViewLogsButton() below) can show it as a filterable table, not just
+    // whatever happens to still be in the DevTools console scrollback. Same
+    // opt-in gate as the console line itself (traceOn) -- this project's own
+    // stated policy is byte counts/categories only, never clipboard CONTENTS,
+    // which trace()'s callers already honor; capturing to this array adds no
+    // new exposure beyond what already goes to the console. Capped so a
+    // long-running session's trace can't grow this without bound.
+    var traceLog = [];
+    var TRACE_LOG_MAX = 2000;
     function trace(category, msg) {
         if (!traceOn) return;
+        try {
+            traceLog.push({ time: Date.now(), category: category, message: String(msg) });
+            if (traceLog.length > TRACE_LOG_MAX) traceLog.shift();
+        } catch (e) { /* ignore */ }
         try {
             (console.debug || console.log).call(console, "[guac-rdp:" + category + "] " + msg);
         } catch (e) { /* no console in this context */ }
@@ -178,9 +193,155 @@
             setStatus("Clipboard write was blocked by the browser.", "err");
         });
     }
-    // Append the "Send clipboard" / "Receive clipboard" buttons to a bar (the main
-    // connect bar and each pop-out's control strip). Pop-outs are separate windows/
-    // documents, so the ids never collide across them.
+    // ---- "Type Clipboard": keystroke-injection clipboard workaround -----------
+    // guacd/x11vnc's own VNC clipboard channel silently drops browser->remote
+    // pushes on this bridge (confirmed upstream bug, not this project's --
+    // see docs/KNOWN_ISSUES.md and memory cockpit-guac-rdp-send-clip-investigation):
+    // the wire instruction is accepted with no error, but the guest's clipboard
+    // never actually changes, so "Send clip" LOOKS like it worked (browser trace
+    // shows bytes written to the stream) while nothing arrives. This button
+    // sidesteps that whole path: instead of asking the guest to receive a
+    // clipboard update, it TYPES the local clipboard's text into the session one
+    // keysym at a time over the same key-event channel real keystrokes already
+    // use reliably (sendGuestKeyEvent, with its existing KEYCODE_FIX/SHIFT_LEVEL
+    // corrections applying identically to typed characters).
+    //
+    // Character -> keysym mirrors the vendored Guacamole.Keyboard's own (unused
+    // here) codepoint-to-keysym function EXACTLY -- extracted from
+    // guacamole-common-js/all.min.js and diffed against this implementation
+    // over code points 0-0x400 before shipping, after an adversarial review
+    // caught an earlier draft treating 0x7F-0x9F (DEL + the C1 control range --
+    // easy to miss, and real: it's what a Windows-1252-as-Latin-1 mis-decode or
+    // a terminal copy can leave behind) as direct-value keysyms instead of the
+    // "function key" convention the vendored function actually uses for them.
+    // ONE deliberate deviation from that vendored function, kept from the first
+    // draft: LF and CR are forced to the real Return keysym (0xFF0D) instead of
+    // Linefeed (0xFF0A, what the vendored function -- and its own built-in
+    // .type() -- produces for "\n"), which has no key on the Xvfb "us" keymap
+    // at all (verified with a standalone vm probe: typing a bare LF through it
+    // silently does nothing). x11vnc's -add_keysyms (this build's own default
+    // -- confirmed via `x11vnc -help`: "Default: -add_keysyms") dynamically
+    // adds an unused keycode for any keysym -- including the Unicode-plane
+    // ones below -- Xvfb's static "us" keymap doesn't already have one for.
+    //
+    // Note for anyone pasting TSV/spreadsheet data or indented code: an
+    // embedded Tab/Backspace/Escape/etc. in the clipboard text becomes a REAL
+    // guest keypress here (focus-next, delete-previous-char, ...), same as if
+    // you had typed it yourself -- this button types the text, it doesn't
+    // paste it as inert data. Not a bug, just a consequence of the approach.
+    //
+    // TESTHOOK:TYPECLIP:BEGIN -- tests/js/type_clipboard.test.js extracts this
+    // exact block (verbatim) and exercises it standalone; keep it self-contained
+    // (only `sendGuestKeyEvent` from the outer scope, stubbed in the test).
+    function keysymForCodePoint(cp) {
+        if (cp === 0x0A || cp === 0x0D) return 0xFF0D;                 // LF or CR -> Return
+        if (cp <= 0x1F || (cp >= 0x7F && cp <= 0x9F)) return cp | 0xFF00;  // C0 + C1 controls
+        if (cp <= 0xFF) return cp;                                     // Latin-1: direct
+        return 0x01000000 | cp;                                        // Unicode keysym plane
+    }
+    // Presses and releases exactly one keysym via sendGuestKeyEvent directly --
+    // deliberately NOT keyboard.press()/keyboard.release(). Those route through
+    // the SAME Guacamole.Keyboard instance real physical keystrokes drive,
+    // sharing its `pressed` map and a single (not per-keysym) key-repeat timer
+    // pair: injecting a keysym that happens to collide with one the user is
+    // physically holding (e.g. holding Enter while a newline in the pasted
+    // text also wants Return) is silently swallowed on the injected press
+    // (Guacamole.Keyboard.prototype.press no-ops when already pressed) while
+    // the immediately-following injected release DOES fire and tells the
+    // guest the physical key was released while the user is still holding it
+    // -- confirmed against the real vendored library and reproduced live by
+    // adversarial review, which also found it can permanently kill a real
+    // key's auto-repeat-to-guest stream even with no keysym collision at all,
+    // via the same shared timer. sendGuestKeyEvent(down, ks) called directly
+    // -- exactly what the existing one-shot sendKeysymTap() helper already
+    // does -- never touches keyboard.pressed or its repeat timers, so injected
+    // typing cannot desync from concurrent real physical typing, while still
+    // getting the same KEYCODE_FIX/SHIFT_LEVEL corrections (I45).
+    function typeOneCodePoint(cp) {
+        var ks = keysymForCodePoint(cp);
+        sendGuestKeyEvent(true, ks);
+        sendGuestKeyEvent(false, ks);
+    }
+    function typeTextIntoSession(text) {
+        var i = 0, n = 0;
+        while (i < text.length) {
+            var cp = text.codePointAt(i);
+            i += (cp > 0xFFFF) ? 2 : 1;                        // advance past a surrogate pair too
+            if (cp === 0x0D && text.charCodeAt(i) === 0x0A) i += 1;   // CRLF: one Return, not two
+            typeOneCodePoint(cp);
+            n++;
+        }
+        return n;
+    }
+    // TESTHOOK:TYPECLIP:END
+    var clipTypeBusy = false;
+    var CLIP_TYPE_CHUNK = 200;   // characters per synchronous burst
+    // Types `chars` (an ARRAY of code-point strings -- from Array.from(text), so
+    // each element is already surrogate-pair-safe) CLIP_TYPE_CHUNK at a time,
+    // yielding to the browser between chunks via setTimeout so a large
+    // paste-by-typing (this feature's whole reason to exist is moving text the
+    // broken native clipboard channel won't carry, which skews toward LARGER
+    // payloads) cannot freeze the tab for the whole operation or block a
+    // mid-paste disconnect from taking effect. If the chunk boundary would
+    // split a CRLF pair, it is pushed one character later to keep the pair
+    // together (typeTextIntoSession's own CRLF collapsing only looks within a
+    // single call's text).
+    function typeClipboardChunked(chars, doneCb) {
+        var pos = 0, total = 0;
+        function step() {
+            if (!client || !keyboard) { doneCb(total, false); return; }
+            var end = Math.min(pos + CLIP_TYPE_CHUNK, chars.length);
+            if (end < chars.length && chars[end - 1] === "\r" && chars[end] === "\n") end += 1;
+            total += typeTextIntoSession(chars.slice(pos, end).join(""));
+            pos = end;
+            if (pos < chars.length) {
+                setStatus("Typing… " + pos + " of " + chars.length + " characters.");
+                setTimeout(step, 0);
+            } else { doneCb(total, true); }
+        }
+        step();
+    }
+    function typeClipboardIntoSession() {
+        if (clipTypeBusy) {
+            trace("clipboard", "type: refused, a previous Type Clipboard run is still in progress");
+            setStatus("Still typing the last clipboard — wait for it to finish.", "err"); return;
+        }
+        if (!client || !currentUuid || !keyboard) {
+            trace("clipboard", "type: refused, no live session");
+            setStatus("Connect a session first, then Type clipboard.", "err"); return;
+        }
+        if (!(navigator.clipboard && navigator.clipboard.readText)) {
+            trace("clipboard", "type: no navigator.clipboard.readText in this browser/context");
+            setStatus("This browser will not let the page read the clipboard.", "err"); return;
+        }
+        clipTypeBusy = true;
+        navigator.clipboard.readText().then(function (text) {
+            if (!client || !keyboard) { clipTypeBusy = false; return; }
+            if (!text) {
+                trace("clipboard", "type: local clipboard is empty"); setStatus("Your clipboard is empty.");
+                clipTypeBusy = false; return;
+            }
+            try {
+                typeClipboardChunked(Array.from(text), function (n, completed) {
+                    clipTypeBusy = false;
+                    trace("clipboard", "type: injected " + n + " keystrokes for " + text.length + " chars"
+                        + (completed ? "" : " (stopped early -- session ended)"));
+                    if (completed) setStatus("Typed " + text.length + " characters into the session.");
+                    else setStatus("Session ended before typing finished (" + n + " characters typed).", "err");
+                });
+            } catch (e) {
+                clipTypeBusy = false;
+                trace("clipboard", "type: threw " + e); setStatus("Could not type into the session.", "err");
+            }
+        }).catch(function (e) {
+            clipTypeBusy = false;
+            trace("clipboard", "type: readText() rejected " + e);
+            setStatus("Clipboard read was blocked — click inside the page, then press Type clipboard again.", "err");
+        });
+    }
+    // Append the "Send clipboard" / "Receive clipboard" / "Type clipboard" buttons
+    // to a bar (the main connect bar and each pop-out's control strip). Pop-outs
+    // are separate windows/documents, so the ids never collide across them.
     function addClipboardButtons(bar) {
         if (!bar) return;
         var mk = function (id, label, title, fn) {
@@ -192,6 +353,7 @@
         };
         mk("clip-send", "Send clip", "Send YOUR clipboard to the session (then paste inside the session).", sendClipboardToSession);
         mk("clip-recv", "Receive clip", "Copy the SESSION's clipboard into your browser (then paste locally).", receiveClipboardFromSession);
+        mk("clip-type", "Type Clipboard", "Type YOUR clipboard into the session as keystrokes -- a workaround for when the session's own clipboard paste doesn't take. Embedded Tab/Backspace/etc. act as real keys, not literal text.", typeClipboardIntoSession);
     }
 
     // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
@@ -515,6 +677,305 @@
         bar.appendChild(b);
         return b;
     }
+
+    // ---- "Logs…": a fullscreen dialog over the browser trace log and the
+    // server-side relay/guacd journal, filtered with selectable columns -----
+    // Same <dialog> idiom as buildSessionCard() above (see its own comment for
+    // why: no hand-rolled backdrop/Escape/focus handling needed), just sized
+    // near-viewport instead of a fixed width, since a log table needs room.
+    //
+    // The server journal read reuses stSpawn2's superuser:"require" (defined
+    // with the Self Tests below, hoisted so the declaration order here does
+    // not matter): reading a root-run systemd unit's journal needs the SAME
+    // PolicyKit elevation the Self Tests panel's own guacd checks already
+    // require, for EITHER scope -- "this session" is not a lower privilege
+    // tier than "all sessions", just a more heavily filtered result once
+    // elevated, since journalctl itself gates read access to a root-run
+    // unit's log the same way regardless of what the caller filters for
+    // afterward. "All sessions" is additionally disabled in the UI for a
+    // non-admin (cosmetic, matching this project's existing isAdmin-gated
+    // UI elsewhere) -- the actual enforcement is superuser:"require" itself,
+    // which Cockpit/PolicyKit refuses for a real non-admin regardless of
+    // what the (bypassable) client-side option state says.
+    var LOG_COLUMNS = {
+        trace:  [ { key: "time", label: "Time" }, { key: "category", label: "Category" },
+                  { key: "message", label: "Message" } ],
+        server: [ { key: "time", label: "Time" }, { key: "unit", label: "Unit" },
+                  { key: "message", label: "Message" } ]
+    };
+    var LOGS_LS_KEY = "edy-rdp-logs-columns";
+    var logsColumns = {};   // {source: {key: bool}} -- which columns show, persisted
+    function loadLogColumns() {
+        var stored = {};
+        try { stored = JSON.parse(localStorage.getItem(LOGS_LS_KEY) || "{}") || {}; }
+        catch (e) { stored = {}; }
+        Object.keys(LOG_COLUMNS).forEach(function (src) {
+            if (!stored[src]) {
+                stored[src] = {};
+                LOG_COLUMNS[src].forEach(function (c) { stored[src][c.key] = true; });
+            }
+        });
+        logsColumns = stored;
+    }
+    function saveLogColumns() {
+        try { localStorage.setItem(LOGS_LS_KEY, JSON.stringify(logsColumns)); } catch (e) { /* ignore */ }
+    }
+
+    var logsDialog = null, logsData = [], logsSource = "trace";
+    // journalctl's own --grep does the filtering server-side -- cockpit.spawn
+    // execs an argv array (never a shell), so there is no pipeline to build and
+    // no injection risk even though currentUuid ends up as one of that array's
+    // elements. Because the relay mints the session uuid and hands it to guacd
+    // as the connection id verbatim (both directions round-trip the same bare
+    // hex string unchanged -- confirmed against edy_rdp_relay.py's own ready/
+    // select handling), the SAME --grep value finds a session's lines in BOTH
+    // the relay's own unit and guacd's container log.
+    // "-6 hours" for "all sessions": journalctl with no --since would happily
+    // return the ENTIRE unit history, which for a long-lived host is a lot to
+    // pull through a privileged spawn and render in one table. The window is
+    // disclosed in the scope <option>'s own label (buildLogsDialog(), below)
+    // and in the status line whenever a fetch actually completes empty, so an
+    // operator never has to guess whether "0 entries" means "nothing
+    // happened" or "it happened outside the window" -- found missing (a
+    // silent cap) by adversarial review; both disclosures were added because
+    // of that finding, not just the CHANGELOG/KNOWN_ISSUES mention.
+    function fetchServerLogs(scope) {
+        var args = ["-o", "short-iso", "--no-pager"];
+        if (scope === "all") {
+            args = args.concat(["--since", "-6 hours"]);
+        } else {
+            if (!currentUuid) return Promise.reject("connect a session first");
+            args = args.concat(["--grep", currentUuid]);
+        }
+        // Each unit's failure (most plausibly the superuser:"require"
+        // elevation itself being refused) is captured, not discarded: a
+        // caller-visible {rows, error} beats silently resolving to an empty
+        // array, which would make a genuine auth/availability failure
+        // indistinguishable from "this session really has no log lines" --
+        // exactly the one piece of error-reporting an earlier draft of this
+        // function lost, found by adversarial review.
+        function tryUnit(spawnArgs, unit) {
+            return stSpawn2(spawnArgs).then(
+                function (out) { return { rows: parseJournal(out, unit), error: null }; },
+                function (e) { return { rows: [], error: unit + ": " + e }; }
+            );
+        }
+        return Promise.all([
+            tryUnit(["journalctl", "-u", "edy-rdp-relay"].concat(args), "relay"),
+            tryUnit(["journalctl", "CONTAINER_NAME=edy-rdp-guacd"].concat(args), "guacd")
+        ]).then(function (parts) {
+            var rows = parts[0].rows.concat(parts[1].rows);
+            rows.sort(function (a, b) { return b.time - a.time; });   // newest first
+            var errors = parts.map(function (p) { return p.error; }).filter(Boolean);
+            return { rows: rows, error: errors.length ? errors.join("; ") : null };
+        });
+    }
+    // TESTHOOK:PARSEJOURNAL:BEGIN -- tests/js/view_logs.test.js extracts this
+    // exact block (verbatim) and exercises it standalone; keep it self-contained
+    // (no outer-scope references at all).
+    //
+    // journalctl -o short-iso lines start "<iso-timestamp> host proc[pid]: rest",
+    // but that timestamp is only printed once PER JOURNAL ENTRY -- an entry
+    // whose own message contains a literal newline (e.g. a Python traceback
+    // logged in one write) spans several physical lines, and only the first
+    // carries a real timestamp. An earlier draft matched "the first
+    // whitespace-delimited token" against EVERY split line indiscriminately,
+    // which (found by adversarial review, reproduced) fragmented one entry
+    // into several bogus, wrongly-time-sorted rows and silently swallowed a
+    // continuation line's own leading word into the discarded "timestamp"
+    // capture. Fixed by matching an ACTUAL ISO-8601-shaped prefix specifically
+    // (not just any token), and appending any line that does not match one to
+    // the PREVIOUS row's message instead of starting a new row for it. \r is
+    // stripped up front so CRLF-style output (which made the old regex's `$`
+    // fail to match at all, dumping the whole raw line including its real
+    // timestamp into an unparsed, wrongly-sorted message) can't reach the
+    // per-line regex in the first place.
+    function parseJournal(out, unit) {
+        var lines = String(out || "").replace(/\r/g, "").split("\n");
+        var rows = [];
+        lines.forEach(function (line) {
+            if (!line) return;
+            var m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2})\s(.*)$/.exec(line);
+            if (m) {
+                var t = Date.parse(m[1]);
+                rows.push({ time: isNaN(t) ? 0 : t, unit: unit, message: m[2] });
+            } else if (rows.length) {
+                rows[rows.length - 1].message += "\n" + line;
+            } else {
+                // no timestamp match AND nothing yet to attach to (the very
+                // first line itself is unparseable) -- keep the whole line
+                // rather than silently dropping it.
+                rows.push({ time: 0, unit: unit, message: line });
+            }
+        });
+        return rows;
+    }
+    // TESTHOOK:PARSEJOURNAL:END
+
+    function fmtLogCell(key, val) {
+        if (key === "time") return val ? new Date(val).toLocaleString() : "";
+        return val == null ? "" : String(val);
+    }
+    function renderLogsTable() {
+        var cols = LOG_COLUMNS[logsSource].filter(function (c) { return logsColumns[logsSource][c.key]; });
+        var thead = $("logs-thead"), tbody = $("logs-tbody");
+        thead.innerHTML = "";
+        var htr = document.createElement("tr");
+        cols.forEach(function (c) { var th = document.createElement("th"); th.textContent = c.label; htr.appendChild(th); });
+        thead.appendChild(htr);
+
+        // Search matches against EVERY column this source has, not just the
+        // ones currently checked visible -- otherwise toggling a column
+        // checkbox silently changes which rows an unchanged query matches.
+        var allCols = LOG_COLUMNS[logsSource];
+        var q = ($("logs-search") ? $("logs-search").value : "").toLowerCase();
+        tbody.innerHTML = "";
+        var shown = 0;
+        logsData.forEach(function (row) {
+            if (q) {
+                var searchText = allCols.map(function (c) { return fmtLogCell(c.key, row[c.key]); }).join(" ").toLowerCase();
+                if (searchText.indexOf(q) < 0) return;
+            }
+            shown++;
+            var tr = document.createElement("tr");
+            cols.forEach(function (c) { var td = document.createElement("td"); td.textContent = fmtLogCell(c.key, row[c.key]); tr.appendChild(td); });
+            tbody.appendChild(tr);
+        });
+        var sum = $("logs-summary");
+        if (sum) sum.textContent = shown + " of " + logsData.length + " entries" + (q ? " (filtered)" : "");
+    }
+    function renderLogColumnPicker() {
+        var wrap = $("logs-columns"); wrap.innerHTML = "";
+        LOG_COLUMNS[logsSource].forEach(function (c) {
+            var lbl = document.createElement("label"); lbl.className = "colpick";
+            var cb = document.createElement("input"); cb.type = "checkbox";
+            cb.checked = !!logsColumns[logsSource][c.key];
+            cb.addEventListener("change", function () {
+                logsColumns[logsSource][c.key] = cb.checked; saveLogColumns(); renderLogsTable();
+            });
+            lbl.appendChild(cb); lbl.appendChild(document.createTextNode(" " + c.label));
+            wrap.appendChild(lbl);
+        });
+    }
+    function refreshLogsData() {
+        var status = $("logs-status");
+        if (logsSource === "trace") {
+            status.textContent = ""; status.className = "muted";
+            logsData = traceLog.slice().reverse();   // newest first, matching the server view
+            renderLogsTable();
+            return;
+        }
+        var scope = $("logs-scope") ? $("logs-scope").value : "session";
+        status.textContent = "Loading…"; status.className = "muted";
+        fetchServerLogs(scope).then(function (result) {
+            logsData = result.rows;
+            if (result.error) {
+                // A partial (one unit ok, one failed) or total failure is
+                // shown even though rows may still be non-empty -- never
+                // silently downgrade "could not read X" into a plain count.
+                status.textContent = "Could not read the full journal (" + result.error + ")";
+                status.className = "muted err-text";
+            } else if (!result.rows.length && scope === "all") {
+                status.textContent = "No matching entries in the last 6 hours.";
+                status.className = "muted";
+            } else {
+                status.textContent = "";
+                status.className = "muted";
+            }
+            renderLogsTable();
+        }, function (e) {
+            logsData = [];
+            status.textContent = "Could not read the server journal: " + e;
+            status.className = "muted err-text";
+            renderLogsTable();
+        });
+    }
+    function buildLogsDialog() {
+        var dlg = document.createElement("dialog"); dlg.id = "logsdialog";
+        var head = document.createElement("div"); head.className = "row";
+        var title = document.createElement("strong"); title.textContent = "Logs"; title.style.flex = "1";
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button"; closeBtn.className = "sec"; closeBtn.textContent = "✕"; closeBtn.title = "Close";
+        closeBtn.addEventListener("click", function () { dlg.close(); });
+        head.appendChild(title); head.appendChild(closeBtn);
+        dlg.appendChild(head);
+
+        var controls = document.createElement("div"); controls.className = "row";
+        var srcSel = document.createElement("select"); srcSel.id = "logs-source";
+        [["trace", "Browser Trace"], ["server", "Server Journal"]].forEach(function (o) {
+            var opt = document.createElement("option"); opt.value = o[0]; opt.textContent = o[1]; srcSel.appendChild(opt);
+        });
+        var scopeSel = document.createElement("select"); scopeSel.id = "logs-scope";
+        scopeSel.style.display = "none";   // trace (the default source) has no scope
+        [["session", "This session"], ["all", "All sessions (admin, last 6h)"]].forEach(function (o) {
+            var opt = document.createElement("option"); opt.value = o[0]; opt.textContent = o[1]; scopeSel.appendChild(opt);
+        });
+        var refreshBtn = document.createElement("button");
+        refreshBtn.type = "button"; refreshBtn.className = "sec"; refreshBtn.textContent = "Refresh";
+        refreshBtn.addEventListener("click", refreshLogsData);
+        controls.appendChild(srcSel); controls.appendChild(scopeSel); controls.appendChild(refreshBtn);
+        dlg.appendChild(controls);
+
+        var colsBar = document.createElement("div"); colsBar.className = "row"; colsBar.id = "logs-columns";
+        dlg.appendChild(colsBar);
+
+        var searchWrap = document.createElement("div"); searchWrap.className = "row";
+        var search = document.createElement("input"); search.type = "search"; search.id = "logs-search";
+        search.placeholder = "Filter…"; search.style.flex = "1";
+        search.addEventListener("input", renderLogsTable);
+        searchWrap.appendChild(search);
+        dlg.appendChild(searchWrap);
+
+        var tableWrap = document.createElement("div"); tableWrap.id = "logs-tablewrap";
+        var table = document.createElement("table"); table.className = "sessions";
+        var thead = document.createElement("thead"); thead.id = "logs-thead";
+        var tbody = document.createElement("tbody"); tbody.id = "logs-tbody";
+        table.appendChild(thead); table.appendChild(tbody);
+        tableWrap.appendChild(table);
+        dlg.appendChild(tableWrap);
+
+        var footer = document.createElement("div"); footer.className = "row";
+        var summary = document.createElement("span"); summary.id = "logs-summary"; summary.className = "muted";
+        var status = document.createElement("span"); status.id = "logs-status"; status.className = "muted";
+        footer.appendChild(summary); footer.appendChild(status);
+        dlg.appendChild(footer);
+
+        srcSel.addEventListener("change", function () {
+            logsSource = srcSel.value;
+            scopeSel.style.display = (logsSource === "server") ? "" : "none";
+            renderLogColumnPicker();
+            refreshLogsData();
+        });
+        scopeSel.addEventListener("change", refreshLogsData);
+        dlg.addEventListener("click", function (e) { if (e.target === dlg) dlg.close(); });
+        // isAdmin can change live (see the cockpit.permission "changed"
+        // listener elsewhere in this file) while this dialog sits closed, so
+        // re-sync the "All sessions" option's availability every time it
+        // opens rather than only once at build time.
+        dlg.syncAdminGating = function () {
+            var allOpt = scopeSel.querySelector('option[value="all"]');
+            if (allOpt) allOpt.disabled = !isAdmin;
+            if (!isAdmin && scopeSel.value === "all") scopeSel.value = "session";
+        };
+        document.body.appendChild(dlg);
+        return dlg;
+    }
+    function addViewLogsButton(bar) {
+        var b = document.createElement("button");
+        b.id = "viewlogs";
+        b.type = "button"; b.className = "sec"; b.textContent = "Logs…";
+        b.title = "View the browser's clipboard/sound/keyboard trace log, or the "
+                + "server-side relay/guacd journal, in a filterable table.";
+        b.addEventListener("click", function () {
+            if (!logsDialog) { loadLogColumns(); logsDialog = buildLogsDialog(); renderLogColumnPicker(); }
+            logsDialog.syncAdminGating();
+            refreshLogsData();
+            logsDialog.showModal();
+        });
+        bar.appendChild(b);
+        return b;
+    }
+
     function enterMonitorMode() {
         document.documentElement.classList.add("monitor");
         var m = location.hash.match(/monitor=(\d+)/);
@@ -532,6 +993,7 @@
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
         addClipboardButtons(bar);
+        addViewLogsButton(bar);
         bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
         bar.appendChild($("addmon"));     // open another virtual monitor window
         $("target").value = "virtual";
@@ -604,6 +1066,7 @@
         addSpecialKeysToggle(bar);
         addWinKeyButton(bar);
         addClipboardButtons(bar);
+        addViewLogsButton(bar);
         bar.appendChild($("numlock"));   // flip the REMOTE NumLock from the pop-out
         bar.appendChild($("addmon"));     // open another virtual monitor window
         $("target").value = "console";
@@ -621,12 +1084,19 @@
         var sessionBtn = addSessionButton(bar, card);
         bar.insertBefore(sessionBtn, bar.firstChild);   // the primary entry point now; lead with it
         addClipboardButtons(bar);
+        addViewLogsButton(bar);
         // Restore the active tab from the URL (?tab=sessions etc.), same as a
         // shared/bookmarked link; default to Connect. Skipped by the pop-out
         // modes entirely -- they never show tabs and enterConnectMode() only
         // runs on the plain page.
         var wantTab = hashParam("tab");
         selectTab("tab-" + (TAB_NAMES.indexOf(wantTab) >= 0 ? wantTab : "connect"));
+        // Seed the Update tab's badge on load -- a plain read of the cached
+        // status, never a live GitHub call (see refreshUpdateBadge()) -- so an
+        // available update is visible before the operator ever opens the tab.
+        // Skipped in the pop-out modes entirely, same as the tab restore above:
+        // they never show tabs (html.monitor .tabs is display:none).
+        refreshUpdateBadge();
     }
 
     // Display scale. "fit" recomputes on resize; a fixed factor does not, which is
@@ -920,12 +1390,31 @@
     function teardown(immediate) {
         if (disposing) return;
         disposing = true;
-        if (keyboard) { keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
+        // reset() BEFORE nulling onkeyup/onkeydown, not after: it fires a real
+        // onkeyup for every keysym still tracked as pressed (releasing them
+        // properly, same as the focus-loss fix below) and -- load-bearing, not
+        // just hygiene -- clears the vendored library's own internal key-repeat
+        // timers. Without this, disconnecting while a key was mid-autorepeat
+        // left that timer running against a keyboard whose onkeyup/onkeydown
+        // had just been nulled, throwing "onkeyup is not a function" on every
+        // tick, indefinitely (found while verifying the focus-loss fix below,
+        // pre-existing, not introduced by it).
+        if (keyboard) { keyboard.reset(); keyboard.onkeydown = keyboard.onkeyup = null; keyboard = null; }
         resetShiftAdjust();   // a mid-press disconnect must not leak a stale add/remove into the next session
         var lockBox = $("display");
         if (lockBox && lockSyncHandler) lockBox.removeEventListener("keydown", lockSyncHandler, true);
         if (lockBox && clipReadHandler) lockBox.removeEventListener("focus", clipReadHandler, true);
-        lockSyncHandler = null; clipReadHandler = null; remoteLocks = null; browserLocks = null;
+        // TESTHOOK:KEYBLUR_TEARDOWN:BEGIN -- tests/js/keyboard_blur.test.js
+        // extracts this verbatim too, alongside TESTHOOK:KEYBLUR above.
+        if (keyboardBlurHandler) {
+            if (lockBox) lockBox.removeEventListener("blur", keyboardBlurHandler, true);
+            window.removeEventListener("blur", keyboardBlurHandler);
+            document.removeEventListener("visibilitychange", keyboardBlurHandler);
+        }
+        keyboardBlurHandler = null;
+        // TESTHOOK:KEYBLUR_TEARDOWN:END
+        lockSyncHandler = null; clipReadHandler = null;
+        remoteLocks = null; browserLocks = null;
         if ($("numlock")) {
             $("numlock").disabled = true;
             $("numlock").classList.remove("on");
@@ -986,6 +1475,20 @@
     // physical_session_locked(): a probe error, non-answer or timeout means
     // "connect to console as asked" -- it never blocks a normal connect.
     var CONSOLE_PROBE_MS = 4000;
+    // TESTHOOK:GREETERFOLLOW:BEGIN -- tests/js/greeter_follow.test.js extracts
+    // this verbatim. A greeter connection that drops on its own (the handover
+    // onto the desktop, or the relay being restarted under it) is followed by
+    // one fresh connection to the same sign-in door. That is the reconnect
+    // that lands on the desktop the user just signed into. A Disconnect click
+    // disarms it, an explained error does not follow, and a second drop before
+    // the new connection has been up for a while does not loop.
+    function shouldFollowGreeterDrop(scenario, errored, armed, follows) {
+        return scenario === "greeter" && !errored && !!armed && follows < 1;
+    }
+    // TESTHOOK:GREETERFOLLOW:END
+    var greeterFollowArmed = false;
+    var greeterFollows = 0;
+    var greeterStableTimer = null;
     function resolveConsoleFallback(key) {
         if (key !== "console") return cockpit.resolve(key);
         setStatus("Checking who is signed in on the physical console…");
@@ -1087,6 +1590,10 @@
 
     function start(key, cred, sessiontoken, geomOverride) {
         activeKey = key;
+        // Arm only for the sign-in door. Sound/resolution reconnects and the
+        // Disconnect button clear this before they tear the tunnel down, so
+        // those do not also schedule a follow.
+        greeterFollowArmed = (key === "greeter");
         var t = TARGETS[key], box = $("display");
         var winW = Math.max(box.clientWidth, 640), winH = Math.max(box.clientHeight, 480);
         // Geometry sent to the backend; the browser always scales the result to the
@@ -1217,14 +1724,37 @@
         client.onstatechange = function (s) {
             if (s === 3) { currentUuid = (tunnel && tunnel.uuid ? String(tunnel.uuid) : "").replace(/^\$/, ""); }
             if (s === 3) applyScale();
-            if (s === 3) setStatus(
+            if (s === 3) {
+                if (key === "greeter") {
+                    greeterFollowArmed = true;
+                    if (greeterStableTimer) clearTimeout(greeterStableTimer);
+                    // A connection that stays up is a real desktop session. A later
+                    // drop may follow once more; a drop during the handover may not
+                    // chain into a reconnect loop.
+                    greeterStableTimer = setTimeout(function () { greeterFollows = 0; }, 15000);
+                }
+                setStatus(
                 key === "isolated" ? "Connected to your isolated desktop."
                 : key === "console" ? "Connected to the physical console."
                 : key === "greeter" ? "Connected to the sign-in screen."
                 : key === "vnc"     ? ("Connected to VNC at " + $("host").value.trim() + ".")
             : key === "remote"  ? ("Connected to " + $("host").value.trim() + ".")
                 : "Connected to your virtual monitor.", "ok");
-            else if (s === 5) { if (!errored) setStatus("Disconnected."); teardown(true); }
+            }
+            else if (s === 5) {
+                var follow = shouldFollowGreeterDrop(key, errored, greeterFollowArmed, greeterFollows);
+                if (follow) {
+                    greeterFollows++;
+                    greeterFollowArmed = false;
+                    setStatus("Sign-in connection dropped. Reconnecting to the desktop…");
+                    showToast("Reconnecting to the desktop you just signed into.");
+                    teardown(true);
+                    window.setTimeout(function () { connect("greeter"); }, 400);
+                } else {
+                    if (!errored) setStatus("Disconnected.");
+                    teardown(true);
+                }
+            }
         };
 
         setStatus("Opening a channel to the relay…");
@@ -1289,6 +1819,70 @@
         keyboard = new Guacamole.Keyboard(box);
         keyboard.onkeydown = function (k) { sendGuestKeyEvent(true, k); };
         keyboard.onkeyup = function (k) { sendGuestKeyEvent(false, k); };
+        // A keydown with no matching keyup is a real, live-reported bug (a held
+        // modifier -- classically Alt, via Alt+Tab -- "sticks" on the GUEST for
+        // as long as the session is unfocused: any mouse click/drag/scroll
+        // during that window arrives there as an Alt-combo, not just whatever
+        // the operator types on returning). The browser only delivers keyup to
+        // whatever element currently holds DOM focus, and losing focus never
+        // synthesizes one -- so the moment this element (or the whole browser
+        // window) loses focus while a key is physically down, neither
+        // Guacamole.Keyboard's own bookkeeping nor this file's own shiftAdjust
+        // tracking ever hears about the release. Guacamole.Keyboard DOES
+        // self-correct stale modifier state by comparing its tracked state
+        // against the browser's live event.altKey/etc flags, but only
+        // reactively, on the NEXT keyboard event it sees (correctly releasing
+        // the stale modifier BEFORE that new key, verified against the real
+        // vendored library -- this is not a same-keystroke misread) -- so
+        // nothing corrects the guest for the whole time the operator is away.
+        // keyboard.reset() (a real Guacamole.Keyboard API) walks every keysym
+        // it still believes is pressed and fires a genuine onkeyup for each --
+        // routing through sendGuestKeyEvent exactly like a real keyup, so the
+        // GUEST is actually told to release them the moment focus is lost,
+        // rather than waiting on that reactive correction. Cheap even when
+        // nothing is pressed (the overwhelmingly common case, since most
+        // blur/visibilitychange events happen mid-typing, not mid-keypress) --
+        // measured at roughly 1 microsecond per no-op call against the real
+        // library. resetShiftAdjust() is defence in depth on top of that:
+        // reset() already clears any shiftAdjust entry for a keysym still in
+        // keyboard.pressed (via that same onkeyup path), but this also covers
+        // a keysym whose entry exists only in shiftAdjust with no matching
+        // keyboard.pressed entry (see teardown()'s own identical pairing, and
+        // the "client going null mid-press" test in
+        // tests/js/keyboard_remap.test.js for why that gap matters). Known,
+        // accepted trade-off (see tests/js/keyboard_blur.test.js's own header
+        // for the reasoning): a modifier held THROUGH a focus round-trip
+        // without ever being physically released gets spuriously released
+        // here too, since the browser never re-fires a keydown for a key that
+        // was never actually released -- the next physical press of that same
+        // key restores it, and releasing a still-held key is far safer than
+        // the original bug (indefinitely stuck down). Bound to THIS element's
+        // own blur (focus moved to another in-page element, e.g. clicking a
+        // different tab) AND window blur (real X11/browser testing found BOTH
+        // often fire together for Alt+Tab in practice, not just window's, so
+        // this is deliberately not relying on any one browser's exact
+        // behavior) AND visibilitychange (the tab was backgrounded/minimized,
+        // which does not always fire either blur) -- reset() firing more than
+        // once for the same focus-loss event is harmless (idempotent; a no-op
+        // once nothing is left pressed).
+        // TESTHOOK:KEYBLUR:BEGIN -- tests/js/keyboard_blur.test.js extracts this
+        // block verbatim and runs it standalone via vm, so that test exercises
+        // the actual shipped wiring, not a reimplementation.
+        if (keyboardBlurHandler) {
+            box.removeEventListener("blur", keyboardBlurHandler, true);
+            window.removeEventListener("blur", keyboardBlurHandler);
+            document.removeEventListener("visibilitychange", keyboardBlurHandler);
+        }
+        keyboardBlurHandler = function () {
+            if (!keyboard) return;
+            trace("keyboard", "focus lost -- releasing any keys still held (keyboard.reset())");
+            keyboard.reset();
+            resetShiftAdjust();
+        };
+        box.addEventListener("blur", keyboardBlurHandler, true);
+        window.addEventListener("blur", keyboardBlurHandler);
+        document.addEventListener("visibilitychange", keyboardBlurHandler);
+        // TESTHOOK:KEYBLUR:END
 
         // NumLock/CapsLock/ScrollLock sync + on-screen toggle. Guacamole.Keyboard
         // forwards a lock KEY when it is pressed live, but never knew the browser's
@@ -1498,7 +2092,7 @@
 
     // ---- Dependency tracking panel --------------------------------------------
     // Reads this host's tracked-package (requires.txt) compliance and full package
-    // inventory, both captured only at deploy time (KNOWN_ISSUES I51 — no
+    // inventory, both captured only at deploy time (KNOWN_ISSUES I64 — no
     // background polling here either, matching deskui's "read once per tab-open,
     // explicit Refresh button" convention). Rollback is native (dnf/yum history
     // undo) where the host's package manager actually has one; everywhere else the
@@ -1834,6 +2428,226 @@
         });
     }
 
+    // ---- Self-update panel ---------------------------------------------------
+    // Reads this host's cached update state (docs/SELFUPDATE.md's control-op
+    // contract: update-status/-check/-apply/-rollback) and, for an
+    // administrator, offers Update now (typed-hostname confirmation, exactly
+    // like deskui's Stop/Disable) and Roll back (no confirmation -- the
+    // recovery action stays low-friction, same asymmetry as deskui's plain
+    // "start"). The relay is authoritative on every gate; this only reflects
+    // and re-checks it.
+    var updateState = null;      // last update-status/-check payload, for the button logic
+    var updateHostname = null;   // this host's name, for the typed confirmation -- see below
+
+    function updateRow(label, text, warn) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td"); k.textContent = label;
+        var v = document.createElement("td"); v.textContent = text;
+        if (warn) v.className = "warn";
+        tr.appendChild(k); tr.appendChild(v);
+        return tr;
+    }
+    function updateLinkRow(label, url) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td"); k.textContent = label;
+        var v = document.createElement("td");
+        var a = document.createElement("a");
+        a.href = url; a.textContent = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        v.appendChild(a);
+        tr.appendChild(k); tr.appendChild(v);
+        return tr;
+    }
+    // "not checked yet" (checked_at null, a host that has never run a check) is
+    // distinct from a live check that came back with an error (e.g. this
+    // repository has no GitHub Releases published yet) -- check_error already
+    // reads as a full sentence ("no releases published yet for owner/repo"),
+    // so it is shown verbatim rather than paraphrased. no_releases is its own
+    // typed flag (not string-matched) precisely so THIS calm, expected, day-one
+    // state can be told apart from a real outage -- found by review: both used
+    // to share the untyped check_error field, so this project's own repo (which
+    // has no Releases yet) rendered as a bold red error on a brand-new install.
+    function latestVersionText(r) {
+        if (!r.checked_at) return "not checked yet";
+        if (r.no_releases) return "no releases published on this repository yet";
+        if (r.check_error) return r.check_error;
+        return r.latest_version || "unknown";
+    }
+    // last_apply is {from, to, result: "ok"|"rolled_back"|"rollback_failed",
+    // detail, at} -- built fresh from from/to/result rather than echoing the
+    // stored "detail" verbatim, since the two privileged scripts phrase detail
+    // slightly differently for the same result (e.g. apply's "healthy" vs.
+    // rollback's "manual rollback, healthy") and this is the one line an
+    // operator reads to understand what just happened on this host.
+    function describeLastApply(la) {
+        if (!la) return null;
+        var to = la.to || "an unknown version", from = la.from || "an earlier version";
+        if (la.result === "ok") return "Update to " + to + " completed and is healthy.";
+        if (la.result === "rolled_back")
+            return "Update to " + to + " failed its health check and was automatically rolled back to " + from + ".";
+        if (la.result === "rollback_failed")
+            return "Update to " + to + " failed its health check AND the automatic rollback also failed — this host needs a human right now.";
+        return la.detail || (from + " → " + to);
+    }
+
+    // Enable Update now / Roll back only for an administrator (the same
+    // client-side reflection of the server's admin gate used throughout this
+    // panel -- e.g. connectAs()'s console/remote checks; the relay re-checks
+    // is_admin regardless of what this shows), and only once the typed host
+    // name matches for Update now specifically (Roll back needs no typed
+    // confirmation -- see the comment above the panel setup).
+    function updateSyncButtons() {
+        var st = updateState || {};
+        var confirmEl = $("update-confirm");
+        var confirmOk = isAdmin && !!updateHostname && confirmEl && confirmEl.value === updateHostname;
+        $("update-apply").disabled = !(isAdmin && st.update_available && confirmOk);
+        $("update-rollback").disabled = !(isAdmin && st.rollback_available);
+        $("update-confirm-wrap").hidden = !(isAdmin && st.update_available);
+    }
+
+    function setUpdateBadge(on) {
+        var dot = $("update-badge");
+        if (dot) dot.hidden = !on;
+    }
+
+    function renderUpdate() {
+        var body = $("update-state-body");
+        body.innerHTML = '<tr><td colspan="2" class="muted">Loading…</td></tr>';
+        // update-status/-check never carry this host's name (unlike
+        // deskui-status, which does) -- SelfUpdate.hostname is only ever handed
+        // back inside update-apply's need_confirm refusal. Both controllers
+        // derive it the exact same way (socket.gethostname(), same relay
+        // process -- see relay/selfupdate.py and relay/edy_rdp_relay.py), so
+        // deskui-status's read-only, non-admin-gated hostname is a safe,
+        // already-available stand-in for the confirmation label; the relay
+        // re-derives and checks its OWN value regardless of what this shows.
+        var hostReq = updateHostname ? cockpit.resolve(null)
+            : controlRequest({ op: "deskui-status" }).catch(function () { return null; });
+        Promise.all([controlRequest({ op: "update-status" }), hostReq]).then(function (results) {
+            var r = results[0], hostR = results[1];
+            if (hostR && hostR.ok && hostR.hostname) updateHostname = hostR.hostname;
+            updateState = r || {};
+            setUpdateBadge(!!(r && r.ok && r.update_available));
+            if (!r || !r.ok) {
+                body.innerHTML = '<tr><td colspan="2" class="muted">'
+                    + ((r && r.error) || "Self-update is not available on this host.") + '</td></tr>';
+                $("update-apply").disabled = true; $("update-rollback").disabled = true;
+                $("update-confirm-wrap").hidden = true;
+                $("update-note").textContent = "";
+                return;
+            }
+            $("update-hostname").textContent = updateHostname || "";
+            body.innerHTML = "";
+            body.appendChild(updateRow("Current version", r.current_version || "unknown"));
+            body.appendChild(updateRow("Latest known version", latestVersionText(r),
+                !!r.check_error && !r.no_releases));
+            if (r.release_name) body.appendChild(updateRow("Release", r.release_name));
+            if (r.release_notes_url) body.appendChild(updateLinkRow("Release notes", r.release_notes_url));
+            if (r.published_at) body.appendChild(updateRow("Published", r.published_at));
+            body.appendChild(updateRow("Checked", fmtWhen(r.checked_at)));
+            body.appendChild(updateRow("Roll back available", r.rollback_available
+                ? ("yes, to " + (r.rollback_version || "an earlier version"))
+                : "no earlier version on this host"));
+            $("update-note").textContent = r.update_available
+                ? "An update is available — type the host name below, then Update now."
+                : "This host is on the latest known version.";
+            var lastText = describeLastApply(r.last_apply);
+            var la = $("update-last-apply");
+            if (lastText) {
+                la.hidden = false;
+                la.textContent = lastText;
+                la.className = "status" + (r.last_apply.result === "ok" ? " ok" : " err");
+            } else {
+                la.hidden = true;
+            }
+            updateSyncButtons();
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="2" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    function fmtWhen(ts) {
+        if (!ts) return "never";
+        return fmtAge(ts) + " ago";
+    }
+
+    // A read-only status poll, for the trigger points that just need the badge
+    // (not the whole panel re-rendered): the initial page load. Opening the
+    // Update tab itself goes through renderUpdate(), which sets the badge from
+    // the SAME response it renders from rather than polling twice.
+    function refreshUpdateBadge() {
+        controlRequest({ op: "update-status" }).then(function (r) {
+            setUpdateBadge(!!(r && r.ok && r.update_available));
+        }).catch(function () { /* best effort -- leave the badge as it was */ });
+    }
+
+    function updateCheckAction() {
+        var btn = $("update-check"), s = $("update-status");
+        btn.disabled = true;
+        s.textContent = "Checking GitHub…"; s.className = "status";
+        controlRequest({ op: "update-check" }).then(function (r) {
+            btn.disabled = false;
+            if (r && r.ok) {
+                s.textContent = r.rate_limited
+                    ? "Checked less than a minute ago — showing the cached result."
+                    : (r.update_available ? "An update is available." : "This host is on the latest known version.");
+                s.className = "status ok";
+            } else {
+                s.textContent = "Check failed: " + ((r && r.error) || "unknown error");
+                s.className = "status err";
+            }
+            renderUpdate();
+        }).catch(function (e) {
+            btn.disabled = false;
+            s.textContent = "Check error: " + e; s.className = "status err";
+            renderUpdate();
+        });
+    }
+
+    function updateApplyAction() {
+        var confirm = $("update-confirm") ? $("update-confirm").value : "";
+        var s = $("update-status");
+        s.textContent = "Updating…"; s.className = "status";
+        $("update-apply").disabled = true; $("update-rollback").disabled = true;
+        controlRequest({ op: "update-apply", confirm: confirm }).then(function (r) {
+            if (r && r.ok) {
+                s.textContent = r.detail || "Update completed.";
+                s.className = "status ok";
+                if ($("update-confirm")) $("update-confirm").value = "";
+            } else {
+                var why = (r && (r.detail || r.error)) || "refused";
+                if (r && r.need_confirm) {
+                    if (r.hostname) { updateHostname = r.hostname; $("update-hostname").textContent = updateHostname; }
+                    why = "type the host name (" + (updateHostname || "") + ") to confirm";
+                }
+                s.textContent = "Update failed: " + why;
+                s.className = "status err";
+            }
+            renderUpdate();
+        }).catch(function (e) {
+            s.textContent = "Update error: " + e; s.className = "status err";
+            renderUpdate();
+        });
+    }
+
+    function updateRollbackAction() {
+        var s = $("update-status");
+        s.textContent = "Rolling back…"; s.className = "status";
+        $("update-apply").disabled = true; $("update-rollback").disabled = true;
+        controlRequest({ op: "update-rollback" }).then(function (r) {
+            if (r && r.ok) {
+                s.textContent = r.detail || "Rolled back.";
+                s.className = "status ok";
+            } else {
+                s.textContent = "Rollback failed: " + ((r && (r.detail || r.error)) || "refused");
+                s.className = "status err";
+            }
+            renderUpdate();
+        }).catch(function (e) {
+            s.textContent = "Rollback error: " + e; s.className = "status err";
+            renderUpdate();
+        });
+    }
+
     /* ---------------------------------------------------------------- *
      * Self tests
      *
@@ -2010,6 +2824,142 @@
                     }).join(", ") };
                 });
             }
+        },
+        {
+            name: "guacd image matches the pinned digest",
+            // Live equivalent of install.sh --verify's own check 2 (same
+            // INSTALL_PATH -> .env -> GUACD_IMAGE lookup, same `podman inspect
+            // --format {{.ImageName}}`) -- exposed here so an operator can
+            // check for drift anytime, not just at install/deploy time.
+            // edy-rdp-guacd runs under ROOT's rootful podman (a separate scope
+            // from a logged-in user's own rootless one -- see the guacd-build
+            // check above), so this needs the same superuser:"require".
+            run: function () {
+                return stSpawn2(["/bin/sh", "-c",
+                    'p=$(sed -n "s/^INSTALL_PATH=//p" /etc/cockpit-guac-rdp/install.conf | tr -d \'"\' | head -n1); ' +
+                    'want=$(sed -n "s/^GUACD_IMAGE=//p" "$p/.env" 2>/dev/null | head -n1); ' +
+                    'running=$(podman inspect edy-rdp-guacd --format "{{.ImageName}}" 2>/dev/null); ' +
+                    'printf "WANT=%s\\nRUNNING=%s\\n" "$want" "$running"'
+                ]).then(function (out) {
+                    var want = (/^WANT=(.*)$/m.exec(out) || [])[1] || "";
+                    var running = (/^RUNNING=(.*)$/m.exec(out) || [])[1] || "";
+                    if (!running)
+                        return { status: "skip", detail: "guacd container is not running" };
+                    if (!want)
+                        return { status: "fail", detail: "GUACD_IMAGE is not set in this host's .env" };
+                    if (want !== running)
+                        return { status: "fail", detail: "running '" + running + "', GUACD_IMAGE is '" + want +
+                                 "' (systemctl restart edy-rdp-guacd.service)" };
+                    return { status: "pass", detail: "running image matches GUACD_IMAGE (" + want + ")" };
+                }, function (e) {
+                    return { status: "skip", detail: "needs administrative access: " + e };
+                });
+            }
+        },
+        {
+            name: "gnome-remote-desktop patch integrity",
+            // Live equivalent of install.sh --verify's own check 3
+            // (patches/README.md): the 3390 greeter handover needs a hand-
+            // rebuilt daemon installed OVER the stock package path, protected
+            // only by an apt hold -- an upgrade that gets through (a forced
+            // reinstall, an OS version bump, the hold being lifted) silently
+            // reverts it with nothing else noticing. Read-only (apt-mark
+            // showhold, stat, cmp) -- no elevation needed on a normal host.
+            run: function () {
+                return stSpawn(["/bin/sh", "-c",
+                    'if command -v apt-mark >/dev/null 2>&1; then aptmark=yes; ' +
+                    'apt-mark showhold 2>/dev/null | grep -qx gnome-remote-desktop && held=yes || held=no; ' +
+                    'else aptmark=no; held=n/a; fi; ' +
+                    'daemon=/usr/libexec/gnome-remote-desktop-daemon; backup="$daemon.orig-edt1"; ' +
+                    'if [ ! -e "$backup" ]; then state=no-backup; ' +
+                    'elif cmp -s "$daemon" "$backup"; then state=stock; else state=patched; fi; ' +
+                    'printf "APTMARK=%s\\nHELD=%s\\nSTATE=%s\\n" "$aptmark" "$held" "$state"'
+                ]).then(function (out) {
+                    var aptmark = (/^APTMARK=(.*)$/m.exec(out) || [])[1];
+                    var held = (/^HELD=(.*)$/m.exec(out) || [])[1];
+                    var state = (/^STATE=(.*)$/m.exec(out) || [])[1];
+                    if (state === "no-backup")
+                        return { status: "skip", detail: "no .orig-edt1 stock backup on this host -- " +
+                                 "the handover patch was never applied here (patches/README.md)" };
+                    if (state === "stock")
+                        return { status: "fail", detail: "daemon is STOCK -- the 3390 greeter handover " +
+                                 "will fail; re-apply patches/grd-handover-method-call.patch (see patches/README.md)" };
+                    if (aptmark === "yes" && held !== "yes")
+                        return { status: "fail", detail: "daemon is patched but gnome-remote-desktop is " +
+                                 "NOT apt-mark held -- the next upgrade will silently revert it" };
+                    return { status: "pass", detail: "daemon is patched" +
+                             (aptmark === "yes" ? " and apt-mark held" : "") };
+                }, function (e) {
+                    return { status: "skip", detail: String(e) };
+                });
+            }
+        },
+        {
+            name: "No anonymous PulseAudio TCP (4713)",
+            // KNOWN_ISSUES I44: a stale ~/.config/pipewire/pipewire-pulse.conf.d
+            // drop-in can leave an anonymous-auth TCP listener up although the
+            // TCP approach was removed (CHANGELOG 1.2.9). Same ss-based pattern
+            // as the guacd-loopback check above, inverted: here the only
+            // correct state is nothing listening at all.
+            run: function () {
+                return stSpawn(["ss", "-tln"]).then(function (out) {
+                    var lines = out.split("\n").filter(function (l) { return /:4713(\s|$)/.test(l); });
+                    if (!lines.length)
+                        return { status: "pass", detail: "nothing listening on 4713" };
+                    return { status: "fail", detail: "PulseAudio TCP is exposed on 4713 (KNOWN_ISSUES I44): " +
+                             lines[0].trim() };
+                }, function (e) {
+                    return { status: "skip", detail: "ss unavailable: " + e };
+                });
+            }
+        },
+        {
+            name: "Vendored client library ownership matches served tree",
+            // KNOWN_ISSUES / DEFENSE-LAYER D-13: guacamole-common-js/all.min.js
+            // has been found owned differently from the rest of this plugin's
+            // served files -- a provenance anomaly (an ad hoc placement outside
+            // the normal install pipeline), not a content check. Compares
+            // against manifest.json, shipped by the same install.sh PAGE
+            // manifest entry, as the reference.
+            run: function () {
+                var dir = "/usr/share/cockpit/guac-rdp";
+                return stSpawn(["/bin/sh", "-c",
+                    'printf "LIB=%s\\nREF=%s\\n" ' +
+                    '"$(stat -c %U:%G \'' + dir + '/guacamole-common-js/all.min.js\' 2>/dev/null)" ' +
+                    '"$(stat -c %U:%G \'' + dir + '/manifest.json\' 2>/dev/null)"'
+                ]).then(function (out) {
+                    var lib = (/^LIB=(.*)$/m.exec(out) || [])[1] || "";
+                    var ref = (/^REF=(.*)$/m.exec(out) || [])[1] || "";
+                    if (!lib || !ref)
+                        return { status: "skip", detail: "could not stat the served plugin files" };
+                    if (lib !== ref)
+                        return { status: "fail", detail: "guacamole-common-js/all.min.js is owned " + lib +
+                                 ", the rest of the served tree is " + ref };
+                    return { status: "pass", detail: "owned " + lib + ", matching the served tree" };
+                }, function (e) {
+                    return { status: "skip", detail: String(e) };
+                });
+            }
+        },
+        {
+            name: "cockpit-guac-rdp group exists with expected membership",
+            run: function () {
+                return stSpawn(["/bin/sh", "-c",
+                    'getent group cockpit-guac-rdp >/dev/null 2>&1 && exists=yes || exists=no; ' +
+                    'printf "EXISTS=%s\\nGROUPS=%s\\n" "$exists" "$(id -nG edy-relay 2>/dev/null)"'
+                ]).then(function (out) {
+                    var exists = (/^EXISTS=(.*)$/m.exec(out) || [])[1];
+                    var groups = (/^GROUPS=(.*)$/m.exec(out) || [])[1] || "";
+                    if (exists !== "yes")
+                        return { status: "fail", detail: "the cockpit-guac-rdp group does not exist" };
+                    if ((" " + groups + " ").indexOf(" cockpit-guac-rdp ") === -1)
+                        return { status: "fail", detail: "edy-relay is not a member of cockpit-guac-rdp " +
+                                 "(has: " + (groups || "no groups -- user missing?") + ")" };
+                    return { status: "pass", detail: "group exists; edy-relay is a member" };
+                }, function (e) {
+                    return { status: "skip", detail: String(e) };
+                });
+            }
         }
     ];
 
@@ -2075,7 +3025,7 @@
     // Tab names as they appear in the URL hash (?tab=connect etc.) -- the main
     // page only; pop-outs never show tabs at all (html.monitor .tabs is
     // display:none), so this never runs there.
-    var TAB_NAMES = ["connect", "sessions", "deskui", "deps", "selftests"];
+    var TAB_NAMES = ["connect", "sessions", "deskui", "deps", "update", "selftests", "architecture"];
     function selectTab(id) {
         var name = id.replace(/^tab-/, "");
         TAB_NAMES.forEach(function (n) {
@@ -2087,6 +3037,7 @@
         if (id === "tab-sessions") renderSessions();
         if (id === "tab-deskui") renderDeskUi();
         if (id === "tab-deps") renderDeps();
+        if (id === "tab-update") renderUpdate();
         // Reflect the active tab in the URL, the same way URL_CONTROLS persists
         // Session/Resolution/etc: rewritten via writeHash() (replaceState, so no
         // navigation/history spam) so the tab survives a refresh and is
@@ -2208,7 +3159,9 @@
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
         $("tab-deskui").addEventListener("click", function () { selectTab("tab-deskui"); });
         $("tab-deps").addEventListener("click", function () { selectTab("tab-deps"); });
+        $("tab-update").addEventListener("click", function () { selectTab("tab-update"); });
         $("tab-selftests").addEventListener("click", function () { selectTab("tab-selftests"); });
+        $("tab-architecture").addEventListener("click", function () { selectTab("tab-architecture"); });
         $("run-tests").addEventListener("click", runSelfTests);
         $("refresh").addEventListener("click", renderSessions);
         // Desktop UI panel
@@ -2227,8 +3180,13 @@
             depsTrackedOnly = $("deps-tracked-only").checked;
             renderDepsPackages();
         });
+        // Update panel
+        $("update-check").addEventListener("click", updateCheckAction);
+        $("update-confirm").addEventListener("input", updateSyncButtons);
+        $("update-apply").addEventListener("click", updateApplyAction);
+        $("update-rollback").addEventListener("click", updateRollbackAction);
         var perm = cockpit.permission({ admin: true });
-        perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); });
+        perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); updateSyncButtons(); });
         isAdmin = !!perm.allowed;
         loadControls();   // restore persisted toggles/selectors BEFORE any auto-connect
         $("target").addEventListener("change", refreshUi);
@@ -2250,6 +3208,7 @@
             if (client && activeKey) {
                 setStatus(soundOn ? "Enabling sound…" : "Muting sound…");
                 trace("sound", "toggle reconnect: dropping and re-establishing " + activeKey + " to renegotiate enable-audio");
+                greeterFollowArmed = false;
                 teardown(true);
                 window.setTimeout(function () { connect(activeKey); }, 80);
             }
@@ -2272,6 +3231,7 @@
         $("resolution").addEventListener("change", function () {
             if (client && activeKey) {
                 setStatus("Applying resolution…");
+                greeterFollowArmed = false;
                 teardown(true);
                 window.setTimeout(function () { connect(activeKey); }, 80);
             }
@@ -2304,6 +3264,7 @@
             // reconnectable until the session TTL. Explicit desktop kill remains
             // available via the Sessions tab's Terminate button.
             setStatus("Disconnecting…");
+            greeterFollowArmed = false;
             teardown(false);
         });
         $("addmon").addEventListener("click", openMonitorWindow);

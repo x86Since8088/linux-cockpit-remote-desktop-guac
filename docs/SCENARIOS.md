@@ -1,6 +1,8 @@
 # Scenarios (with screenshots)
 
-The plugin exposes three connection scenarios plus a session-tracking view. The images
+The plugin exposes seven connection scenarios (Login screen, Console, Virtual monitor, Isolated session,
+Wayland desktop, Remote RDP, Remote VNC) plus a session-tracking view. The Architecture tab lists all seven; the sections below describe Isolated, Console, Virtual monitor and
+Remote RDP, and screenshots exist only for the idle page, the Isolated desktop and the Console gate refusal. The images
 below are captured from the live system by `cockpit-e2e/tests/doc-shots.spec.js`, running
 as the **non-admin** throwaway user `cptest` — so the isolated desktop shown is a fresh,
 empty session with no private content.
@@ -38,6 +40,17 @@ challenge over a superuser Cockpit channel), not by a client-side check — so i
 bypassed by driving the tunnel directly (see [KNOWN_ISSUES](KNOWN_ISSUES.md) I4). No
 screenshot of a live console mirror is included here because it would show the operator's
 real desktop.
+
+Being an admin is a separate question from *whose* desktop you point the mirror at. If a
+**different** user is currently signed in at the physical seat, mirroring it needs
+membership in a second unix group (`EDY_RDP_SHADOW_GROUP`, default
+`cockpit-guac-rdp-shadow` — see [README.md](../README.md)'s Configuration section), on top
+of the admin gate above, which is unchanged. This does not apply when nobody is signed in
+at the seat, or when the signed-in user is the one requesting console — in either case the
+admin gate alone decides it, exactly as before. `deploy.sh --with-users` creates this group
+automatically; an operator who did not pass that flag creates it and adds members
+themselves (see [KNOWN_ISSUES](KNOWN_ISSUES.md) for why a missing group fails closed
+rather than refusing to deploy).
 
 ## Virtual monitor
 

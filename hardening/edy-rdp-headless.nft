@@ -2,12 +2,39 @@
 # Per-user headless RDP servers (grd binds all interfaces) must be reachable
 # ONLY via loopback -- guacd on the host dials 127.0.0.1:<port>; nothing on the
 # LAN may reach them. Mirrors the guacd 4822 loopback posture.
+#
+# STATEFUL ON PURPOSE (KNOWN_ISSUES I61). 33000-33999 lies INSIDE the kernel's
+# ephemeral range (net.ipv4.ip_local_port_range, 32768-60999 by default), so a
+# port number here is not only "a headless session port": it is also the LOCAL
+# port of any outbound connection this host makes. Up to 1.10.6 the drop below
+# was stateless (`tcp dport 33000-33999 drop`) and silently black-holed the
+# SYN-ACK of every outbound TCP connection whose ephemeral port landed in the
+# range - ~3.5% of all of them, in multi-second bursts per destination, since
+# Linux walks ephemeral ports per destination. On edt1 that was every host->pod
+# connection of edy-proxy-go (the public front-door VIP flapped ~30x/day).
+#
+#   1. established/related first: a reply to a connection THIS host opened is
+#      never a new inbound connection, whatever its port.
+#   2. loopback may open new connections to the session ports (guacd/relay).
+#   3. only NEW connections from anywhere else are dropped - which is the whole
+#      of what this table exists to stop.
+#
+# The range is ALSO taken out of the ephemeral allocator by
+# /etc/sysctl.d/90-edy-rdp-headless.conf (net.ipv4.ip_local_reserved_ports),
+# so an outbound connection never picks one of these ports in the first place.
+# Either fix alone stops the incident; both are kept as defence in depth (the
+# sysctl can be overridden by another drop-in; this rule cannot be).
+#
+# `delete table` between two `table` lines makes `nft -f` of this file an
+# ATOMIC replace (one transaction), so edy-rdp-firewall.service can reload it
+# with no window where the session ports are open.
 table inet edy_rdp_headless
 delete table inet edy_rdp_headless
 table inet edy_rdp_headless {
     chain input {
         type filter hook input priority filter; policy accept;
+        ct state established,related accept
         iif "lo" tcp dport 33000-33999 accept
-        tcp dport 33000-33999 drop
+        ct state new tcp dport 33000-33999 drop
     }
 }

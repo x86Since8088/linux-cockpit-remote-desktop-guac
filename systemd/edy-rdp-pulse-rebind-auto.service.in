@@ -1,0 +1,32 @@
+[Unit]
+Description=edy-rdp resolve and bind the currently active seat's pulse audio
+# edy-rdp-pulse-seat-auto.path deliberately watches ALL of /run/user (any login
+# or logout by ANY account, not just the RDP seat -- see that unit's own
+# comment for why), so this service can legitimately be started several times
+# in quick succession by unrelated account churn elsewhere on a multi-user host
+# (this project's own edt1 has several lingering service accounts alongside
+# its human users) with no fault of its own. systemd's bare default
+# (StartLimitBurst=5 in StartLimitIntervalSec=10, inherited when neither is
+# set) is tight enough that ordinary multi-account boot-time churn could trip
+# it and leave this unit FAILED -- silently disabling the audio-follow feature
+# until an operator runs `systemctl reset-failed` -- found by adversarial
+# review. This does not widen the SEPARATE, more serious risk of restarting
+# the shared edy-rdp-guacd.service itself: that has its own internal cooldown
+# (RESTART_COOLDOWN_SECS in edy-rdp-pulse-bind.sh) regardless of how often this
+# unit itself is merely started.
+StartLimitIntervalSec=60
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+# EDY_RDP_PULSE_SEAT_UID (if pinned to a number rather than 'auto') and
+# EDY_RDP_PULSE_SEAT_SOCKET still win over auto-resolution - the script itself
+# decides that, this unit just needs the .env in its environment to see them.
+# '-' keeps the unit startable on a host with no .env yet.
+EnvironmentFile=-@ENV_FILE@
+# --auto-restart-guacd: unlike the socket bind (which reaches a running
+# container via mount propagation with no restart), PULSE_SOURCE is a
+# container start-time env var - a resolved value that changed can only reach
+# guacd by restarting it. edy-rdp-guacd.service's OWN ExecStartPre never passes
+# this (it would be restarting the unit it is a prerequisite of).
+ExecStart=@LIBEXEC@/edy-rdp-pulse-bind --auto-restart-guacd

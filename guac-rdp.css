@@ -24,10 +24,11 @@ button:disabled { opacity:.5; cursor:default; }
    is actually armed; a disabled danger button falls back to the neutral look. */
 button.danger:not(:disabled) { background:var(--err); color:#fff; border-color:var(--err); }
 .mono { font-family:ui-monospace,"RedHatMono",monospace; }
-/* Desktop-UI state table: a plain two-column key/value read-out. */
-#deskui-state-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
-#deskui-state-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
-#deskui-state-table td.warn { color:var(--err); font-weight:600; }
+/* Desktop-UI and Update state tables: plain two-column key/value read-outs
+   (same shape, same rule set -- see #update-state-table in index.html). */
+#deskui-state-table td, #update-state-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
+#deskui-state-table td:first-child, #update-state-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
+#deskui-state-table td.warn, #update-state-table td.warn { color:var(--err); font-weight:600; }
 
 /* Dependencies panel: same key/value read-out as deskui's state table, plus an
    expandable "blast radius" row under a tracked package (KNOWN_ISSUES I51). */
@@ -96,6 +97,25 @@ html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-spac
 #sessioncard .row { display:flex; gap:.5rem; align-items:center; }
 #sessioncard .row button { flex:1; }
 #sessioncard #sessionclose { flex:none; padding:.15rem .5rem; }
+
+/* "Logs…" modal: the SAME <dialog> idiom as #sessioncard above (see that
+   rule's own comment), just sized near-viewport instead of a fixed width --
+   a log table needs room to actually be useful. */
+#logsdialog[open] { display:flex; flex-direction:column; gap:.5rem;
+  background:var(--panel); color:var(--ink); border:1px solid var(--line);
+  border-radius:6px; box-shadow:0 8px 32px rgba(0,0,0,.5);
+  padding:1rem 1.2rem; width:95vw; height:95vh; max-width:95vw; max-height:95vh;
+  box-sizing:border-box;
+}
+#logsdialog::backdrop { background:rgba(0,0,0,.55); }
+#logsdialog .row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; flex:none; }
+#logsdialog select, #logsdialog input { font:inherit; }
+#logsdialog #logs-search { padding:.25rem .5rem; }
+#logsdialog #logs-tablewrap { flex:1; overflow:auto; border:1px solid var(--line); border-radius:4px; min-height:0; }
+#logsdialog table.sessions { margin:0; width:100%; }
+#logsdialog thead th { position:sticky; top:0; background:var(--panel); }
+#logsdialog .colpick { display:inline-flex; align-items:center; gap:.25rem; font-size:.8125rem; color:var(--muted); }
+#logsdialog .err-text { color:var(--err); }
 /* Transient toast (showToast()): a small self-dismissing notice for something the
    panel did on its own, e.g. switching to the greeter because nobody is signed in
    on the seat. Not a persistent line like .status: it floats bottom-centre, fades
@@ -129,8 +149,16 @@ html.monitor #seatbar button { padding:.05rem .4rem; font-size:.8rem; white-spac
 
 .tabs { display:flex; gap:.25rem; padding:.4rem .6rem 0; background:var(--panel); border-bottom:1px solid var(--line); }
 .tab { background:transparent; color:var(--muted); border:none; border-bottom:2px solid transparent;
-       padding:.5rem .9rem; cursor:pointer; font:inherit; border-radius:0; }
+       padding:.5rem .9rem; cursor:pointer; font:inherit; border-radius:0; position:relative; }
 .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+/* Persistent "an update is available" indicator on the Update tab -- distinct
+   from #toast (which is transient, for one-off events the panel did on its
+   own): this is ongoing STATE, so it stays until the tab is opened or the host
+   is updated, never auto-hides. Refreshed wherever update-status is read
+   (see refreshUpdateBadge()/renderUpdate() in guac-rdp.js), never by its own
+   timer. */
+.badge-dot { display:inline-block; width:.5rem; height:.5rem; margin-left:.4rem;
+             border-radius:50%; background:var(--err); vertical-align:middle; }
 .panel[hidden] { display:none; }
 table.sessions { width:calc(100% - 1.8rem); margin:.6rem .9rem; border-collapse:collapse; font-size:.8125rem; }
 table.sessions th, table.sessions td { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line); }
@@ -163,6 +191,133 @@ table.sessions .term { background:#c9190b; color:#fff; border:none; border-radiu
 
 #selftests-table td:nth-child(3) { font-size: 0.92em; }
 #selftests-summary { margin: 0.5em 0; }
+
+/* Architecture tab: static operator notes. No control socket, no session. */
+.arch { max-width: 54rem; padding: .4rem 1.1rem 2rem; }
+.arch h2 { font-size: 1.05rem; font-weight: 600; margin: 1.25rem 0 .35rem; }
+.arch h2:first-child { margin-top: .8rem; }
+.arch p, .arch li { font-size: .875rem; line-height: 1.5; margin: .4rem 0; }
+.arch ul { margin: .2rem 0 .8rem; padding-left: 1.2rem; }
+.arch pre {
+  font-family: ui-monospace, "RedHatMono", monospace;
+  font-size: .78rem; line-height: 1.45; white-space: pre;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 4px;
+  padding: .7rem .9rem; overflow: auto;
+}
+.arch table { width: 100%; border-collapse: collapse; font-size: .8125rem; margin: .4rem 0 1rem; }
+.arch th, .arch td { text-align: left; vertical-align: top; padding: .4rem .55rem; border-bottom: 1px solid var(--line); }
+.arch th { color: var(--muted); font-weight: 600; }
+.arch code { font-family: ui-monospace, "RedHatMono", monospace; font-size: .92em; }
+
+/* Architecture diagram. Node geometry and the radio contract are documented
+   in the SVG comment in index.html. Three fills, and the subtitle text repeats
+   the category so the picture still reads without the colour. */
+:root {
+  --arch-ours-fill: #e8f2fc;
+  --arch-accent: var(--accent);
+  --arch-ours-stroke: var(--arch-accent);
+  --arch-patch-fill: #fbf3e4;
+  --arch-patch-stroke: #8a5a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --arch-accent: #5b9fe8;
+    --arch-ours-fill: #163044;
+    --arch-patch-fill: #3a2e16;
+    --arch-patch-stroke: #e0b15a;
+  }
+}
+.arch-key { display: flex; flex-wrap: wrap; gap: .4rem 1rem; list-style: none;
+            margin: .5rem 0; padding: 0; font-size: .8rem; }
+.arch-key li { display: inline-flex; align-items: center; gap: .4rem; }
+.swatch { flex: none; width: 1.1rem; height: .7rem; border-radius: 3px; box-sizing: border-box; background: var(--panel); }
+.swatch.ours { background: var(--arch-ours-fill); border: 2px solid var(--arch-ours-stroke); }
+.swatch.stock { border: 2px dashed var(--muted); }
+.swatch.patch { background: var(--arch-patch-fill); border: 2px solid var(--arch-patch-stroke); }
+.swatch.frame { border: 1.5px solid var(--arch-ours-stroke); }
+.arch-modes { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .6rem; }
+.arch-mode { display: inline-flex; align-items: center; gap: .35rem;
+             border: 1px solid var(--line); border-radius: 999px; padding: .15rem .65rem;
+             font-size: .8rem; background: var(--panel); cursor: pointer; }
+.arch-mode:has(input:checked) { border-color: var(--arch-accent); background: var(--arch-ours-fill); font-weight: 600; }
+.arch-mode:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.arch-scroll { overflow-x: auto; }
+.arch-svg { width: 100%; min-width: 720px; height: auto; display: block; overflow: visible; }
+.arch-svg text { font-family: "RedHatText", system-ui, sans-serif; font-size: 14px; fill: var(--ink); }
+.arch-svg text.sub { font-size: 12px; fill: var(--muted); }
+.arch-svg .n-ours rect { fill: var(--arch-ours-fill); stroke: var(--arch-ours-stroke); stroke-width: 2; }
+.arch-svg .n-stock rect { fill: var(--panel); stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 3; }
+.arch-svg .n-patched rect { fill: var(--arch-patch-fill); stroke: var(--arch-patch-stroke); stroke-width: 2; }
+.arch-svg .n-frame { fill: transparent; stroke: var(--arch-ours-stroke); stroke-width: 1.5; }
+.arch-svg .n-frame-quiet { fill: transparent; stroke: var(--line); stroke-width: 1.5; }
+.arch-svg .wire { fill: none; stroke: var(--line); stroke-width: 2; }
+.arch-svg .wire-common, .arch-svg .wire-rdp { stroke: var(--arch-accent); }
+.arch-svg #arch-n-dest rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+.arch-svg .dest { visibility: hidden; }
+.arch-svg .grd-sub { display: none; }
+.arch-flow:has(#arch-greeter:checked) .grd-sub-greeter,
+.arch-flow:not(:has(#arch-greeter:checked)) .grd-sub-other { display: inline; }
+.arch-flow:has(#arch-greeter:checked) .dest-greeter,
+.arch-flow:has(#arch-console:checked) .dest-console,
+.arch-flow:has(#arch-virtual:checked) .dest-virtual,
+.arch-flow:has(#arch-isolated:checked) .dest-isolated,
+.arch-flow:has(#arch-rrdp:checked) .dest-rrdp { visibility: visible; }
+/* Remote RDP occupies the grd slot with their server, not our patched daemon. */
+.arch-svg #arch-n-remote-rdp { visibility: hidden; }
+.arch-flow:has(#arch-rrdp:checked) #arch-n-grd { visibility: hidden; }
+.arch-flow:has(#arch-rrdp:checked) #arch-n-remote-rdp { visibility: visible; }
+/* VNC sessions never start the bridge. RDP sessions leave the VNC lane quiet. */
+.arch-flow:has(#arch-wayland:checked) .lane-rdp,
+.arch-flow:has(#arch-vnc:checked) .lane-rdp,
+.arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) .lane-vnc { opacity: .28; }
+.arch-flow:has(#arch-wayland:checked) .wire-rdp,
+.arch-flow:has(#arch-vnc:checked) .wire-rdp { stroke: var(--line); animation: none; }
+.arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) .wire-vnc { stroke: var(--line); animation: none; }
+.arch-flow:has(#arch-wayland:checked) .wire-vnc,
+.arch-flow:has(#arch-vnc:checked) .wire-vnc { stroke: var(--arch-accent); }
+/* The VNC slot holds wayvnc for Wayland and their server for Remote VNC. */
+.arch-svg #arch-n-remote-vnc { visibility: hidden; }
+.arch-flow:has(#arch-vnc:checked) #arch-n-wayvnc { visibility: hidden; }
+.arch-flow:has(#arch-vnc:checked) #arch-n-remote-vnc { visibility: visible; }
+.arch-flow:has(#arch-vnc:checked) #arch-n-wl-start { opacity: .28; }
+.arch-flow:has(#arch-wayland:checked) #arch-n-dest,
+.arch-flow:has(#arch-vnc:checked) #arch-n-dest { visibility: hidden; }
+.arch-cap { display: none; }
+.arch-flow:has(#arch-greeter:checked) .cap-greeter,
+.arch-flow:has(#arch-console:checked) .cap-console,
+.arch-flow:has(#arch-virtual:checked) .cap-virtual,
+.arch-flow:has(#arch-isolated:checked) .cap-isolated,
+.arch-flow:has(#arch-wayland:checked) .cap-wayland,
+.arch-flow:has(#arch-rrdp:checked) .cap-rrdp,
+.arch-flow:has(#arch-vnc:checked) .cap-vnc { display: block; }
+@keyframes arch-dash { to { stroke-dashoffset: -26; } }
+@keyframes arch-glow {
+  0%, 18%, 100% { filter: none; }
+  8% { filter: drop-shadow(0 0 5px var(--arch-accent)); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .arch-svg .wire-common,
+  .arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) .arch-svg .wire-rdp,
+  .arch-flow:has(#arch-wayland:checked) .arch-svg .wire-vnc,
+  .arch-flow:has(#arch-vnc:checked) .arch-svg .wire-vnc {
+    stroke-dasharray: 5 8;
+    animation: arch-dash .9s linear infinite;
+  }
+  .arch-svg .seq { animation: arch-glow 3.2s ease-in-out infinite; }
+  .arch-svg .seq-1 { animation-delay: .4s; }
+  .arch-svg .seq-2 { animation-delay: .8s; }
+  .arch-svg .seq-3 { animation-delay: 1.2s; }
+  .arch-svg .seq-4 { animation-delay: 1.6s; }
+  .arch-svg .seq-5 { animation-delay: 2.0s; }
+  .arch-svg .seq-6 { animation-delay: 2.4s; }
+  .arch-svg .seq-7 { animation-delay: 2.8s; }
+  .arch-flow:has(#arch-wayland:checked) :is(.lane-rdp, .lane-rdp .seq),
+  .arch-flow:has(#arch-vnc:checked) :is(.lane-rdp, .lane-rdp .seq, #arch-n-wl-start),
+  .arch-flow:not(:has(#arch-wayland:checked)):not(:has(#arch-vnc:checked)) :is(.lane-vnc, .lane-vnc .seq) {
+    animation: none;
+  }
+}
 
 @media (prefers-color-scheme: dark) {
     .st-pass { color: #6fb992; }

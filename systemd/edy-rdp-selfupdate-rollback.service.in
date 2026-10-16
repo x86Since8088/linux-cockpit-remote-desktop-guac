@@ -1,0 +1,18 @@
+[Unit]
+Description=edy-rdp self-update: roll back to the one non-current payload directory on this host
+# Deliberately NOT templated -- see edy-rdp-selfupdate-apply.service.in for why
+# a parameterless unit is a stronger property here than the usual %i pattern.
+# "rollback" always means "whichever payload-<version> directory under the
+# install root is not the current `payload` symlink's target"; the script
+# refuses cleanly (exit 2) unless there is EXACTLY one such directory. No
+# caller-supplied version ever reaches this unit.
+
+[Service]
+Type=oneshot
+# EDY_RDP_UPDATE_REPO is only used here to re-check GitHub AFTER a successful
+# rollback (so update-status reflects the new state promptly); a rollback still
+# proceeds without it. '-' keeps the unit startable on a host with no .env yet.
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@LIBEXEC@/edy-rdp-selfupdate-rollback
+# Swap + install.sh + relay restart + up to ~20s health-check polling.
+TimeoutStartSec=120

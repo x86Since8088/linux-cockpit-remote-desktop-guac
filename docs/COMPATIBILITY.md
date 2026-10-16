@@ -104,11 +104,14 @@ Other hard requirements independent of distro:
   firewall — it coexists with ufw/firewalld).
 
 ## After installation
-Add each Cockpit user who may use the plugin to the `edy-rdp` group:
+Add each Cockpit user who may use the plugin to the `cockpit-guac-rdp` group:
 
 ```bash
-sudo usermod -aG edy-rdp <user>
+sudo usermod -aG cockpit-guac-rdp <user>
 ```
+
+Group membership is more than a socket permission for most scenarios — see
+[GROUP-ACCESS-MODEL.md](GROUP-ACCESS-MODEL.md) for exactly what it grants.
 
 Then verify the core invariant (guacd must not be on a host port):
 

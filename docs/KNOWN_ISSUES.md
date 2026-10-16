@@ -184,7 +184,7 @@ Mirror + virtual-monitor render fully through guacd today.
 ## Management API + Disconnect cleanup (2026-08-30)
 
 Added a control API on a second socket-activated AF_UNIX socket
-`/run/edy-rdp/control.sock` (0660 group edy-rdp, `edy-rdp-control.socket`):
+`/run/edy-rdp/control.sock` (0660 group cockpit-guac-rdp, `edy-rdp-control.socket`):
 - `control.py` — `handle_control()` (list/terminate/ping), `LiveConnections` (uuid->terminate).
 - Auth by SO_PEERCRED: a user sees/terminates only their own sessions; an admin (or root) all.
 - Relay registers each live connection so `terminate` actually closes it (verified: terminate ->
@@ -208,7 +208,7 @@ arrives (in addition to the 4s keepalive), so guacd's client stays responsive re
 browser tab. Both browser-path Playwright tests (list+terminate, disconnect+cleanup) pass reliably.
 
 ### I28 · Session registry never persisted; reaper pruned a phantom file · Sev M · FIXED
-The relay runs as `edy-relay` but the state dir `/run/edy-rdp` was created `0750 root:edy-rdp`
+The relay runs as `edy-relay` but the state dir `/run/edy-rdp` was created `0750 root:cockpit-guac-rdp`
 (group has only `r-x`), so the relay could not create its atomic temp file and every persist
 silently failed (`_persist_locked` swallows `OSError`). Session state therefore lived only in the
 relay's memory: it did NOT survive a relay restart, contradicting the lifecycle requirement that
@@ -221,8 +221,8 @@ update). The two registries could never converge on one file.
 
 **FIXED (2026-08-30):**
 * The relay is now the SOLE writer/authority of the registry. State moved to a relay-owned subdir
-  `/run/edy-rdp/state` (`0750 edy-relay:edy-rdp`, via tmpfiles) so `edy-relay` can write atomically;
-  the socket dir stays `root:edy-rdp` non-group-writable so a group member cannot unlink the sockets.
+  `/run/edy-rdp/state` (`0750 edy-relay:cockpit-guac-rdp`, via tmpfiles) so `edy-relay` can write atomically;
+  the socket dir stays `root:cockpit-guac-rdp` non-group-writable so a group member cannot unlink the sockets.
 * A `prune` op was added to the control API (admin-only; the reaper is root). The reaper now prunes
   THROUGH the relay's control socket instead of editing the file behind its back, and still performs
   the OS-level `gdm-greeter` reap via loginctl. `--state-file` was removed from the reaper.
@@ -251,9 +251,10 @@ FreeRDP3 guacd regressed 3389 rendering.
   the **headless** grd scope (file-based creds, no keyring) on a deterministic LOOPBACK port
   `33000 + uid-1000`. **Do NOT pre-create a `--virtual-monitor`** — grd makes the monitor on connect,
   and a pre-made one gets captured empty. An ephemeral gate credential is written to
-  `/run/edy-rdp/headless/<uid>.env` (root:edy-rdp 0640).
+  `/run/edy-rdp/headless/<uid>.env` (root:cockpit-guac-rdp 0640).
 * The ports are reachable only via loopback (`hardening/edy-rdp-headless.nft`, verified with a netns
-  test); guacd on the host dials 127.0.0.1:<port>.
+  test); guacd on the host dials 127.0.0.1:<port>. Since 1.10.7 that rule is STATEFUL and the range is
+  reserved from the ephemeral allocator — see I61 for what the original stateless rule broke.
 * The relay routes the **isolated** scenario to the CALLER'S OWN session: it starts the unit
   (polkit grant `edy-relay -> edy-rdp-headless@*`), reads port+cred, and REWRITES the guacd connect
   from the SO_PEERCRED identity. The browser supplies and sees no credential; a caller can only reach
@@ -421,7 +422,7 @@ locally needs its own XDG_RUNTIME_DIR/bus (separate compositor namespace) — no
 current safe behavior. LESSON: never signal by process NAME for a shared-uid resource; never reap logind
 sessions without checking Seat + Class.
 
-### I29 addendum 5 (2026-09-01) — patched daemon REVERTED to stock (user request)
+### I29 addendum 5 (2026-09-01) — patched daemon REVERTED to stock (user request) — SUPERSEDED by addendum 6 (2026-09-09)
 The locally-built grd daemon (method-call handover patch + audit hardening, sha `5c08514e…`) was removed
 and the STOCK package binary restored (sha `c117146f…`, dpkg-verified clean); the
 `org.gnome.RemoteDesktop.handover.conf` drop-in was removed (bus policy reloaded) and the apt hold on
@@ -432,6 +433,18 @@ ORIGINAL "TakeClientReady never delivered" symptom was almost certainly caused b
 drop-in (now gone), so stock grd with NO drop-in may in fact hand over correctly — UNTESTED; verify with a
 single careful native-client connect if the greeter is wanted (mind I31 disconnect-crash churn). The
 rdplogin door credential + rotation timer remain in place and are harmless either way.
+
+### I29 addendum 6 (2026-09-09) — method-call patch RE-DEPLOYED on edt1; addendum 5 is superseded
+The method-call handover daemon (`patches/grd-handover-method-call.patch`, sha `5c08514e…`) was installed
+again on 2026-09-09 (CHANGELOG 1.1.4.20260909, `patches/README.md`): stock backed up to `.orig-edt1` and
+the package put on `apt-mark hold`. **Verified live 2026-10-15:** `dpkg -V gnome-remote-desktop` flags only
+`/usr/libexec/gnome-remote-desktop-daemon` as modified, `apt-mark showhold` lists the package, and both
+running daemons (`--system` on 3390 and the user daemon on 3389) execute that sha. The patch edits only
+`src/grd-daemon-system.c` and `src/grd-daemon-handover.c`, so it is exercised on the login-screen path; the
+same file also serves 3389 and `--headless`, where it is not used. Addendum 5's "REVERTED to stock" and the
+line "The 3390 greeter remains OPEN upstream; the plugin no longer uses it" earlier in I29 are historical.
+The patch is hand-built and not shipped (`deploy.sh` does not ship `patches/`), so another host runs the
+stock package; the Architecture tab's amber label names edt1 for that reason.
 
 ## Security gates hardening (2026-09-01, FreeRDP3-bridge architecture)
 
@@ -922,7 +935,313 @@ review's own reasoning in the corresponding commit for why. Re-verified with an 
 reparents into an open dialog and back on close, `aria-hidden` clears on show and is set on hide, and
 the forced-reflow line runs without throwing.
 
-### I49 · "guacd build" self-test false-FAILs for a non-admin (passes only with Administrative access) · Sev L · FIXED (1.6.2.20260929)
+### I49 · New capability: self-update (check GitHub for a newer Release, one-click apply with automatic rollback) · Sev N/A · SHIPPED (1.7.0.20260929, backend half)
+
+Not a bug fix — a new capability, recorded here in the same spirit as I47. A deployed host has no
+git repository at all (`deploy.sh`'s own payload packaging excludes `.git/`), so "check for updates"
+goes through the GitHub API (`GET .../repos/x86Since8088/linux-cockpit-remote-desktop-guac/releases/latest`)
+and "apply" means fetching that tag's tarball (one top-level directory containing the full repo tree,
+`deploy.sh` included) and re-running **that** `deploy.sh --install-to <root>` — no `--with-units` —
+against the existing install root, reusing its payload-swap/`.env`-reconcile logic rather than
+reimplementing it. Four new control-socket ops (`update-status`, `update-check`, `update-apply`,
+`update-rollback`; see `docs/SELFUPDATE.md` for the full contract) are wired into
+`relay/control.py`'s `handle_control()` through a new injected `selfupdate=` object
+(`relay/selfupdate.py`'s `SelfUpdate`, mirroring `DesktopUI`'s shape), behind two NEW,
+deliberately **parameterless** privileged units (`edy-rdp-selfupdate-apply.service`,
+`edy-rdp-selfupdate-rollback.service` — no `%i`, no instance argument at all: one step past the
+existing `%i`-templated deskui/unlock pattern, since it means zero caller-influenced data crosses the
+`systemctl start` privilege boundary). The apply unit re-fetches and re-validates the "latest version"
+question itself from a fresh GitHub call — it never trusts the unprivileged relay's cache, an argument,
+or an environment variable — and on a failed post-restart health check (a `systemctl is-active` check
+plus a real `{"op":"ping"}` round-trip on the control socket, retried for ~20s) it automatically swaps
+back to the one non-current `payload-<version>` directory and restarts the relay again. Only
+`edy-rdp-relay.service` is ever restarted by this path; `edy-rdp-guacd.service` is deliberately never
+touched (a live RDP screencast is never dropped by an automated flow in this project — see any commit
+history mentioning "restart guacd"), which also means a version bump needing a new `guacd` image is
+out of scope for the automatic path (documented, not solved, in `docs/SELFUPDATE.md`).
+
+**Trust model, stated plainly (not overstated):** this verifies TLS to `api.github.com` and
+`codeload.github.com` and nothing more. There is **no code-signing or GPG verification** of the
+fetched release tarball in this pass — a compromised repository owner account is a compromised fleet.
+See `docs/SELFUPDATE.md`'s "Trust model" section for the full statement; a signature-verification pass
+is a plausible future follow-up, deliberately not attempted here.
+
+**This repository has no GitHub Releases or tags yet** as of this writing (`gh release list` and
+`git tag --list` both empty, verified this session) — so `update-status` will correctly report
+`update_available: false` / `latest_version: null` on every host until the maintainer cuts the first
+tagged Release. That is the expected result of the check, not a bug in it.
+
+**Verification (backend half):** `relay/test_selfupdate.py` (new) covers version parse/compare across
+equal/older/newer/malformed input (malformed never reports an update available — fails closed), the
+cache read/write round trip and its TTL staleness decision, the rollback-candidate selection logic
+(none/exactly-one/ambiguous-refuse), and `relay/control.py`'s exit-code-to-response mapping for all
+four ops including every refusal path (not admin, bad confirm, nothing to apply, rate-limited).
+`run_tests.sh` green (`test_selfupdate` added to the existing unit-test line), plus the existing
+install-completeness gate (`install.sh --verify`'s pre-flight), which now also asserts the two new
+units render clean with no leftover placeholder and every `LIBEXECDIR` reference they carry resolves
+to something the manifest actually installs. Not live-tested against a real tagged Release on edt1 in
+this pass (none exists yet, per the note above) — the mechanics were exercised via mocked
+`urllib`/`subprocess`/socket calls only, never a real network call, per this project's existing test
+philosophy.
+
+**Follow-up (same 1.7.0.20260929, frontend half): the "Update" tab.** A new tab (`guac-rdp.js`'s
+`TAB_NAMES`/`selectTab()`, `index.html`'s `#panel-update`) reads and drives the four control ops
+above: `update-status` on tab-open (plus once at page load, for the badge — no new polling timer in
+the browser), `update-check`/`update-apply`/`update-rollback` on their own buttons. "Update now" is
+admin-gated and stays disabled until `update_available` is true, then needs the operator to type this
+host's name to confirm — built as a direct sibling of the Desktop UI tab's Stop/Disable confirmation
+UX (same `-confirm-wrap` pattern, same "type the host name to confirm" copy). "Roll back" is
+admin-gated with no typed confirmation, per the contract's own low-friction-recovery /
+disruptive-needs-confirmation asymmetry. A wrinkle worth recording: `update-status`/`update-check`
+never carry this host's name (unlike `deskui-status`) — only `update-apply`'s `need_confirm` refusal
+does — so the tab borrows `deskui-status`'s `hostname` field (read-only, not admin-gated) as the
+confirmation label rather than adding a new field to the wire contract; both controllers derive it
+identically (`socket.gethostname()`, same relay process) and the relay re-checks its own value
+regardless. An available update (and any recorded `last_apply` outcome) is ongoing host STATE, not a
+one-off event, so it is surfaced two ways that both deliberately avoid `showToast()` (I48's
+auto-dismissing transient notice): a small persistent badge dot on the tab itself
+(`#update-badge`/`.badge-dot`), and `last_apply`'s outcome text (e.g. "...failed its health check and
+was automatically rolled back to...") as its own non-auto-dismissing status line. Verified with a
+scratch jsdom smoke test (same ad hoc, throwaway approach as this entry's own — loads the real
+`index.html`/`guac-rdp.js` with `cockpit`'s channel/permission plumbing stubbed): version/release-link
+rendering, the bootstrap "no releases published yet" wording shown verbatim (this repository's actual
+current state), the badge tracking `update_available`, "Update now" refusing to fire until both
+`update_available` and a matching typed hostname hold, "Roll back" firing with no `confirm` field, a
+non-admin never seeing either button enable, and `last_apply` rendering/hiding correctly. `run_tests.sh`
+re-run green (untouched Python/relay half included).
+
+**Follow-up (1.7.1.20260929): five real defects found by adversarial review, before any of this ever
+reached edt1 or was pushed.** A multi-agent review (four dimensions in parallel, each candidate
+finding independently re-checked by a skeptic on a different model) confirmed 5 of 10 candidate
+findings and refuted the other 5, including a "critical"-labelled claim that the pre-3.12 tar-extraction
+fallback could be bypassed via a symlinked intermediate directory — real as a code-level flaw, but NOT
+reachable via a genuine GitHub-generated tarball (a git tree cannot hold both a symlink entry and a file
+entry nested under the same name), so hardened anyway as defence in depth rather than treated as the
+claimed privilege escalation. The five confirmed and fixed: (1) **high** — apply and rollback had no
+mutual exclusion at all and could race on the same `payload` symlink and relay restart if an admin
+clicked "Roll back" while "Update now" still looked stuck; reproduced (two processes racing the real
+swap lost the symlink update on ~half of 20,000 stress-test iterations); fixed with a non-blocking
+`flock()` (`relay/selfupdate.exclusive_run()`) held for the entire privileged run, plus a new exit code
+6 ("already in progress") and a per-process-unique temp symlink name as defence in depth. (2) **medium**
+— the worst-case exit path could log a successful payload swap as having "also failed" whenever only
+the post-rollback health check was the actual problem, and silently dropped the rollback's own restart
+error; now reports which of three distinct failure modes actually happened. (3) **low** — rollback's
+refusal message collapsed "no earlier version" and "more than one exists (ambiguous)" into identical,
+sometimes-false text; now distinct and accurate. (4) **medium** — the "no releases published yet" state
+(this repo's actual, expected, day-one state) rendered as a bold red error, indistinguishable from a
+real GitHub outage, because both shared one untyped `check_error` field; fixed with a typed `no_releases`
+boolean. (5) **low, but the fix it enabled was not** — `_safe_extract()`/`fetch_and_extract_release()`
+had zero test coverage; writing it immediately surfaced a real, previously-unnoticed bug: on this
+project's own Python (3.14), a path-traversal tarball raised a raw `tarfile.OutsideDestinationError`
+that `_safe_extract()` did not catch, so it would have crashed the privileged script with an uncaught
+traceback instead of the intended, accurate "nothing was touched" refusal — fixed by catching
+`tarfile.TarError` and wrapping it as `SelfUpdateError`. `run_tests.sh` green throughout (82 tests now
+in `relay/test_selfupdate.py` alone).
+
+### I50 · New capability: shadow-group gate for mirroring a DIFFERENT signed-in user's console session · Sev N/A · SHIPPED (1.8.0.20260929)
+
+Not a bug fix — a new capability, recorded here in the same spirit as I47/I49. The console
+scenario's existing gate (I4, above) answers one question: is the caller a Cockpit
+administrator? That is the right question for "may this person use the mirror at all," but
+it is silent on a genuinely separate one — if a *different* user is currently signed in at
+the physical seat, may this admin secretly watch **that specific person's** active desktop?
+An organization can reasonably want every admin able to mirror an *empty* seat or *their
+own* session, while restricting who may mirror a **co-worker's** live screen to a smaller,
+deliberately-provisioned set — a privacy boundary the old gate had no way to express, since
+it only ever asked "admin or not."
+
+**Mechanics.** `Connection._peek_scenario_from_connect()` now runs a second, additive check
+for `scenario == "console"`, immediately after the existing admin gate and using the exact
+same `is_admin(uid, group)` primitive (I4) against a *different* configured group
+(`EDY_RDP_SHADOW_GROUP`, default `rdp-shadow`) — reused as-is, not reimplemented, since
+`is_admin()` was already a generic "is this uid a member of this named group" check despite
+its name/docstring. A new `seated_uids()` (`relay/edy_rdp_relay.py`) answers "who, if
+anyone, is physically at the seat right now" via `loginctl list-sessions` + `show-session
+-p User` (the same uid space Cockpit sessions run under, since `self.uid` already comes
+from SO_PEERCRED); a new pure `shadow_gate_required(seated, requester_uid)` decides the
+gate applies iff a uid *other than the requester* is seated. Nobody seated, or the
+requester seated alone, needs nothing beyond the existing admin gate — unchanged in every
+respect, same wording, same code path. The gate is evaluated fresh on every console connect
+attempt (never cached), since who is seated can change between connects.
+
+**Fail-closed by design — the opposite of `physical_session_locked()`'s role.**
+`seated_uids()` returns `None`, not an empty set, when it cannot determine who (if anyone)
+is seated at all (`loginctl list-sessions` itself failed or errored); `shadow_gate_required()`
+treats `None` as "cannot rule out someone else," so an admin with no shadow-group membership
+is refused rather than let through on a lookup failure. This is deliberately the mirror image
+of `physical_session_locked()` (above): that function feeds a *cosmetic* message-relabeling
+role and must fail OPEN (an undetermined lock state must never block a connection), while
+`seated_uids()` feeds an actual authorization decision and must fail CLOSED, the same posture
+`is_admin()` already takes on an unresolvable uid or a missing group. A future reader should
+not "fix" `seated_uids()` to match `physical_session_locked()`'s fail-open behavior — they
+answer different kinds of questions on purpose. **A per-session `show-session` lookup
+failure is ALSO a categorical failure here (returns `None`), not a skip-and-continue** — see
+the follow-up below for why the first version of this function got that distinction wrong.
+
+**Deliberately un-hardened at install time, and that is the correct default.** Unlike
+`EDY_RDP_ADMIN_GROUP` (which must exist on the host — `sudo` does, on essentially every real
+Linux install), `lib/edy-rdp-env.sh` validates `EDY_RDP_SHADOW_GROUP` only for shape (empty,
+or a syntactically valid unix group name), never for existence. `rdp-shadow` is a brand-new,
+project-specific name that will not exist on any host until an operator creates it, and
+`install.sh`'s preflight validates the environment *before* copying anything — hard-refusing
+every install and every routine redeploy (this project's own edt1 included) until someone
+pre-creates a custom group would be a deploy-breaking foot-gun for no safety gain, since
+`is_admin()` already turns a nonexistent group into "nobody is a member" (fails closed) with
+no crash risk either way. `EDY_RDP_SHADOW_GROUP` is therefore deliberately **not** in
+`install.sh`'s `REQUIRED_ENV`, mirroring `EDY_RDP_REMOTE_ALLOW`'s precedent: `.envdefault`
+ships it non-empty (`rdp-shadow`) so it is live on every fresh install, but an operator may
+explicitly blank it in their own `.env` as a supported way to turn this extra gate off
+entirely and revert to admin-only console gating. **Operational note: the group is not
+created or populated by any tooling in this project** — an operator runs `groupadd
+rdp-shadow` and `usermod -aG rdp-shadow <user>` themselves (or points the variable at an
+existing group) before anyone can shadow a different user's console session; until then the
+gate's fail-closed default means nobody can.
+
+**Verification.** `relay/test_edy_rdp_relay.py`: `SeatedSessionPredicate` (pure, literal
+`loginctl` property dicts, no subprocess — same style as `LockedScreenHint`) covers the
+seated/graphical/non-greeter classification; `ShadowGateDecision` (pure) covers
+`shadow_gate_required()` for nobody-seated, requester-seated-alone, a-different-uid-seated,
+and the `None` fail-closed case; `ConsoleShadowGate` (integration, `Guard`-style, driving the
+real `_peek_scenario_from_connect` with `seated_uids()` monkey-patched the same way
+`R.bridge.start_bridge` already is) covers nobody seated (admin gate alone suffices), the
+same user seated as the requester (no shadow membership needed), a different user seated
+with the requester out of the shadow group (refused), a different user seated with the
+requester in it (allowed), the `seated_uids() is None` fail-closed path both with and
+without shadow-group membership, and `EDY_RDP_SHADOW_GROUP=` empty disabling the gate
+entirely. `run_tests.sh` green throughout (187 relay unit tests across all four suites, up
+from 175; no regression in the untouched admin gate, remote-allow, credential-injection, or
+any other existing suite).
+
+**Follow-up (same 1.8.0.20260929): two real bugs found by adversarial review, before this
+ever reached edt1.** A multi-agent review (four dimensions in parallel, each candidate
+finding independently re-checked by a skeptic on a different model) confirmed 3 of 7
+candidate findings and refuted the other 4 — including a claim that uid 0 unconditionally
+bypasses the gate, which is real but not a bypass (root already has every capability this
+gate could possibly restrict, and Cockpit's own shipped default, `/etc/cockpit/disallowed-
+users`, refuses a root login in the first place). The two confirmed:
+
+- **The one that mattered: `seated_uids()`'s original per-session failure handling was
+  exactly backwards for an authorization function.** It treated a `show-session` call that
+  RAISED or returned NON-ZERO the same as "that session doesn't exist" — `continue`, drop it,
+  keep going — following `_active_graphical_sessions()`'s existing precedent for a narrow
+  session-ended-mid-query race. But that precedent's function is cosmetic (a miscounted
+  desktop-in-use tally); this one decides who may watch whom. A reviewer reproduced it
+  directly: `list-sessions` reporting two real, seated uids while every `show-session` call
+  failed (a plausible transient logind/D-Bus hiccup, not something a requester can trigger on
+  demand) made `seated_uids()` return an EMPTY set instead of `None` — silently skipping the
+  gate for an admin who was never checked against `rdp-shadow`, in precisely the situation
+  the `None` path exists to catch. Fixed: any `show-session` failure (exception, non-zero
+  exit, or a seated session with an unparseable `User=`) now fails the WHOLE call closed
+  (`None`), not just that one session — there is no reliable way to tell "session ended
+  benignly" apart from "logind errored" from the command's output alone, so this trades a
+  narrow, rare false "someone might be seated" against ever again silently reporting an empty
+  seat that was not. New `SeatedUidsSubprocessHandling` tests drive the REAL function against
+  a fake `subprocess.run` (every prior test monkey-patched `seated_uids()` itself away
+  entirely, so this exact regression had zero coverage) — a clean success case, a greeter
+  correctly excluded, and every failure mode above asserted to return `None`.
+- **Two integration tests used uid 0 (root) to prove the gate does NOT apply when it
+  shouldn't** — but `is_admin()` returns `True` unconditionally for uid 0 regardless of which
+  group is asked about, so those tests could not distinguish "the exemption logic correctly
+  skipped the gate" from "the gate ran and trivially passed because the caller is root." A
+  mutation test proved it: hard-coding the shadow gate to apply unconditionally to every
+  console connect still left the whole relay suite green. Fixed by switching both tests to a
+  non-root, non-shadow-group admin uid with `is_admin()` mocked explicitly — the mutation now
+  fails both tests, as it should.
+
+`run_tests.sh` green throughout (63 tests in `relay/test_edy_rdp_relay.py` alone, up from
+55).
+
+### I51 · New capability/clarification: `cockpit-guac-rdp` group rename, a safe migration, and an explicit non-admin access model · Sev N/A · SHIPPED (1.9.0.20260929)
+
+Not a bug fix — a rename plus a clarification, recorded here in the same spirit as
+I47/I49/I50. The relay's unix group was named `edy-rdp` since this project's first
+release; it is now `cockpit-guac-rdp`, matching the project's own name. On its own that
+is cosmetic. What makes it worth an entry is what it forced this project to finally say
+out loud: **membership in this group was already, on its own, sufficient for most of
+what the plugin does** — a property that had never been asserted anywhere as a single,
+explicit claim, let alone tested.
+
+**The migration.** An already-deployed host (edt1, per `docs/DEFENSE-LAYER.md`) has a
+real `edy-rdp` group with real members. A naive check-and-create in `deploy.sh`'s
+`create_users()` would have left that group alone and `groupadd`-ed a fresh, EMPTY
+`cockpit-guac-rdp` — every member losing access silently the moment the relay/sockets
+next restarted onto the new group name. `create_users()` (still `--with-users`-gated)
+now prefers `groupmod -n cockpit-guac-rdp edy-rdp` — same GID, same members — falling
+back to `groupadd` only when neither name exists. A plain `deploy.sh` run (no
+`--with-users`, consistent with every other host-mutating action in this script staying
+opt-in) cannot perform that rename itself, so it now warns loudly instead when the old
+group exists and the new one does not, naming the exact fix.
+
+**The access model, made explicit for the first time.** `ADMIN_ONLY_SCENARIOS` has
+always been exactly `{"console"}` — isolated, virtual monitor, wayland-vnc and greeter
+have never had an `admin_required` path, and remote/vnc are admin-gated only when an
+operator opts in via `EDY_RDP_REMOTE_ADMIN_ONLY=1` (default off). None of that changed
+here. What changed is that it is now: (1) tested — `relay/test_edy_rdp_relay.py`'s new
+`NonAdminAccess` class asserts none of the four raise `Refuse` for a non-admin,
+non-elevated uid, closing a real gap (nothing before this asserted "no admin path
+exists" as its own property, only that specific gates behaved correctly where they did
+exist); and (2) documented in one place — `docs/GROUP-ACCESS-MODEL.md` — instead of
+scattered inferences across `docs/ARCHITECTURE.md`, `docs/SCENARIOS.md` and the deploy
+banner, including an honest operator-facing note that the greeter scenario lets a group
+member attempt to sign in as any account the host knows, not just their own, and that
+this rename's migration deliberately preserves existing group membership rather than
+prompting anyone to re-audit it.
+
+**Verification.** `run_tests.sh` green throughout (199 tests across the four relay unit
+suites, up from 195; 67 in `relay/test_edy_rdp_relay.py` alone, up from 63);
+`install.sh --verify`'s manifest-completeness gate and `tests/installer_tests.sh`'s
+staged installer/deploy roundtrip unaffected by the rename.
+
+**Follow-up (1.9.1.20260929): the migration design above was wrong, found by adversarial
+review before this ever reached edt1 or was pushed — and the fix was itself verified live
+against edt1's actual group state.** A multi-agent review (three dimensions in parallel,
+each candidate finding independently re-checked by a skeptic on a different model)
+confirmed 5 of 6 candidate findings. The one that mattered:
+
+- **HIGH: gating the `groupmod` migration behind `--with-users` broke the very
+  redeploy pattern this project uses every day.** `install.sh`'s own preflight has
+  *always* required `$RELAY_GROUP` to exist *unconditionally*, on the assumption that a
+  fresh host ran `--with-users` exactly once at initial setup and every plain redeploy
+  since could rely on the group already being there. The 1.9.0 design gated the *rename*
+  itself behind that same flag — so a plain `deploy.sh` (no flags), the pattern used for
+  every routine update this project makes, and the *only* one self-update's own
+  `deploy.sh` invocation ever uses, would print the correct warning and then immediately
+  hit install.sh's fatal group-missing check anyway, on every host deployed before this
+  rename. Verified directly against edt1's real state (`getent group edy-rdp` →
+  `edy-rdp:x:970:cptest,eddie,cpadmin,eddie2`; `cockpit-guac-rdp` does not exist), and
+  reproduced end to end: self-update to 1.9.0 would have failed deterministically on the
+  one real deployment until an operator stepped in by hand — no access lost (the failure
+  is in `install.sh`'s preflight, before anything is rendered), but the just-shipped
+  self-update feature (I49) broken for this release. **Fixed:** the rename is now its own
+  `migrate_group_rename()`, run *unconditionally* in `do_deploy()` (same reasoning as the
+  pre-existing `migrate_legacy_env()`: renaming an *existing* group to the name this
+  version's units now reference is a compatibility carry-forward, not a new grant of
+  capability) — `create_users()` (still `--with-users`-gated) goes back to a plain
+  check-and-create, since the rename has already happened unconditionally by the time it
+  runs. A genuinely fresh host, where neither group exists, is untouched by the rename
+  step and still needs `--with-users` on its first-ever deploy, exactly as before.
+- **A bug the fix itself introduced, caught by this project's own test suite before it
+  ever shipped:** making the migration unconditional meant it ran during the staged/
+  DESTDIR roundtrip test too — which executes on a real host that may itself have a
+  genuine `edy-rdp` group (this one does). Unlike `create_users()`, which was only ever
+  implicitly protected by no test passing `--with-users`, the now-unconditional function
+  had no guard of its own and attempted `groupmod` against this session's **actual**
+  system group table during a test run that must never touch real host state. Caught
+  immediately by `run_tests.sh` going red; confirmed no actual mutation occurred
+  (`groupmod` failed on privilege first) before fixing it with the same `-z "$D"` guard
+  `preflight()`'s noexec check and the `--with-units` unit-enabling step already use.
+- Two low-severity documentation fixes: the CHANGELOG's own verification paragraph
+  mis-stated the post-rename test count (203 instead of 199); and two comments in
+  `relay/selfupdate.py` still said the relay's default `--group` was `"edy-rdp"` after
+  the rename changed it.
+- **Refuted:** a claim that the new `NonAdminAccess` tests prove nothing because they'd
+  also pass for an admin uid — true, but beside the point: they are positive-path
+  regression guards, and a mutation test confirmed they correctly fail if an admin gate
+  is later added to any of the four scenarios, which is the property that matters.
+
+`run_tests.sh` green throughout after both fixes.
+
+### I52 · "guacd build" self-test false-FAILs for a non-admin (passes only with Administrative access) · Sev L · FIXED (1.9.2.20260929)
 Reported live: running Self Tests as a non-admin ("limited mode") always failed "guacd build (FreeRDP 3
 needed for grd)"; the identical check passed once Administrative access was turned on. The check itself
 (`stSpawn2`, only ever used by this one test) ran `podman ps --filter name=edy-rdp-guacd` with
@@ -943,7 +1262,7 @@ everywhere else in this plugin. Verified: `node --check` clean; manually traced 
 (`superuser:"try"` on a non-elevated session runs unprivileged and returns empty stdout; `"require"`
 rejects, landing in the existing catch handler) against Cockpit's documented `cockpit.spawn()` semantics.
 
-### I50 · Opt-in tracing for clipboard/sound decisions · Sev N/A · SHIPPED (1.6.2.20260929)
+### I53 · Opt-in tracing for clipboard/sound decisions · Sev N/A · SHIPPED (1.9.2.20260929)
 Not a bug fix — a diagnostic capability, recorded here in the same spirit as I47/I48. Clipboard and
 sound are the two features this project's own history shows get reported as "just doesn't work" with
 nothing in the UI to go on (see the clipboard root-cause investigation elsewhere in this project's
@@ -963,7 +1282,628 @@ after use) loading the real `index.html` + `guac-rdp.js`: the checkbox exists an
 toggling it on/off emits/withholds the enabled/disabled marker, and the Clipboard/Sound toggles' own
 trace lines appear only while tracing is on. `run_tests.sh` green throughout.
 
-### I51 · Dependency tracking + native-rollback-where-available admin tab · Sev N/A · SHIPPED (1.7.0.20260929)
+### I54 · Five new Self Tests: guacd digest pin, grd patch integrity, PulseAudio TCP, vendored-lib ownership, group membership · Sev N/A · SHIPPED (1.9.3.20260929)
+Not a bug fix — five new read-only checks added to the existing Self Tests panel (`SELF_TESTS`,
+`guac-rdp.js`), each surfacing something this project had already identified as a real risk but only
+checked at install/deploy time, or only in a design document, never live and on demand.
+- **"guacd image matches the pinned digest"** is the live equivalent of `install.sh --verify`'s own
+  check 2 (same `INSTALL_PATH` → `.env` → `GUACD_IMAGE` lookup, same `podman inspect --format
+  {{.ImageName}}`) — lets an operator check for image drift anytime, not just at deploy time. Needs
+  `superuser:"require"`, same reason as the existing "guacd build" check: `edy-rdp-guacd` runs under
+  ROOT's rootful podman, a separate scope from a logged-in user's own rootless one.
+- **"gnome-remote-desktop patch integrity"** is the live equivalent of `install.sh --verify`'s check 3
+  (`patches/README.md`): the 3390 greeter handover needs a hand-rebuilt daemon installed OVER the stock
+  package path, protected only by an `apt-mark hold` — an upgrade that gets through (a forced reinstall,
+  an OS version bump, the hold being lifted) silently reverts it with nothing else noticing. Compares the
+  live daemon against the `.orig-edt1` stock backup the patch procedure itself leaves (`cmp -s`), and
+  separately flags a patched-but-unheld daemon as its own distinct failure (the patch is still in place
+  today, but the next unattended upgrade will remove it). Read-only; no elevation needed.
+- **"No anonymous PulseAudio TCP (4713)"** turns the still-open KNOWN_ISSUES I44 finding (a stale
+  `~/.config/pipewire/pipewire-pulse.conf.d/20-edy-tcp.conf` drop-in leaving an anonymous-auth TCP
+  listener up, although CHANGELOG 1.2.9 says the TCP approach was removed) into a live, on-demand check
+  instead of something only documented. Same `ss -tln` pattern as the existing "guacd listening on
+  loopback only" check, inverted: here the only correct state is nothing listening at all.
+- **"Vendored client library ownership matches served tree"** turns the DEFENSE-LAYER design review's
+  D-13 finding (`guacamole-common-js/all.min.js` found owned differently from the rest of this plugin's
+  served files — a provenance anomaly from being placed outside the normal install pipeline, not a
+  content problem) into a live check, comparing its ownership against `manifest.json`'s (shipped by the
+  same `install.sh` PAGE manifest entry) as the reference.
+- **"cockpit-guac-rdp group exists with expected membership"** confirms the group the I51 rename
+  produced still exists with `edy-relay` as a member, live and on demand, rather than only at
+  install/deploy time.
+- **Deliberately not added in this pass:** a "Dependency tracking status" check surfacing the
+  dependency-tracking feature's own `deps-status` control op — that feature (I64 follow-up work) is still
+  on its own, separate, not-yet-merged branch; the check will ship as part of that branch instead of being
+  built against a control op that does not exist yet on `main`.
+- **Verification:** `run_tests.sh` green throughout. A jsdom smoke test (scratch project, not a repo
+  dependency, deleted after use) loaded the real `index.html` + `guac-rdp.js`, stubbed `cockpit.spawn`
+  with a per-command fake dispatcher, and drove six scenarios through the real "Run self tests" button:
+  every check passing on a fully-healthy host; every check failing on a fully-broken one; the
+  patch-never-applied-here skip path; the patched-but-unheld failure distinct from the stock failure; a
+  group that exists but is missing the expected member; and the guacd-container-not-running skip path —
+  all six produced the exact expected pass/fail/skip status and detail text.
+  **Also live-tested**, running each check's exact shell command (not the jsdom fake dispatcher) against
+  two real hosts: a full `deploy.sh --with-users` onto the `rockytest` Rocky 9 container (a genuinely
+  fresh RHEL-family host, `apt-mark` absent, no grd patch ever applied there) confirmed the
+  `INSTALL_PATH` → `.env` → `GUACD_IMAGE` lookup, the `stat`-based ownership comparison, and the
+  `getent`/`id -nG` group-membership lookup all parse real dnf-host output correctly and resolve to PASS
+  once the deploy completed (guacd itself correctly SKIPs there, since `--with-image`/`--with-units`
+  were deliberately not passed — Rocky 9 lacks a stock FreeRDP 3 package, a known, pre-existing
+  limitation of this container, unrelated to this change); and edt1 itself (the one real host the grd
+  patch is actually deployed to) confirmed the patch-integrity check's full PASS path
+  (`APTMARK=yes HELD=yes STATE=patched`) against the genuine patched binary. Read-only checks against
+  edt1's OWN current live state (not redeployed there — edt1 is still on an older, pre-group-rename
+  version) incidentally reconfirmed two already-known, real gaps this feature is meant to catch: I44's
+  PulseAudio TCP listener is still live on 127.0.0.1:4713 right now, and edt1's `cockpit-guac-rdp` group
+  does not exist yet (edt1 has not been updated past the pre-rename `edy-rdp` name) — exactly the kind of
+  drift "No anonymous PulseAudio TCP (4713)" and "cockpit-guac-rdp group exists with expected membership"
+  exist to surface once this ships and edt1 is eventually updated.
+
+### I55 · `EDY_RDP_SHADOW_GROUP` default renamed to `cockpit-guac-rdp-shadow`, and `--with-users` now guarantees it exists · Sev N/A · SHIPPED (1.10.0.20260929)
+Not a bug fix — a rename plus a reversal of one part of I50's original product decision, recorded here
+in the same spirit as I51 (which this entry otherwise leaves untouched: I50's own reasoning for shipping
+the shadow gate fail-closed and un-hardened-at-install-time is still valid and still applies; what
+changed is a narrower, later decision about who creates the group, not why the gate behaves as it does).
+
+**The rename.** I50/1.8.0 shipped `EDY_RDP_SHADOW_GROUP` defaulting to `rdp-shadow`, chosen before I51/
+1.9.0 renamed this project's own relay group `edy-rdp` → `cockpit-guac-rdp`. The default is now
+`cockpit-guac-rdp-shadow`, matching that same convention. `relay/edy_rdp_relay.py`'s three `"rdp-shadow"`
+literal defaults (`Connection.__init__`, `handle()`, `--shadow-group`'s `argparse` default) and
+`.envdefault`'s shipped value all moved together; nothing about the gate's own logic changed. Found by
+adversarial review, missed in the first pass: `systemd/edy-rdp-relay.service.in`'s own
+`Environment=EDY_RDP_SHADOW_GROUP=` fallback line still named the old default. `.env`'s own value
+normally shadows it, but on any host where `EDY_RDP_SHADOW_GROUP` were ever absent from the effective
+`.env` (a hand-edited file, a future `env_place` regression), the relay would silently fall back to
+gating console-shadow access on the retired group name instead of the new one — fixed in the same
+commit as the rest of the rename, not a separate follow-up.
+
+**The migration — two independent, unconditional, idempotent steps, mirroring I51's own
+`migrate_group_rename()`.** A new `migrate_shadow_group_rename()` in `deploy.sh`, run right after
+`migrate_group_rename()` on every `do_deploy()` (no `--with-users` gate, same reasoning I51 already
+settled: renaming something that already exists on an already-deployed host is a compatibility
+carry-forward, not a new grant of capability) and guarded by the identical `[[ -z "$D" ]] || return 0`
+a staged/DESTDIR test roundtrip needs for the same reason I51's guard does:
+1. A real `rdp-shadow` group, if one exists and `cockpit-guac-rdp-shadow` does not, is renamed in place
+   (`groupmod -n`, same GID and members preserved) — a plain check-and-create here would have left a
+   real group's members behind and created a second, empty one under the new name. If
+   `cockpit-guac-rdp-shadow` already exists (a prior run of this same migration, or an operator who
+   already created it by hand under the new name), this step does nothing and that is not an error.
+2. Separately, this host's own `.env` — if it carries the *exact*, full-line old default
+   (`EDY_RDP_SHADOW_GROUP=rdp-shadow`, checked with `grep -qx`, never a substring match) — is rewritten
+   in place to the new default. This is NOT the same kind of migration as (1): a deployed `.env`'s value
+   only ever got there because an earlier deploy's `install.sh` reconciliation step auto-filled it
+   *from `.envdefault` at the time*, so it must track the new default the same way (1) retargets the
+   group that old default used to name. An operator who deliberately chose some *other* group name is
+   never touched by this line, by construction of the exact-match check. The one intentionally
+   unhandled edge case: an operator who happened to deliberately choose the literal string `rdp-shadow`
+   itself as their own custom group name — astronomically unlikely, and harmless either way (their
+   group either already exists, and step (1) already left it alone, or it does not, and pointing their
+   `.env` at the new default is a reasonable outcome) — no extra logic was added to try to distinguish
+   this from the common case, deliberately, since there is no way to and no need to.
+
+**The reversal: `--with-users` now guarantees the group exists.** I50 deliberately left this group
+uncreated by any tooling — "an operator's own, deliberate step" (see I50, above) — reasoning that
+`install.sh`'s preflight never required it to exist (unlike `EDY_RDP_ADMIN_GROUP`), so nothing forced an
+operator to have it ready before a routine deploy. That reasoning about the *preflight* is unchanged and
+still correct. What changed is the separate question of whether `deploy.sh` should offer to create it
+for an operator who *does* opt in, the same way it already creates `RELAY_GROUP`/`RELAY_USER` under that
+flag. A new `ensure_shadow_group()`, gated behind the same `WITH_USERS` flag (no new flag introduced),
+reads the resolved `EDY_RDP_SHADOW_GROUP` out of `$ENVF` and `groupadd --system`s it if missing and
+non-empty; a blanked value (the gate turned off) creates nothing, matching the gate's own semantics.
+
+**Ordering constraint (this is why the call site is not simply "beside `create_users()`").**
+`create_users()` runs *before* `do_deploy()` invokes the installed `install.sh`, because `install.sh`'s
+own preflight (check 8) requires `RELAY_GROUP`/`RELAY_USER` to already exist. But at that point `.env`
+has not yet been placed or reconciled — `install.sh` is what does that. `EDY_RDP_SHADOW_GROUP` carries
+no equivalent preflight requirement (`lib/edy-rdp-env.sh`'s validation for it deliberately has no
+`getent`-existence check, for the same reason I50 gave: refusing every install over a not-yet-created,
+project-specific group name would be a needless, deploy-breaking foot-gun), so nothing forces
+`ensure_shadow_group()` to run early. It instead runs *after* the installed `install.sh` completes, so
+it reads the FINAL, fully-reconciled `.env` — respecting an operator's actual customized value, or a
+value this same release's `migrate_shadow_group_rename()` (2) just rewrote — rather than guessing at a
+value from `.envdefault` before reconciliation has happened, which would create the wrong group
+entirely on any host that customizes this variable.
+
+**Verification.** `run_tests.sh` green throughout (199 relay unit tests, unchanged — only a test
+fixture default moved in `relay/test_edy_rdp_relay.py`'s `_conn()`). `tests/installer_tests.sh` gained
+two tests: `deploy_migrate_shadow_group_rename` (a real `rdp-shadow`-named group renamed with members
+preserved; an `.env` carrying the exact old default rewritten; a deliberately-customized `.env` value
+left untouched by both the rename and the rewrite even with a real `rdp-shadow` group also present; a
+second run of every case above a safe no-op) and `deploy_ensure_shadow_group` (the group created when
+missing and non-empty; left alone when it already exists; nothing created when blanked; structurally
+confirmed to still be gated behind `((WITH_USERS))`). Both `groupadd`/`groupmod`/`getent` and the
+group-rename migration call real system commands against the actual host account table exactly like
+`create_users()`/`migrate_group_rename()` already do, and this suite's own header states its invariant
+plainly: non-root, nothing on the host touched. Reaching either function's real (non-staged) code path
+through `deploy.sh` itself needs root, which these tests intentionally never assume — so, like
+`load_manifest()` above already does for `install.sh`'s `BEGIN-MANIFEST`/`END-MANIFEST` block, both new
+tests extract just the one function's source with a `sed` range and drive it directly against fake
+`getent`/`groupmod`/`groupadd`/`say` shell functions (a bare command name resolves to a same-named shell
+function before `PATH`, so these shadow the real tools with no `PATH` trick needed); the host's actual
+`/etc/group` is never touched no matter who runs this suite.
+
+### I56 · A held modifier (classically Alt, via Alt+Tab) "sticks" on focus loss for as long as the session is unfocused · Sev M · FIXED (1.10.1.20260929)
+Reported live: after Alt+Tab-ing away and back (or any other action that moved focus off the session),
+an interaction was sometimes acted on by the guest as an Alt-combo it never intended. Root cause traced
+to the browser's own event model, not this project's protocol handling or anything about delivery
+ordering (the tunnel is a single ordered WebSocket/HTTP channel over TCP — nothing in it can reorder or
+drop an instruction once sent): the browser only ever delivers `keyup` to whatever element currently
+holds DOM focus, and **losing focus never synthesizes one**. So a key held down at the moment focus
+leaves the session (the display element losing focus to another in-page element, or the whole browser
+window losing OS-level focus) leaves this page's `Guacamole.Keyboard` still believing it is pressed,
+with no event ever telling it otherwise — **for the entire time the session is unfocused**, not just
+for one keystroke: any mouse click, drag or scroll on the guest during that window arrives there as an
+Alt-combo too.
+
+**Correcting this entry's own first draft, found by adversarial review against the actual vendored
+library and real browsers, before this reached `main`:** the vendored `guacamole-common-js` library DOES
+already self-correct stale modifier state on the very next keyboard event, by comparing its own tracked
+`pressed` set against the browser's live `event.altKey`/`shiftKey`/etc. flags — but it releases the stale
+modifier **before** processing the new key, not after and not together with it (confirmed by driving the
+real library directly: the guest sees "Alt up, then the new key down", correctly ordered). So the
+original "the very next keystroke gets misread as a combo" explanation for this fix was wrong — what was
+actually stuck was everything BETWEEN losing focus and that next keystroke, not the keystroke itself.
+Separately: real Chromium/X11 testing found that Alt+Tab in practice fires the display element's own
+`blur` too, not only `window`'s as this entry originally claimed — the two are not as separable as first
+assumed. Neither correction changes what was built below; both are corrected here because the mechanism
+matters when comparing this fix against a live re-report — if the exact original symptom persists, the
+next place to look is a lone Alt tap (press with nothing else held, then release) opening a guest
+application's own menu bar, a real, independent behavior in many Windows/GTK/LibreOffice/Firefox builds
+that this fix cannot distinguish from a genuine two-key modifier combo.
+
+**The fix:** `Guacamole.Keyboard` already ships a `reset()` method — undocumented in this project until
+now, but a real, public API — that walks every keysym it still believes is pressed and fires a genuine
+`onkeyup` for each, routing through this file's own `sendGuestKeyEvent` exactly like a real keyup, so the
+**guest** is actually told to release them the moment focus is lost, rather than waiting on the library's
+own next-keystroke correction. Verified cheap even in the overwhelmingly common case where nothing is
+actually pressed (most blur/visibilitychange events happen mid-typing, not mid-keypress): roughly 1
+microsecond per no-op call against the real library, and calling it redundantly when more than one of the
+three bound signals fires for the same event is harmless. Bound to three distinct signals, since no single
+one reliably covers every real way a session can lose the ability to receive key events: the display
+element's own `blur`, `window`'s `blur`, and `visibilitychange` (the tab was backgrounded or minimized,
+which does not reliably fire either `blur`). `resetShiftAdjust()` is called alongside it as defence in
+depth: `reset()` already clears any `shiftAdjust` entry for a keysym still tracked in `keyboard.pressed`
+(via that same `onkeyup` path), but this also covers the narrower case of a `shiftAdjust` entry with no
+matching `keyboard.pressed` entry (the same gap `teardown()`'s own identical pairing, and the pre-existing
+"client going null mid-press" test, already exist to guard against elsewhere in this file). `teardown()`
+itself now also calls `keyboard.reset()` before nulling the keyboard out — see the bonus fix below.
+
+**Known, accepted trade-off, found by adversarial review, deliberately not "fixed."** A modifier held
+THROUGH a focus round-trip without ever being physically released (hold Ctrl, click a different in-page
+tab, then type Ctrl+C while still holding Ctrl) gets spuriously released by this same `reset()` call,
+since the browser never re-fires a `keydown` for a key that was never actually released — the guest sees
+a bare `c`, not `Ctrl+c`, until the next physical press of Ctrl restores it. Reviewed and rejected: also
+resetting `Guacamole.Keyboard`'s own tracked modifier-flag state was tried and found to only rescue the
+first such chord, while reintroducing "trust a possibly-stale browser modifier flag" — the exact class of
+problem the library's own self-correction exists to guard against. A modifier that occasionally needs a
+second press to "stick" again is a strict improvement over one that can stay stuck down, silently
+modifying everything, for an unbounded time.
+
+**Bonus, found and fixed in the same pass, pre-existing (not introduced by this fix): `teardown()` never
+released a still-held key on disconnect either**, and if the session dropped while an ordinary key was
+mid-autorepeat, the vendored library's own internal repeat timer kept running against a keyboard whose
+`onkeyup`/`onkeydown` had just been nulled by `teardown()`, throwing `TypeError: onkeyup is not a
+function` on every tick, indefinitely (reproduced: ~10 errors in 500ms). `teardown()` now calls
+`keyboard.reset()` — which also clears that same internal repeat timer, not just hygiene — before nulling
+the keyboard reference, exactly mirroring the connect-time fix above. This incidentally already covered
+the ordinary Disconnect-button path even before this fix (clicking Stop blurs the display first), but not
+the error/server-drop paths, which never touched the display element at all.
+
+**Also found, pre-existing, explicitly deferred, NOT fixed in this pass: see I57** (an unrelated race in
+graceful disconnect's 800ms grace window).
+
+**Why this is a state-tracking bug, not a reliability/ordering one.** The transport already guarantees
+in-order, lossless delivery once an instruction is sent — the actual failure mode is that a genuine
+keyup was simply never generated in the first place, because the browser had nothing to synthesize it
+from. No amount of acknowledgement/retry machinery on top of the existing protocol would have helped:
+there was never a lost or reordered message to retry, only a browser-native event that the OS itself
+does not raise on focus loss. A custom-string batch-send ("Send text") button was separately investigated
+in this same discussion and found straightforwardly buildable on top of the vendored library's own
+existing `Guacamole.Keyboard.prototype.type(string)` method — not implemented in this pass, since it
+addresses a different concern (bulk/reliable text entry) than the stuck-modifier bug this entry covers.
+
+**New opt-in trace category.** The existing "Trace clipboard/sound" toggle (I53) is now "Trace
+clipboard/sound/keyboard" — a `trace("keyboard", ...)` line fires whenever a focus-loss reset actually
+runs, naming only that it happened, never which keys were involved, matching the existing categories'
+own byte-counts-not-contents discipline.
+
+**Verification.** New `tests/js/keyboard_blur.test.js`, extracting the actual shipped wiring verbatim
+(the same `TESTHOOK`-sentinel pattern `keyboard_remap.test.js` already established for I45) — one block
+for the connect-time setup, a second for `teardown()`'s own cleanup — and driving both against a minimal,
+hand-written, spec-correct `EventTarget` stand-in — deliberately NOT Node's own built-in `EventTarget`,
+which was found, while writing this test, to have a real deviation from the DOM spec (it does not
+correctly match a bare boolean `capture` argument between `addEventListener`/`removeEventListener`,
+unlike jsdom and real browsers, confirmed by testing both directly) that would have made a genuine
+listener-leak bug in an earlier draft of this fix look like it passed. Covers: blur on the display
+element, `window` blur, `visibilitychange`, all three correctly releasing every held key; no client/
+keyboard yet correctly does nothing and never throws; the trace line fires with the right category and
+message; `teardown()` correctly clears all three listeners AND nulls `keyboardBlurHandler` (so a later
+`connect()` never sees a stale truthy handler left over), including with no display element left at all;
+and a full connect → teardown → reconnect cycle across both blocks together leaves no stale handler
+capable of firing. Every one of these is mutation-tested (a first pass from an independent adversarial
+review found 3 of them — a leaked `window`/`document` listener in either block, and a capture-flag
+mismatch — passed with the ORIGINAL, less thorough version of this test; all three are now caught).
+Separately verified, by that same review, directly against real headless/CDP-driven Chromium in Xvfb with
+`xdotool`-driven real X11 focus changes (not part of this repo's own automated suite, since it has no
+Playwright harness configured): two full connect cycles show exactly one listener of each kind at a time
+with zero leaked after teardown; a real focus loss with Alt+Shift held releases each key exactly once;
+100,000 no-op blur events cost about 106ms total; pop-out windows (each running an independent copy of
+this same script) neither misfire into nor are affected by the main window's own wiring; and entering
+Keyboard-Lock fullscreen never triggers a spurious reset, since the mouse click that starts fullscreen has
+already blurred the display before any of this runs. `run_tests.sh` green throughout (20 JS tests, up
+from 10).
+
+### I57 · A rapid Sound/Clipboard/Resolution change during graceful disconnect can null a NEW session's client · Sev L · OPEN (deferred)
+Found incidentally while adversarially reviewing I56's fix, pre-existing, unrelated to it. `teardown()`'s
+graceful (non-`immediate`) path waits up to 800ms (or until the tunnel confirms `CLOSED`) before actually
+disposing — a grace period, not an instant transition. If a control that starts a brand-new connection
+(a toggle whose handler tears down and reconnects, e.g. changing Sound mid-session) runs inside that
+800ms window, the ORIGINAL teardown's delayed `dispose()` still fires afterward and nulls `client`/
+`tunnel` — which by then belong to the NEW, just-started session, not the one that was actually being torn
+down. Not fixed in this pass: this is a distinct concurrency issue in `teardown()`'s own delayed-dispose
+design, deserving its own careful fix (e.g. a generation counter so a stale `dispose()` can recognize it
+is no longer current and no-op) rather than a quick patch bolted onto an unrelated keyboard fix. Named
+here rather than silently left, per this project's own convention for a discovered-but-deferred gap (see
+I46 for the shape this takes elsewhere in this file).
+
+### I58 · New capability: "Type Clipboard" — keystroke-injection workaround for the broken native clipboard paste · Sev N/A · SHIPPED (1.10.2.20260930)
+Not a bug fix for the underlying issue (that bug is upstream, in guacd/x11vnc's own VNC clipboard
+handling — see the live-traced root-cause investigation, memory `cockpit-guac-rdp-send-clip-investigation`:
+the browser→remote clipboard push is accepted with no error and never actually applied on the guest, and
+was re-confirmed live on 2026-09-30 by cross-referencing a real browser trace, showing the JS side
+correctly writing to the outbound clipboard stream, against the relay's own per-connection `up={}` opcode
+tally at session close, which showed zero `clipboard` instructions ever reaching the relay from the browser
+across multiple real sessions). Since that path cannot be fixed from this project's side, a new "Type
+Clipboard" button sidesteps it entirely: it reads the local clipboard the same way "Send clip" does, then
+**types** the text into the session one keysym at a time via `sendGuestKeyEvent` directly — the same
+one-shot-injection call `sendKeysymTap()` already uses for the Win key, and NOT `keyboard.press()`/
+`keyboard.release()` (see the correction below) — inheriting `sendGuestKeyEvent`'s existing
+`KEYCODE_FIX`/`SHIFT_LEVEL` corrections (I45) for any punctuation the typed text happens to contain, for
+free.
+- **Character → keysym** mirrors the vendored `Guacamole.Keyboard`'s own (unused here) codepoint-to-keysym
+  function, extracted from `guacamole-common-js/all.min.js` and diffed against this implementation over
+  code points 0–0x400 before shipping: Latin-1 code points are their own keysym; C0 controls (0x00–0x1F)
+  **and the C1 control range (0x7F–0x9F)** map via the "function key" convention (`code point | 0xFF00`);
+  anything else is the "Unicode keysym" `0x01000000 | code point`.
+- **One deliberate deviation** from that vendored function: it maps `"\n"` to Linefeed (`0xFF0A`), a
+  keysym with no key on the Xvfb "us" keymap at all (verified with a standalone `vm` probe) — typing a
+  bare LF through it would silently do nothing. Both CR and LF are forced here to the real Return keysym
+  (`0xFF0D`), with the LF half of a CRLF pair skipped so Windows-sourced clipboard text doesn't send two
+  Enters per line.
+- **Non-ASCII characters need no bridge-side change.** x11vnc's `-add_keysyms` (confirmed, via `x11vnc
+  -help`, to be this build's own *default*) dynamically adds an unused keycode for any keysym Xvfb's
+  static "us" keymap doesn't already have one for.
+- **Four real defects found by adversarial review of the first draft, all fixed before merge:**
+  - **(High) `keyboard.press()`/`keyboard.release()` share state with REAL physical keystrokes.** The
+    first draft injected characters via `keyboard.press(ks); keyboard.release(ks)` on the same
+    `Guacamole.Keyboard` instance real typing drives. That instance's `pressed` map and its single
+    (not per-keysym) key-repeat timer pair are shared: injecting a keysym the user is physically holding
+    (e.g. holding Enter while pasted text also contains a newline) silently no-ops the injected press
+    while the injected release DOES fire, telling the guest the physical key was released while the user
+    still holds it — and, with no keysym collision at all, injecting even one character while an unrelated
+    real key is mid-auto-repeat permanently kills that key's repeat-to-guest stream via the shared timer.
+    Reproduced against the real vendored library. Fixed by calling `sendGuestKeyEvent(true, ks)` /
+    `sendGuestKeyEvent(false, ks)` directly — exactly what `sendKeysymTap()` already does — which never
+    touches `keyboard.pressed` or its timers.
+  - **(High) Wrong keysym for code points 0x7F–0x9F.** The first draft's Latin-1 range (`0x20`–`0xFF`)
+    incorrectly included DEL and the whole C1 control block as direct-value keysyms; the vendored
+    function carves that range out into the C0-style `|0xFF00` convention instead. A keysym like `0x7F`
+    has no defined X11 meaning, so text containing DEL or a C1 control byte (plausible from a
+    Windows-1252-as-Latin-1 mis-decode, common in terminal-copied text) would have silently mistyped.
+    Fixed to match the vendored function exactly.
+  - **(Medium) No reentrancy guard.** Clicking "Type Clipboard" twice in quick succession started two
+    independent `readText()`→type chains, typing the clipboard's text twice. Fixed with a `clipTypeBusy`
+    flag checked at entry and cleared on every completion path (success, empty clipboard, thrown
+    exception, rejected read, or the session ending mid-type).
+  - **(Medium) Unbounded synchronous loop could hang the tab on a large clipboard.** The first draft typed
+    the entire string in one synchronous pass — for a large payload (this feature's whole point is moving
+    text the broken native channel won't carry, which skews toward *larger* pastes) that blocks the main
+    thread for the whole operation with no progress shown and no way to interrupt it. Fixed by chunking
+    into 200-character bursts with a `setTimeout` yield between them (re-checking the session is still
+    live each chunk, and keeping a CRLF pair together across a chunk boundary), with a running
+    "Typing… N of M characters" status.
+  - **Also documented, not changed:** typing (not pasting) means an embedded Tab/Backspace/Escape/etc. in
+    the clipboard text acts as a real guest keypress (focus-next, delete-previous-char, …) rather than
+    literal text — noted in the button's own tooltip. Not exploitable (it's the user's own clipboard) and
+    not more surprising than the user's own physical keypress doing the same thing, just worth knowing
+    for TSV/indented-code content.
+- **Verification:** `tests/js/type_clipboard.test.js` (TESTHOOK-verbatim-extraction, like I45/I56's own
+  tests) covers the code-point→keysym mapping (Latin-1, its 0xFF/0x100 upper boundary, C0 controls and
+  their 0x1F boundary, the C1 control range and its 0x7F/0x9F boundaries, the Unicode plane), an empty
+  string, plain ASCII, a bare LF, a CRLF pair, a lone trailing CR, CR-followed-by-non-LF (proving the
+  collapse is exact, not a range), repeated CRLFs and bare CR-CR, a surrogate-pair character, a lone
+  unpaired surrogate, and a mixed multi-line/multi-script string — 15 tests, all mutation-tested,
+  including re-verifying each of the three defects above now fails the specific test added to catch it.
+  `run_tests.sh` green throughout (35 JS tests, up from 20).
+
+### I59 · `PULSE_SOURCE`/seat uid dynamically resolved instead of a hand-typed, go-stale-able pin · Sev N/A (was a live bug on edt1) · SHIPPED (1.10.3.20260930)
+Found while diagnosing a live report of no session audio ("the sound dilemma") alongside I58: edt1's
+deployed `.env` had `PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor`, a real, specific sink
+name — but the host's actual live PipeWire (as uid 1000, the fixed `EDY_RDP_PULSE_SEAT_UID` default) had
+only **one** sink, PipeWire's own `auto_null` fallback ("Dummy Output"): the named HDMI monitor no longer
+existed at all, so guacd's audio capture had nothing valid to bind to. Separately, uid 1000 turned out not
+even to be the right seat to be listening to: `loginctl` showed the GDM greeter's own session (a distinct,
+stable system account, `gdm-greeter`) as the one actually active on `seat0`, and **its** PipeWire instance
+had a real, working USB speaker device — the audio was there, just under a different uid's session than the
+one hardcoded in `.env`.
+- **Root cause, generalized:** both "which uid is the seat" (`EDY_RDP_PULSE_SEAT_UID`, previously a fixed
+  number, default `1000`) and "which sink that uid plays to" (`PULSE_SOURCE`, previously a hand-typed,
+  one-time `pactl get-default-sink` paste) were static configuration for something that is not static: the
+  active seat0 session can be the GDM greeter or any of several human users over time, and a sink can
+  disconnect or a different one can become default independent of any of this project's own code.
+- **Fix: `EDY_RDP_PULSE_SEAT_UID=auto` and `PULSE_SOURCE=auto`, both now the default.** `edy-rdp-pulse-bind`
+  (unconditionally, on every guacd start, and on every login/logout via a new `edy-rdp-pulse-seat-auto.path`
+  → `edy-rdp-pulse-rebind-auto.service` pair) resolves the uid via `loginctl` (whichever session is
+  `Seat=seat0`+`Active=yes` right now — covering the GDM greeter and a mirrored human login as the SAME
+  mechanism, not two separate code paths, and falling back to uid 1000 if no such session exists at all)
+  and the sink via `pactl get-default-sink` run directly over that uid's own socket. The resolved
+  `PULSE_SOURCE` is written to a generated file, `/run/edy-rdp-pulse/pulse-source.env`, which
+  `edy-rdp-guacd.service` now loads as a second `EnvironmentFile=` — because unlike the socket bind (which
+  reaches an already-running container via the existing shared-mount propagation, I42), `PULSE_SOURCE` is a
+  container **start-time** env var, so a changed value can only reach guacd by restarting it. The new
+  `-auto` rebind service does that restart, with `systemctl try-restart` (a stopped guacd is left stopped)
+  and only when the resolved value actually changed — `edy-rdp-guacd`'s own `ExecStartPre` never restarts
+  itself, it just re-resolves and re-binds on every start it was already going to make anyway.
+- **An explicit pin is never touched.** A numeric `EDY_RDP_PULSE_SEAT_UID` or a literal `PULSE_SOURCE=
+  <sink>.monitor` keeps exactly the pre-I59 behavior (docs/AUDIO.md's "Pinning a specific device"),
+  including the exact same `edy-rdp-pulse-seat@<uid>.path` mechanism unchanged. Leaving `PULSE_SOURCE`
+  unset (commented out, the default) still means no audio channel at all — unchanged — and a stale
+  generated file left by an *earlier* auto run is actively deleted in that case, so "audio off" cannot
+  accidentally resume streaming just because it once was.
+- **Migration.** `deploy.sh`'s new `migrate_pulse_auto_defaults()` (same idiom, same unconditional/exact-
+  full-line-match guard as I55's `migrate_shadow_group_rename()`) rewrites a deployed `.env` to `auto` for
+  either key ONLY when it still carries the exact old shipped default verbatim (`EDY_RDP_PULSE_SEAT_UID=
+  1000`, or `PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor` — the same string that has
+  always been the `.envdefault` example) — a deliberately customized value, even one that happens to equal
+  either of those, is indistinguishable from "never customized" this way and is left alone either way it
+  goes, which is the correct, safe side to err on. Migrating the uid also disables the superseded
+  `edy-rdp-pulse-seat@1000.path`/`edy-rdp-pulse-rebind@1000.service` pair (found missing by adversarial
+  review — left running, it would keep re-binding uid 1000's own socket/sink over whatever the new `-auto`
+  pair resolves every time uid 1000's own session changes, reintroducing this exact issue non-
+  deterministically on precisely the host it targets).
+- **An eighth defect, found by the USER actually using this feature on edt1: `Seat=seat0` is the wrong
+  signal for "the logged-in user's own session" entirely.** This project's RDP door (3390) hands off from
+  the greeter into an EXISTING desktop rather than a fresh physical login, and that handed-off session
+  never carries a `Seat=` at all — confirmed live: `loginctl show-seat seat0` reports
+  `ActiveSession=<the greeter's own session>` **permanently**, no matter who is actually logged in, while
+  the real desktop shows up as a separate session with `Remote=yes` and `Seat=` empty (the "Allow Locked
+  Remote Desktop" extension's own session, `gnome-remote-desktop-daemon --handover`). The symptom: the user
+  reported "Dummy Output" as the only audio device while actually using a real desktop with genuine USB
+  audio hardware sitting one session over — `resolve_active_seat_uid()` could only ever resolve to the
+  GDM greeter's own uid (which happens to have real hardware access, but is not the session anyone is
+  listening through), never the uid actually in use. Fixed by preferring any session that is `Class=user`
+  and graphical (`Type=wayland` or `x11`) and `Active=yes` — regardless of `Seat=`/`Remote=` — over the
+  seat0 greeter, which is now only the fallback when no such session exists at all (nobody logged into
+  anything). Deliberately does **not** also require `LockedHint=no`: mirroring a locked session is this
+  project's own supported use case, not an edge case to exclude. New hermetic test
+  `pulse_bind_auto_prefers_active_user_session_over_seat0_greeter` reproduces the exact live topology
+  (the greeter as the only `Seat=seat0` session, a real `Remote=yes` desktop session for a different uid)
+  plus a Cockpit "web" session correctly NOT being mistaken for a desktop, and a locked session still being
+  preferred; mutation-tested against the original seat0-only logic.
+- **A seventh defect, found by LIVE testing on edt1 immediately after merge (not the adversarial review),
+  fixed the same day:** `edy-rdp-guacd.service` loads the generated `$DIR/pulse-source.env` as a second
+  `EnvironmentFile=` so `podman` sees the resolved value — but systemd was confirmed live to re-read
+  `EnvironmentFile=`s fresh for each `Exec*` step of one activation, not once for the whole activation. That
+  meant `resolve_and_persist_source()`'s own NEXT invocation (guacd's `ExecStartPre`, moments later, same
+  restart) could inherit its own just-written resolved value as `$PULSE_SOURCE`, mistake it for an operator
+  pin, and delete the file — landing before `podman`'s own fresh environment read, so the **running
+  container ended up with the literal string `"auto"` as `PULSE_SOURCE`**, confirmed via `podman inspect
+  edy-rdp-guacd` on edt1. Fixed by only cleaning up the generated file when its content does not already
+  match the current value — a genuine switch to a pin (or back off) always differs; reading back one's own
+  just-written resolution never does. Verified with a new hermetic test extracting
+  `resolve_and_persist_source()` directly by function name, mutation-tested, and by reproducing the exact
+  restart cycle for real on `rockytest` (a fake `loginctl`/`pactl`, a real `systemctl try-restart`, checking
+  the resulting container's actual env) both before and after the fix.
+- **Six real defects found by adversarial review of the first draft, all fixed before merge:**
+  - **(High) An oscillating resolved value could take the shared `edy-rdp-guacd.service` down for every
+    viewer.** The first draft called `systemctl try-restart` unconditionally on every change with no
+    cooldown; this project's own GDM-greeter-crash-loop RCA (a real, documented occurrence on this exact
+    host) is precisely the kind of rapid session churn that could flip the resolved value fast enough to
+    trip systemd's default 5-restarts/10s `StartLimitBurst` and leave guacd FAILED — down, not just noisy
+    — for every current viewer until an operator ran `systemctl reset-failed`. Fixed with a 30-second
+    self-imposed cooldown: a skipped restart is a delay (the next trigger, or guacd's own next restart for
+    any other reason, still picks up the current value), never a lost update. The restart failure branch's
+    own diagnostic was also wrong (`try-restart` returning non-zero means an actual failure, not "unit not
+    running" — that case returns success and no-ops) and always logged the misleading "did not run it (not
+    currently active)"; fixed to check `systemctl is-active` first and log failures as failures.
+  - **(High) Migrating to `auto` never disabled the old per-uid unit pair it superseded** — see Migration
+    above.
+  - **(High) `install.sh --verify`'s audio-bind check silently stopped checking anything.** It built the
+    expected seat path as `/run/user/<uid>/pulse/native` using the literal `.env` string for `<uid>` —
+    with the new default `auto`, that produced the nonsense, always-absent path `/run/user/auto/pulse/
+    native`, so the check unconditionally reported "skipped (no seat login)" and lost the ability to ever
+    catch a real broken bind on any host running the new default (every fresh install, and edt1 once
+    migrated). Fixed by asking `edy-rdp-pulse-bind --check` (read-only, no root) for its own already-tested
+    resolution instead of re-deriving "who is the active seat" a second, now-stale way.
+  - **(Medium) `EDY_RDP_PULSE_SEAT_SOCKET` broke under the new `auto` default.** That override is
+    documented to win over the uid outright, but the ownership check inside `seat_check()` (unchanged)
+    still validated the override socket against whatever uid auto-resolution happened to pick — so a
+    pinned override could start failing or succeeding purely depending on who else was active at seat0.
+    Fixed: when the override is set, uid resolution now trusts the override socket's *own* stat'd owner
+    instead of querying loginctl for an unrelated answer (the actual security check — refusing a symlinked
+    override — is unchanged, downstream, in `seat_check()` itself).
+  - **(Medium) A fixed temp filename raced under concurrent invocations.** `edy-rdp-guacd.service`'s own
+    `ExecStartPre` and a login/logout-triggered rebind can run this script at the same time with no
+    ordering between them; both writing through the same `$DIR/pulse-source.env.tmp` let one invocation's
+    `mv` fail (ENOENT — the other had already renamed it away) while still unconditionally logging success.
+    Fixed with `mktemp` (this project's own existing idiom elsewhere, e.g. `edy-rdp-bridge-start.sh`) and a
+    checked `mv` exit status gating the log line and the restart decision.
+  - **(Medium) Unrelated-account login/logout churn could wedge the new auto-rebind unit into a permanently
+    failed state.** `edy-rdp-pulse-seat-auto.path` deliberately watches all of `/run/user` (any login or
+    logout by any account, not just the RDP seat — edt1 has several unrelated lingering service accounts),
+    so `edy-rdp-pulse-rebind-auto.service` can legitimately be *started* several times in quick succession
+    with no fault of its own; with no `StartLimit*=` override it inherited systemd's bare default and could
+    trip it, silently disabling the whole auto-follow feature until `systemctl reset-failed`. Fixed with a
+    deliberately generous `StartLimitIntervalSec=60`/`StartLimitBurst=30` on that service — separate from,
+    and not weakening, the guacd-restart cooldown above.
+  - **(Low) No timeout on the new `loginctl`/`pactl` IPC calls.** Both can in principle hang (a wedged
+    logind, a pipewire-pulse that accepts a connection but never finishes negotiating), and this script
+    runs unconditionally as `edy-rdp-guacd.service`'s own `ExecStartPre` — this project has hit this exact
+    class of bug before (I40, FreeRDP3's Kerberos-first NLA hanging ~2 minutes against a dead KDC) and
+    already has an established fix idiom for it (`edy-rdp-krb-preflight.sh`'s `timeout 1 getent ...`).
+    Fixed by wrapping both calls in a 3-second `timeout`, degrading to the same "nothing resolved" fallback
+    path a clean negative answer already takes.
+- **Known, accepted gap:** the login/logout-triggered mechanism reacts to the *active seat changing*, not
+  a same-uid mid-session change (the already-active user plugs in a new USB headset). Nothing currently
+  re-resolves for that short of a guacd restart. Named here rather than silently left (see I57 for the
+  shape this takes elsewhere).
+- **Verification:** new `pulse_bind_auto_resolves_seat_uid`, `pulse_bind_auto_uid_never_overrides_a_pinned_
+  seat_socket`, and `pulse_bind_auto_resolves_source_preview` in `tests/installer_tests.sh` (hermetic: a
+  fake `loginctl`/`pactl` earlier in `PATH`), covering the greeter-active case, the no-active-session
+  fallback, a seat-less-but-"active" session correctly excluded by the `Seat=seat0` filter specifically
+  (not just the `Active=yes` one), an explicit `--seat-uid` never triggering auto-resolution at all, the
+  `EDY_RDP_PULSE_SEAT_SOCKET`-vs-auto-uid fix, and a pin/unset `PULSE_SOURCE` never being previewed as
+  `auto` — every one of these mutation-tested. `deploy_migrate_pulse_auto_defaults` (mirroring I55's own
+  migration test structure) also verifies the superseded-unit cleanup. `run_tests.sh` green throughout.
+  Also live-tested end to end on `rockytest` via the real `deploy.sh --with-units` flow: the new units
+  rendered and enabled correctly, and the real `edy-rdp-pulse-rebind-auto.service` ran successfully
+  (falling back to uid 1000 and logging "seat socket absent" — expected on a container with no real
+  desktop session). **Live-verified (read-only) against edt1's actual current state**: with nobody logged
+  in at the physical console, `EDY_RDP_PULSE_SEAT_UID=auto` correctly resolved to the GDM greeter's uid, and
+  `PULSE_SOURCE=auto` correctly resolved to that session's real USB speaker device — exactly the audio the
+  fixed, stale `.env` value was missing.
+
+### I60 · New capability: "Logs…" fullscreen viewer for the browser trace log and the server relay/guacd journal · Sev N/A · SHIPPED (1.10.6.20260930)
+Not a bug fix — a diagnostic capability, motivated by this same debugging session: diagnosing a real
+"the guac connection terminated" report meant manually cross-referencing the browser's own trace console
+output against `journalctl -u edy-rdp-relay` and guacd's own container log by hand. A new "Logs…" button
+(main Connect panel and both pop-out types — `addViewLogsButton()`, wired in alongside the existing
+`addClipboardButtons()` call in all three) opens a near-viewport `<dialog>` (same modal idiom as the
+"Session…" card — see `buildSessionCard()`'s own comment for why `<dialog>` is this project's one modal
+component) with:
+- **A source switch**: the browser's own clipboard/sound/keyboard trace log (I53) — now kept in a capped,
+  in-memory array (`traceLog`, `TRACE_LOG_MAX=2000`) as well as printed to the console, so it can be shown
+  as a table instead of scrollback — or the server-side relay + guacd journal.
+- **For the server journal, a scope choice**: "this session" (grepped by the current session's own uuid —
+  the relay mints that uuid and hands it to guacd as the connection id verbatim, so the SAME `--grep` value
+  finds a session's lines in both the relay's own systemd unit and guacd's container log, confirmed by
+  reading `edy_rdp_relay.py`'s own ready/select handling) or "all sessions" (last 6 hours, no grep). Both
+  scopes read via `stSpawn2` (`superuser:"require"`) — the SAME PolicyKit elevation the Self Tests panel's
+  own guacd checks already require: reading a root-run unit's journal needs that regardless of scope, so
+  "this session" is not a lower privilege tier, just a more heavily filtered result once elevated. "All
+  sessions" is additionally disabled in the UI for a non-admin (cosmetic, matching this project's existing
+  `isAdmin`-gated UI elsewhere) — the real enforcement is `superuser:"require"` itself, which Cockpit/
+  PolicyKit refuses for a genuine non-admin regardless of the (bypassable) client-side option state.
+- **Selectable columns** (Time/Category/Message for the trace log; Time/Unit/Message for the server
+  journal), persisted per-source in `localStorage` (`edy-rdp-logs-columns`) independent of the existing
+  `URL_CONTROLS`/hash persistence (a modal display preference, not a connection-launch parameter).
+- **A text filter** across all currently-visible columns.
+- **Verification**: `tests/js/view_logs.test.js` (TESTHOOK-verbatim-extraction, like I45/I56/I58's own
+  tests) covers `parseJournal()` — the one piece of non-trivial, DOM-free logic in this feature (splitting
+  a `journalctl -o short-iso` line into timestamp + message) — including empty/blank input, a line with no
+  whitespace at all (the whole line is kept as the message rather than silently dropped), and a message
+  containing its own internal spaces not being re-split. `run_tests.sh` green throughout.
+
+### I61 · The headless session-port rule dropped replies to ~3.5 % of ALL the host's outbound TCP connections · Sev H · FIXED (1.10.7.20261001)
+Found by edy-proxy-go's R52 investigation on edt1 (its `go/docs/REMEDIATION-PLAN.md`, R52), not by this
+project. **Symptom on that host:** edy-proxy-go's public front-door VIP (192.168.2.16) moved off its
+preferred pod ~30 times in 24 h, each move undone 18 s later — every failure a `GET /up` probe timeout —
+and about 3.5 % of every host → pod connection hung for up to 7 s.
+
+**Root cause:** up to 1.10.6, `hardening/edy-rdp-headless.nft` (installed as
+`/etc/nftables.d/edy-rdp-headless.nft`, payloads 1.9.3 and 1.10.6 confirmed) was stateless:
+
+```
+iif "lo" tcp dport 33000-33999 accept
+tcp dport 33000-33999 drop
+```
+
+33000–33999 lies inside `net.ipv4.ip_local_port_range` (32768–60999). So `tcp dport 33000-33999` matches
+not only a NEW connection to a headless grd session port but also the SYN-ACK and every later reply of
+any OUTBOUND connection this host opened from an ephemeral port in that range — 1000 of the 28232
+ephemeral ports, ≈ 3.5 %. Linux walks ephemeral ports per destination, so once a destination's walk
+enters the range every new connection to it fails until the walk leaves it: the 8–25 s windows.
+**Evidence (2026-10-01, R52):** a tcpdump on podman2 and in the pod showed the pod's SYN-ACK reaching the
+host, and the host retransmitting its SYN (same sequence) for up to 7 s; all 29 retransmitting
+connections used local ports 33000–33999, and none of 9,079 others did.
+
+**Fix (two layers, either alone stops the incident):**
+- The rule is stateful: `ct state established,related accept` is the FIRST rule of the chain, loopback
+  is still accepted, and the drop is scoped to `ct state new` — a new off-box connection to a session
+  port is still dropped, which is all this table was ever for. INVALID packets are deliberately not
+  dropped here: they cannot open a connection to a listener (the kernel answers RST or discards them),
+  and dropping them would re-expose outbound flows that conntrack's window tracking misjudges.
+- The range is reserved from the ephemeral allocator: `/etc/sysctl.d/90-edy-rdp-headless.conf`
+  (`net.ipv4.ip_local_reserved_ports = 33000-33999`, shipped as
+  `hardening/edy-rdp-headless-sysctl.conf`), so an outbound connection is never handed a session port
+  at all — which also stops an outbound connection squatting the port a session's grd is about to
+  bind. Explicit `bind()` to a reserved port still works, so grd is unaffected. Chosen over moving the
+  session range below 32768: `ip_local_port_range` is a host tunable, so "outside the range" is not
+  a property this project can guarantee, while a reservation holds whatever the range is; and the
+  33000 + uid − 1000 port is already baked into the headless/reaper/relay code and into every
+  existing user's headless grd config (`grdctl --headless rdp set-port`).
+
+**Install / upgrade / uninstall:** the drop-in is a `SYSFILES` entry, so `install.sh` writes (and on an
+upgrade overwrites) both files and `--uninstall` removes both; uninstall also releases the live
+reservation when it is exactly ours. `edy-rdp-firewall.service` now applies the sysctl after loading the
+rules, and gained an `ExecReload=` that re-applies everything with no window (each `.nft` file is an
+atomic `nft -f` replace). `deploy.sh` reloads an ALREADY-active firewall unit on every deploy — with or
+without `--with-units`, so self-update (which never passes it) gets the new rules too — and
+`--with-units` uses `enable` + `reload-or-restart` instead of `enable --now`, which was a no-op on the
+active oneshot and would have left the stateless rule loaded until the next reboot. Self-update's
+rollback paths (automatic, on a failed health check, and `edy-rdp-selfupdate-rollback.service`) swap the
+payload and run `install.sh` directly rather than `deploy.sh`, so `relay/selfupdate.py`
+`swap_payload_and_install()` now does the same reload of an already-active firewall unit (found by a
+cross-model review of this fix; covered by `relay/test_selfupdate.py` `SwapRefreshesActiveFirewall`).
+`install.sh --verify` checks that the live `ip_local_reserved_ports` covers the range, warns when another
+sysctl.d file also sets that key (the kernel keeps one list and the last writer replaces it whole), and,
+as root, that the LOADED `edy_rdp_headless` table is the stateful one.
+
+**Verification:** `tests/headless_nft_test.sh` (in `run_tests.sh`): static checks of the shipped rule and
+its range against the sysctl and the session port base; `install.sh`'s own `--verify` checker accepts the
+new rule and rejects the 1.10.6 one; a staged install over the old file replaces it and `--uninstall`
+removes both files; and, inside a throwaway unprivileged user+network namespace (never the host's
+firewall), the kernel lets a reply to an outbound connection from local port 33000/33005/33999 through,
+still drops a NEW off-box connection to a session-port listener, still admits loopback, reproduces the
+incident with the 1.10.6 rule (mutation check), and — with the drop-in applied and the ephemeral range
+narrowed to straddle the session range — never hands `connect()` a port in 33000–33999.
+
+**Not covered:** `hardening/edy-rdp-firewall.nft` (3389–3391, not installed) is outside the ephemeral
+range and unaffected. The wayland-vnc ports (34000 + uid − 1000) are bound to 127.0.0.1 with no firewall
+rule, so they have no reply-dropping problem, but they too sit inside the ephemeral range: an outbound
+connection can occupy one before wayvnc binds it. Reserving 34000–34999 as well is a candidate follow-up.
+
+### I62 · Greeter login shows the desktop, then mouse and keyboard do nothing until the pop-out is restarted · Sev M · FIXED (1.10.8.20261003)
+Reported on edt1 2026-10-03. The sign-in screen (scenario `greeter`, port 3390) accepts
+mouse and keyboard. After the GDM password, eddie's desktop is presented and neither
+mouse nor keyboard reaches it. Closing and reopening the pop-out restores both.
+
+**What the live session showed.** The first connection did hand the client from the
+system daemon to the greeter and then to the user session (`Added virtual monitor
+Meta-0` on the headless `gnome-shell`, "No seat assigned"). Eleven seconds later
+`edy-rdp-relay.service` was stopped, xfreerdp was signalled, and gnome-shell logged
+`Removed virtual monitor Meta-0`. The browser kept the last frame. A pop-out restart
+at 13:02 opened a new greeter bridge, repeated the same handover onto the existing
+session 10, added the virtual monitor again, and input worked. Session 10 stayed up
+the whole time (`Remote=yes`, no seat). Nothing was rolled back to the greeter.
+
+**Fix:** an unexpected drop of a `greeter` connection (not Disconnect, not an explained
+error) schedules one fresh `connect("greeter")`. That is the same reconnect the pop-out
+restart performed, and grd attaches it to the desktop that already exists. A second drop
+before that connection has been up for 15 seconds does not chain. Sound and resolution
+reconnects disarm the follow so they do not double-connect. `shouldFollowGreeterDrop`
+is covered by `tests/js/greeter_follow.test.js`.
+
+### I63 · New capability: interactive path diagram on the Architecture tab · Sev N/A · SHIPPED (1.10.10.20261015)
+The Architecture tab replaces its text block with an SVG that follows one connection from this page to the
+desktop, for each of the seven session types (radio buttons), with a legend (code in this plugin / not changed
+by this plugin / gnome-remote-desktop as rebuilt on edt1) and one caption per type. Presentation only: no
+relay, bridge or unit change.
+
+**History.** It was deployed to edt1 on 2026-10-03 14:08 as 1.10.9.20261003 and never committed; the live
+payload directory was the only copy until 2026-10-15, when the live payload was compared with `origin/main`.
+It was validated the same day against the current code, docs and live host (three investigators, then two
+independent validators) before landing, and the statements that were wrong or misleading were corrected: see
+the 1.10.10.20261015 CHANGELOG entry. The validation also found problems that are NOT in the diagram and are
+tracked in `todo.md`: Remote VNC is probably refused for everyone when `EDY_RDP_REMOTE_ADMIN_ONLY=1` (the page
+never asks for administrator proof for `vnc`), wayvnc runs with no password and no firewall rule on its port,
+guacd is ordered after the firewall unit but does not require it (so the owner gate can be absent), and the reason recorded for
+pinning the FreeRDP 3 (Janua) guacd does not match how the relay uses it.
+
+**Hard-coded facts.** The legend names edt1 for the patched gnome-remote-desktop because that patch is
+hand-built and not shipped. If another host gets the patch, derive the label from the I54 self-test instead.
+
+### I64 · Dependency tracking + native-rollback-where-available admin tab · Sev N/A · ON BRANCH `feat/dependency-tracking` (draft PR #42) - NOT in main
 Not a bug fix — a new diagnostic/recovery capability, recorded here in the same spirit as I47/I49/I50.
 Tracks this project's own OS prerequisites (the 9-package `requires.txt` set, read from the file — never
 hardcoded separately) TOGETHER with a full installed-package inventory (name/version/arch, every

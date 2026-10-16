@@ -268,7 +268,7 @@ class BlastRadius(unittest.TestCase):
                           "required_by_unavailable": False})
 
     def test_required_by_unavailable_flag_is_threaded_through(self):
-        # KNOWN_ISSUES I51 F5: a failed reverse-dependency check (no pactree,
+        # KNOWN_ISSUES I64 F5: a failed reverse-dependency check (no pactree,
         # or a broken rpm/apt-cache query) must not render identically to a
         # real "nothing depends on this" -- the flag must survive the lookup.
         snap = {"tracked": {"freerdp": {"requires": ["libssl3"], "required_by": [],
@@ -352,7 +352,7 @@ class SnapshotDirRoundTrip(unittest.TestCase):
         self.assertIsNone(DC.load_snapshot(self.tmp, "20991231T000000Z"))
 
     def test_load_latest_skips_the_summary_companion_file(self):
-        # KNOWN_ISSUES I51 F4 regression: write_snapshot() (depcheck/edy-rdp-
+        # KNOWN_ISSUES I64 F4 regression: write_snapshot() (depcheck/edy-rdp-
         # depsnapshot.py) writes <ts>.summary.json alongside <ts>.json for
         # list_snapshots()'s cheap reads. ".summary.json" sorts lexically
         # AFTER ".json" for the same timestamp, so a naive `sorted(glob(...))
@@ -702,7 +702,7 @@ class DepsRollbackOp(unittest.TestCase):
         self.assertIn("newer dnf transaction", r["detail"])
 
 
-# --- KNOWN_ISSUES I51 F1: relay timeout vs. the rollback unit's own limit ----
+# --- KNOWN_ISSUES I64 F1: relay timeout vs. the rollback unit's own limit ----
 
 
 class RollbackTimeoutAgreement(unittest.TestCase):
@@ -736,7 +736,7 @@ class RollbackTimeoutAgreement(unittest.TestCase):
         self.assertGreaterEqual(DC.ROLLBACK_TIMEOUT, script_timeout)
 
 
-# --- KNOWN_ISSUES I51 follow-up: "the query failed" must never look like
+# --- KNOWN_ISSUES I64 follow-up: "the query failed" must never look like
 # "no history yet" -- both used to render as None/empty, and a failed
 # tx_before reading plus a successful tx_after reading in the same
 # install_deps() bracket made an already-existing transaction look newly
@@ -803,7 +803,7 @@ class CmdCurrentTxExitCode(unittest.TestCase):
         self.assertEqual(out, "")
 
 
-# --- KNOWN_ISSUES I51 F2/F3: a rollback tx id must be attributable to THIS
+# --- KNOWN_ISSUES I64 F2/F3: a rollback tx id must be attributable to THIS
 # run's own install_deps(), precisely -- never inferred from any snapshot's
 # own "current" transaction reading. --------------------------------------
 
@@ -816,7 +816,7 @@ class AttributableTransactionId(unittest.TestCase):
         # "before" and unlabeled snapshots never get an attributed value at
         # all, regardless of install_tx -- only cmd_rollback()'s own
         # label == "after" check matters, and this is the first line of
-        # defense for it (KNOWN_ISSUES I51 F1: rollback must never trust a
+        # defense for it (KNOWN_ISSUES I64 F1: rollback must never trust a
         # non-"after" snapshot's dnf_transaction_id).
         self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", "before"))
         self.assertIsNone(self.mod.attributable_transaction_id("dnf", "7", ""))
@@ -826,7 +826,7 @@ class AttributableTransactionId(unittest.TestCase):
         # package-manager invocation tightly and observing a new transaction
         # id -- passed through explicitly via deploy.sh's --install-tx, never
         # inferred by comparing against any snapshot's own reading (that
-        # comparison-based design was KNOWN_ISSUES I51 F3: it misattributed
+        # comparison-based design was KNOWN_ISSUES I64 F3: it misattributed
         # unrelated dnf/yum activity happening anywhere in the wider window
         # between install_deps() finishing and the "after" snapshot actually
         # running, at the very end of deploy.sh).
@@ -847,7 +847,7 @@ class CmdSnapshotAttribution(unittest.TestCase):
     """cmd_snapshot() end to end (mocked inventory/requires/pm-detection,
     real write_snapshot()/load_snapshot() against a real temp directory) --
     the exact wiring a mutation test showed had ZERO coverage before this
-    (KNOWN_ISSUES I51 F4): flipping --install-tx to a no-op, or reverting to
+    (KNOWN_ISSUES I64 F4): flipping --install-tx to a no-op, or reverting to
     the old "compare against whatever snapshot is newest on disk" design,
     left every other test in this file green."""
 
@@ -957,7 +957,7 @@ class RollbackRefusesUnattributedSnapshots(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_rollback_refuses_a_non_after_snapshot_even_with_a_tx_id_on_it(self):
-        # KNOWN_ISSUES I51 F1 (found by adversarial review of an earlier fix
+        # KNOWN_ISSUES I64 F1 (found by adversarial review of an earlier fix
         # in this same file, reproduced live): if a deploy aborts, or its own
         # "after" snapshot fails to write (best-effort/non-fatal), the newest
         # snapshot on disk can be a "before" baseline instead. cmd_rollback()
@@ -1002,7 +1002,7 @@ class RollbackRefusesUnattributedSnapshots(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-# --- KNOWN_ISSUES I51 F4: list_snapshots() must stay cheap -------------------
+# --- KNOWN_ISSUES I64 F4: list_snapshots() must stay cheap -------------------
 
 
 class ListSnapshotsCheap(unittest.TestCase):
@@ -1049,7 +1049,7 @@ class ListSnapshotsCheap(unittest.TestCase):
         self.assertEqual([h["timestamp"] for h in hist], ["20260101T000000Z"])
 
 
-# --- KNOWN_ISSUES I51 F7: rpm/apt whatrequires unavailable-vs-zero ----------
+# --- KNOWN_ISSUES I64 F7: rpm/apt whatrequires unavailable-vs-zero ----------
 
 
 class RpmAptWhatrequiresUnavailable(unittest.TestCase):

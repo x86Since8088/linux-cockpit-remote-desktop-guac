@@ -32,7 +32,7 @@ spec:
       image: docker.io/library/python:3.12-slim
       command: ["/usr/local/bin/python3", "/opt/edy-rdp/edy_rdp_relay.py",
                 "--listen", "/run/edy-rdp/guacd.sock",
-                "--group", "edy-rdp", "--mode", "0660",
+                "--group", "cockpit-guac-rdp", "--mode", "0660",
                 "--guacd", "127.0.0.1:4822",
                 "--admin-group", "sudo",
                 "--state-file", "/run/edy-rdp/sessions.json",

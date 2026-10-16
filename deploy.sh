@@ -4,7 +4,7 @@
 #
 #   ./deploy.sh                       copy -> /opt/cockpit-guac-rdp, run the installed
 #                                     install.sh (which places/validates .env). Enables NOTHING.
-#   ./deploy.sh --with-users          also create the edy-rdp group + edy-relay user
+#   ./deploy.sh --with-users          also create the cockpit-guac-rdp group + edy-relay user
 #   ./deploy.sh --with-deps           also install the OS prerequisites
 #   ./deploy.sh --with-image          also pre-pull the pinned guacd image
 #   ./deploy.sh --with-units          also ENABLE AND START the units
@@ -28,6 +28,9 @@
 #   that silently started all of that is not a deployment anyone should run
 #   twice. Copying files and rendering units is safe and is the default; changing
 #   what this host is RUNNING is opt-in, per flag, and named in the output.
+#   ONE exception, named in the output too: an edy-rdp-firewall.service that is
+#   ALREADY active is reloaded (atomically) on every deploy, so the rules and the
+#   reserved ports this deploy just installed are the ones in force (I61).
 #
 #   install.sh does none of it. It runs in both the dev and the deployed role,
 #   and a dev install that enabled edy-rdp-relay.service would put two relays on
@@ -160,7 +163,7 @@ install_deps() {
     # THIS eval itself did -- not to anything else that runs later in this same
     # deploy (image pull, unit install, config steps), which comparing against
     # a snapshot taken at the very end of the whole run could otherwise
-    # misattribute (KNOWN_ISSUES I51 F3). depsnapshot_current_tx() is
+    # misattribute (KNOWN_ISSUES I64 F3). depsnapshot_current_tx() is
     # best-effort and never fails the deploy on its own -- but BOTH readings
     # must have genuinely succeeded before comparing them: depsnapshot_current_tx()
     # returns empty stdout for "no dnf/yum history yet" (a real answer) AND for
@@ -168,7 +171,7 @@ install_deps() {
     # exit status. Comparing on VALUE alone let a failed tx_before reading
     # (empty, indistinguishable from "no history") plus a successful tx_after
     # reading make an already-existing transaction look newly created by this
-    # run (KNOWN_ISSUES I51 follow-up) -- require both exit codes to be 0.
+    # run (KNOWN_ISSUES I64 follow-up) -- require both exit codes to be 0.
     tx_before="$(depsnapshot_current_tx)" && tx_before_ok=1
     say installing "$cmd"
     eval "$cmd" || die "prerequisite install failed (docs/COMPATIBILITY.md has the
@@ -187,6 +190,130 @@ install_deps() {
     fi
 }
 
+# The migration: this project's relay group used to be named edy-rdp. A host
+# deployed before the rename has real members in that group; a plain
+# check-and-create here would leave THAT group alone and groupadd a brand-new,
+# EMPTY $RELAY_GROUP, so the next unit restart picks up the new group and every
+# existing edy-rdp member silently loses access. groupmod -n renames in place -
+# same GID, same members, nothing dropped.
+#
+# Runs UNCONDITIONALLY in do_deploy(), NOT gated behind --with-users, same
+# reasoning as migrate_legacy_env() above: renaming an EXISTING group to the
+# name this version's units now reference is a compatibility carry-forward for
+# a host that already opted in once, not a new grant of capability. install.sh's
+# own preflight (check 8) requires $RELAY_GROUP to exist UNCONDITIONALLY,
+# regardless of --with-users - it always has, on the assumption that a fresh
+# host ran --with-users exactly once at initial setup and every plain redeploy
+# since has relied on the group already being there. Gating the rename itself
+# behind --with-users broke that assumption for every host deployed before this
+# rename (this project's own edt1 included): a plain, no-flags redeploy - the
+# pattern used for every routine update this project makes, and the ONLY one
+# self-update's own deploy.sh invocation ever uses - would otherwise hit
+# install.sh's fatal group-missing check on every such host until an operator
+# remembered to pass --with-users first. A brand-new host where NEITHER name
+# exists is untouched here (return 0) and still needs --with-users on its
+# first-ever deploy, exactly as it always has - only the RENAME of an existing
+# group is unconditional, not the creation of a new one.
+migrate_group_rename() {
+    # A staged/DESTDIR deploy (the test suite's own roundtrip tests, run on a
+    # real developer/CI host that may itself have a genuine "edy-rdp" group)
+    # exercises the file-copying/rendering logic only and must NEVER touch the
+    # actual host's real system accounts -- unlike create_users(), which is
+    # implicitly protected because no test ever passes --with-users, this
+    # function is unconditional and needs its OWN explicit guard, the same one
+    # preflight's noexec check and the --with-units unit-enabling step already
+    # use. Found by this project's own test suite: without this guard, running
+    # the staged roundtrip test on a host that already has a real "edy-rdp"
+    # group renamed THAT REAL GROUP.
+    [[ -z "$D" ]] || return 0
+    getent group "$RELAY_GROUP" >/dev/null && return 0
+    getent group edy-rdp >/dev/null || return 0
+    groupmod -n "$RELAY_GROUP" edy-rdp \
+        || die "could not rename group edy-rdp -> $RELAY_GROUP. Fix by hand
+    (groupmod -n $RELAY_GROUP edy-rdp) and re-run. Nothing else was changed."
+    say renamed "group edy-rdp -> $RELAY_GROUP (GID and members preserved)"
+}
+
+# The shadow-group analogue: I50/1.8.0 shipped EDY_RDP_SHADOW_GROUP defaulting
+# to "rdp-shadow", chosen before the rename above; this brings it in line with
+# the same "cockpit-guac-rdp" convention. Two independent things, both
+# unconditional (no --with-users gate, for the same reason migrate_group_rename
+# above is unconditional - an already-deployed host must pick this up on its
+# next plain redeploy) and both idempotent:
+#
+#   a. an existing "rdp-shadow" group is renamed in place (same GID, same
+#      members) unless "cockpit-guac-rdp-shadow" already exists, in which case
+#      there is nothing left to do.
+#   b. this host's OWN .env, if it carries the old shipped default verbatim
+#      (a full-line match, not a substring one), is rewritten to the new
+#      default. That exact value can only have gotten into a deployed .env one
+#      way - an earlier deploy's install.sh reconciliation auto-filling it from
+#      .envdefault - so it must track the new default the same way (a) tracks
+#      the group that default used to name. An operator who deliberately chose
+#      some OTHER group name is never touched; an operator who happened to
+#      deliberately choose "rdp-shadow" itself is pointed at the new default
+#      too, which is safe either way (their group either already exists, and
+#      (a) already left it alone, or it does not, and this simply matches them
+#      to (a)'s target) - no extra logic is needed to tell the two apart.
+migrate_shadow_group_rename() {
+    # Same guard, same reason as migrate_group_rename() above: a staged/
+    # DESTDIR test roundtrip must never rename a real host's actual group or
+    # rewrite a real .env sitting outside the stage.
+    [[ -z "$D" ]] || return 0
+
+    if ! getent group cockpit-guac-rdp-shadow >/dev/null; then
+        if getent group rdp-shadow >/dev/null; then
+            groupmod -n cockpit-guac-rdp-shadow rdp-shadow \
+                || die "could not rename group rdp-shadow -> cockpit-guac-rdp-shadow. Fix by hand
+    (groupmod -n cockpit-guac-rdp-shadow rdp-shadow) and re-run. Nothing else was changed."
+            say renamed "group rdp-shadow -> cockpit-guac-rdp-shadow (GID and members preserved)"
+        fi
+    fi
+
+    if [[ -f "$ENVF" ]] && grep -qx 'EDY_RDP_SHADOW_GROUP=rdp-shadow' "$ENVF"; then
+        sed -i 's/^EDY_RDP_SHADOW_GROUP=rdp-shadow$/EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow/' "$ENVF"
+        say updated "$ENVF: EDY_RDP_SHADOW_GROUP rdp-shadow -> cockpit-guac-rdp-shadow"
+    fi
+}
+
+# I59: EDY_RDP_PULSE_SEAT_UID's and PULSE_SOURCE's shipped defaults change from a
+# fixed uid/hand-typed sink name to "auto" (dynamic resolution of whichever seat
+# is actually active, and its actual current default sink). Same idiom, same
+# guard, as migrate_shadow_group_rename() above: unconditional (an already-
+# deployed host must pick this up on its next plain redeploy, not just
+# --with-users), each key rewritten only on an EXACT full-line match against the
+# value that could only have gotten into a deployed .env by inheriting the OLD
+# shipped default verbatim (install.sh's own .envdefault reconciliation) -- an
+# operator who deliberately pinned a specific uid or sink name, even one that
+# happens to equal 1000 or the old example string, is never distinguishable from
+# "never customized" this way and is left alone either way it goes: pinned to
+# THIS host's real value, migrating to "auto" would silently start following
+# whoever else logs in instead, which is the one behavior change this migration
+# must never make on its own.
+migrate_pulse_auto_defaults() {
+    [[ -z "$D" ]] || return 0
+    [[ -f "$ENVF" ]] || return 0
+    if grep -qx 'EDY_RDP_PULSE_SEAT_UID=1000' "$ENVF"; then
+        sed -i 's/^EDY_RDP_PULSE_SEAT_UID=1000$/EDY_RDP_PULSE_SEAT_UID=auto/' "$ENVF"
+        say updated "$ENVF: EDY_RDP_PULSE_SEAT_UID 1000 -> auto (follows whichever seat is active)"
+        # A prior --with-units on THIS host, before this migration, enabled the
+        # OLD per-uid pair for exactly the uid just migrated away from (1000) -
+        # found by adversarial review: left running, it would keep re-binding
+        # uid 1000's own socket/sink over whatever the new -auto pair resolves
+        # every time uid 1000's own session changes, silently reintroducing the
+        # "wrong uid recorded" bug this migration exists to fix, on precisely
+        # the uid it used to be pinned to. Safe unconditionally: disabling/
+        # stopping a unit that was never enabled is a harmless no-op.
+        systemctl disable --now edy-rdp-pulse-seat@1000.path 2>/dev/null \
+            && say disabled "edy-rdp-pulse-seat@1000.path (superseded by edy-rdp-pulse-seat-auto.path)"
+        systemctl stop edy-rdp-pulse-rebind@1000.service 2>/dev/null || true
+    fi
+    if grep -qx 'PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor' "$ENVF"; then
+        sed -i 's/^PULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor$/PULSE_SOURCE=auto/' "$ENVF"
+        say updated "$ENVF: PULSE_SOURCE <old default example> -> auto (re-resolves the active seat's own default sink)"
+    fi
+}
+
 create_users() {
     getent group "$RELAY_GROUP" >/dev/null \
         || { groupadd --system "$RELAY_GROUP"; say created "group $RELAY_GROUP"; }
@@ -197,7 +324,7 @@ create_users() {
 }
 
 # ---------------------------------------------------------------------------
-# Dependency tracking (KNOWN_ISSUES I51): a snapshot of this host's full
+# Dependency tracking (KNOWN_ISSUES I64): a snapshot of this host's full
 # package inventory, plus a bounded dependency graph for the requires.txt
 # tracked set, taken TWICE per deploy.sh run -- once right after the payload
 # swap (the "before" picture: what this host had BEFORE anything below this
@@ -219,7 +346,7 @@ create_users() {
 # process only (never persisted, never read from anywhere else). Deliberately
 # NOT derived from comparing two full snapshots' own transaction readings --
 # see attributable_transaction_id() in depcheck/edy-rdp-depsnapshot.py for why
-# that was imprecise (KNOWN_ISSUES I51 F3) and depsnapshot_current_tx() below.
+# that was imprecise (KNOWN_ISSUES I64 F3) and depsnapshot_current_tx() below.
 DEPSNAPSHOT_INSTALL_TX=""
 
 # A cheap, standalone read of this host's current dnf/yum transaction id (pm
@@ -265,10 +392,30 @@ run_depsnapshot() {
         say snapshot "dependency snapshot ($label) recorded"
     else
         warn "dependency snapshot ($label) failed (non-fatal, diagnostic only -- see
-       docs/KNOWN_ISSUES.md I51):
+       docs/KNOWN_ISSUES.md I64):
 $(sed 's/^/    /' <<<"$out")"
     fi
     return 0
+}
+
+# Guarantees the console shadow-gate's group exists under --with-users, the
+# reversal of I50/1.8.0's original "an operator's own, deliberate step"
+# decision (docs/KNOWN_ISSUES.md) - now mirroring how that same flag already
+# guarantees RELAY_GROUP/RELAY_USER. Called from do_deploy() AFTER the
+# installed install.sh runs, not beside create_users() above: create_users()
+# has to run BEFORE install.sh because install.sh's own preflight (check 8)
+# requires RELAY_GROUP/RELAY_USER to already exist, but .env has not been
+# placed or reconciled yet at that point - install.sh is what does that.
+# EDY_RDP_SHADOW_GROUP carries no such preflight requirement (lib/edy-rdp-
+# env.sh's validation deliberately has no getent-existence check for it), so
+# nothing forces this earlier, and reading $ENVF before install.sh has
+# reconciled it would guess at the wrong value for a host that customizes it.
+ensure_shadow_group() {
+    local g
+    g="$(env_get "$ENVF" EDY_RDP_SHADOW_GROUP 2>/dev/null || true)"
+    [[ -n "$g" ]] || return 0   # blanked = the gate is off; nothing to guarantee
+    getent group "$g" >/dev/null \
+        || { groupadd --system "$g"; say created "group $g"; }
 }
 
 pull_image() {
@@ -381,6 +528,20 @@ migrate_legacy_env() {
     fi
 }
 
+refresh_active_firewall() {
+    [[ -z "$D" ]] || return 0
+    if systemctl is-active -q edy-rdp-firewall.service 2>/dev/null; then
+        step "refreshing the active firewall unit (rules + reserved ports, I61)"
+        # the unit file itself may have just changed (1.10.7 added ExecReload=)
+        systemctl daemon-reload || true
+        systemctl reload-or-restart edy-rdp-firewall.service \
+            && say reloaded "edy-rdp-firewall.service (atomic nft replace; reserved ports re-applied)" \
+            || warn "systemctl reload edy-rdp-firewall.service failed - the OLD rules may still be
+       loaded. Check: journalctl -u edy-rdp-firewall.service; nft list table inet edy_rdp_headless"
+    fi
+    return 0
+}
+
 preflight() {
     printf 'deploy pre-flight\n'
     [[ -f "$SRC/install.sh" && -f "$SRC/$ENVDEFAULT" && -f "$SRC/$REQUIRES" && -f "$SRC/$REQUIREMENTS" ]] \
@@ -445,6 +606,9 @@ do_deploy() {
 
     step "configuration"
     migrate_legacy_env
+    migrate_group_rename
+    migrate_shadow_group_rename
+    migrate_pulse_auto_defaults
     ((WITH_USERS)) && { step "users"; create_users; }
 
     # install.sh BEFORE the image pull: it places .env, and GUACD_IMAGE is read
@@ -452,7 +616,22 @@ do_deploy() {
     step "running the INSTALLED install.sh (not this checkout copy)"
     DESTDIR="$D" "$ROOT_D/payload/install.sh"
 
+    # AFTER install.sh, not beside create_users() above - see ensure_shadow_group()'s
+    # own comment for why this one has to read the FINAL, reconciled .env.
+    ((WITH_USERS)) && { step "shadow group"; ensure_shadow_group; }
+
     ((WITH_IMAGE)) && { step "guacd image"; pull_image; }
+
+    # The one running-state change a plain deploy makes, and why (I61): install.sh
+    # has just COPIED the nft rules and the reserved-ports sysctl drop-in, but the
+    # kernel only reads them when edy-rdp-firewall.service starts or reloads. A
+    # deploy without --with-units - which is what self-update runs - would
+    # otherwise leave the new files on disk and the OLD rules in force until the
+    # next reboot; that is how a stateless rule can outlive the release that
+    # fixed it. Only a unit that is ALREADY active is touched (a host that never
+    # enabled it stays as it was), and reload is an atomic nft replace: no
+    # window, no session dropped.
+    ((WITH_UNITS)) || refresh_active_firewall
 
     STEP="pruning old payloads"
     local p keepers
@@ -467,24 +646,48 @@ do_deploy() {
         systemctl daemon-reload
         dbus-send --system --type=method_call --dest=org.freedesktop.DBus \
             / org.freedesktop.DBus.ReloadConfig 2>/dev/null || true
-        systemctl enable --now edy-rdp-firewall.service && say enabled edy-rdp-firewall.service
+        # enable, then reload-or-restart - NOT `enable --now`, which is a no-op on
+        # this already-active oneshot and would leave an upgraded host enforcing
+        # the OLD rules until reboot (I61). Inactive: this starts it.
+        systemctl enable edy-rdp-firewall.service \
+            && systemctl reload-or-restart edy-rdp-firewall.service \
+            && say enabled "edy-rdp-firewall.service (rules + reserved ports applied)"
         systemctl enable --now edy-rdp-guacd.service    && say enabled edy-rdp-guacd.service
         systemctl enable --now edy-rdp-relay.socket edy-rdp-control.socket \
                                edy-rdp-reaper.timer && say enabled "relay+control sockets, reaper timer"
         systemctl start edy-rdp-relay.service || true
         # Audio: the path unit for the seat uid binds the pulse socket into the
         # shared dir at every login, so it reaches the running container (I42).
+        # "auto" (I59, the default) means the active seat can be either uid (the
+        # GDM greeter's, or a logged-in user's) and can change at any login/
+        # logout, so it gets the non-templated -auto pair instead, which watches
+        # for ANY login/logout and re-derives who is actually active each time,
+        # rather than one path unit instance per fixed, known-in-advance uid.
         local uid
-        uid="$(env_get "$ENVF" EDY_RDP_PULSE_SEAT_UID || echo 1000)"
-        systemctl enable --now "edy-rdp-pulse-seat@${uid}.path" \
-            && say enabled "edy-rdp-pulse-seat@${uid}.path (audio bind on seat login)"
-        # PathChanged= fires on the NEXT change in the pulse directory, never for a
-        # socket that already exists when the watch starts (and PathExists= would
-        # busy-loop the path unit to death - see the unit). A seat logged in right
-        # now is bound by this one explicit run; the script is idempotent.
-        systemctl start "edy-rdp-pulse-rebind@${uid}.service" \
-            && say bound "seat ${uid} pulse socket, if logged in (edy-rdp-pulse-rebind@${uid}.service)" \
-            || warn "edy-rdp-pulse-rebind@${uid}.service failed: journalctl -t edy-rdp-pulse-bind"
+        uid="$(env_get "$ENVF" EDY_RDP_PULSE_SEAT_UID || echo auto)"
+        if [[ "$uid" == auto ]]; then
+            systemctl enable --now edy-rdp-pulse-seat-auto.path \
+                && say enabled "edy-rdp-pulse-seat-auto.path (audio auto-follows the active seat: GDM greeter or a logged-in user)"
+            # PathChanged= fires on the NEXT change under /run/user, never for a
+            # login already in progress when the watch starts - this one explicit
+            # run covers that (the script is idempotent either way), and also
+            # restarts guacd once if this is the very first resolution (a fresh
+            # PULSE_SOURCE cannot reach the container guacd.service just started
+            # with --with-units above any other way - see edy-rdp-pulse-bind.sh).
+            systemctl start edy-rdp-pulse-rebind-auto.service \
+                && say bound "the active seat's pulse socket + PULSE_SOURCE, restarting guacd if either changed (edy-rdp-pulse-rebind-auto.service)" \
+                || warn "edy-rdp-pulse-rebind-auto.service failed: journalctl -t edy-rdp-pulse-bind"
+        else
+            systemctl enable --now "edy-rdp-pulse-seat@${uid}.path" \
+                && say enabled "edy-rdp-pulse-seat@${uid}.path (audio bind on seat login)"
+            # PathChanged= fires on the NEXT change in the pulse directory, never for a
+            # socket that already exists when the watch starts (and PathExists= would
+            # busy-loop the path unit to death - see the unit). A seat logged in right
+            # now is bound by this one explicit run; the script is idempotent.
+            systemctl start "edy-rdp-pulse-rebind@${uid}.service" \
+                && say bound "seat ${uid} pulse socket, if logged in (edy-rdp-pulse-rebind@${uid}.service)" \
+                || warn "edy-rdp-pulse-rebind@${uid}.service failed: journalctl -t edy-rdp-pulse-bind"
+        fi
         warn "edy-rdp-rotate-rdplogin.timer was NOT enabled. It rotates the 3390
        greeter door credential, which only matters once that door is configured
        at all (docs/KNOWN_ISSUES.md I29). Enable it deliberately:
@@ -519,9 +722,12 @@ do_deploy() {
 deployed. This host no longer depends on the development share.
 
   bring it up:   sudo $SELF --with-units
-  who may use it: usermod -aG $RELAY_GROUP <user>
+  who may use it: usermod -aG $RELAY_GROUP <user>  (docs/GROUP-ACCESS-MODEL.md - who that
+                 actually admits, and what console/remote/vnc need on top of it)
   verify:        ss -tlnp | grep 4822          (127.0.0.1 only)
                  nft list table inet edy_rdp_guacd
+                 nft list table inet edy_rdp_headless    (ct state established,related first)
+                 sysctl net.ipv4.ip_local_reserved_ports  (33000-33999)
                  ls -l /run/edy-rdp/guacd.sock
   rollback:      ln -sfn payload-<older> $ROOT/payload.new \\
                  && mv -T $ROOT/payload.new $ROOT/payload && $ROOT/payload/install.sh

@@ -192,7 +192,7 @@ def _rpm_requires(pkg):
 
 def _rpm_whatrequires(pkg):
     """None means "unavailable" -- the same signal _pacman_whatrequires()
-    already gives when its tool is missing (KNOWN_ISSUES I51 F7). rpm's exit
+    already gives when its tool is missing (KNOWN_ISSUES I64 F7). rpm's exit
     code 1 is BOTH the documented, normal result for "nothing requires this
     package" AND what a missing rpm binary, a corrupt rpmdb or a permission
     error produces; collapsing both to [] would silently report "nothing
@@ -223,7 +223,7 @@ def _dpkg_requires(pkg):
 
 def _apt_whatrequires(pkg):
     """None means "unavailable" -- same distinction as _rpm_whatrequires()
-    above (KNOWN_ISSUES I51 F7): apt-cache exits 0 with an empty
+    above (KNOWN_ISSUES I64 F7): apt-cache exits 0 with an empty
     "Reverse Depends:" block for the normal "nothing depends on this"
     case, so a non-zero exit here means the query itself failed (a missing
     binary is already ruled out by the _which() check below), and stderr
@@ -327,7 +327,7 @@ def get_latest_transaction_id(pm):
     specifically on ok=False, not on "no history yet" -- a prior version of
     this function returned a single Optional[str] for both, and a failed
     "before" reading standing in for "no history" let an already-existing
-    transaction look newly created by this run (KNOWN_ISSUES I51 follow-up).
+    transaction look newly created by this run (KNOWN_ISSUES I64 follow-up).
     Tries --json first (modern dnf/yum); falls back to the plain table
     (older versions do not support --json)."""
     rc, out = _run([pm, "history", "list", "--json"])
@@ -422,7 +422,7 @@ def write_snapshot(dep_dir, timestamp, data):
     path = os.path.join(dep_dir, "%s.json" % timestamp)
     _write_json_atomic(path, data)
     # The small companion relay/depcheck.py's list_snapshots() actually reads
-    # (KNOWN_ISSUES I51 F4) -- written AFTER the full snapshot so a reader
+    # (KNOWN_ISSUES I64 F4) -- written AFTER the full snapshot so a reader
     # never sees a summary for a snapshot whose full file is not there yet.
     summary_path = os.path.join(dep_dir, "%s%s" % (timestamp, DC.SUMMARY_SUFFIX))
     _write_json_atomic(summary_path, data.get("summary") or {})
@@ -447,7 +447,7 @@ def attributable_transaction_id(pm, install_tx, label):
     very end of deploy.sh, can contain unrelated dnf/yum activity -- an
     image pull's own package operations, a concurrent operator command, an
     unattended-upgrades run -- that a coarser comparison would misattribute
-    to install_deps() (KNOWN_ISSUES I51 F3)). If install_tx is unknown
+    to install_deps() (KNOWN_ISSUES I64 F3)). If install_tx is unknown
     (install_deps() never ran, or created no new transaction), refuse to
     attribute rather than guess: an "after" snapshot with no recorded
     transaction just means rollback has nothing to undo yet (safe);
@@ -520,7 +520,7 @@ def cmd_current_tx():
     database) -- deploy.sh's bracket must tell these apart: treating a
     FAILED reading the same as "no history" let an already-existing
     transaction look newly created by this run when the other reading in
-    the same bracket happened to succeed (KNOWN_ISSUES I51 follow-up)."""
+    the same bracket happened to succeed (KNOWN_ISSUES I64 follow-up)."""
     pm = DC.detect_pm()
     if pm not in ("dnf", "yum"):
         print("CURRENT_TX=", flush=True)
@@ -597,7 +597,7 @@ def main(argv=None):
                          "its own package-manager invocation (see deploy.sh's "
                          "depsnapshot_current_tx()) -- only meaningful with --label after; "
                          "never inferred by comparing against some other snapshot's own "
-                         "transaction reading (KNOWN_ISSUES I51 F3)")
+                         "transaction reading (KNOWN_ISSUES I64 F3)")
 
     sub.add_parser("current-tx", help="print this host's current dnf/yum transaction id "
                    "(pm detection + one cheap history query, no inventory scan)")

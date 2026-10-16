@@ -14,7 +14,7 @@ HTTPS channel.
 | guacd container | `podman ps --filter name=edy-rdp-guacd` | one running container |
 | guacd is loopback-only | `ss -tlnp \| grep 4822` | `127.0.0.1:4822` only — **never** `0.0.0.0` |
 | nftables owner-gate | `nft list table inet edy_rdp_guacd` | admits only the `edy-relay` uid |
-| Relay socket present | `ls -l /run/edy-rdp/guacd.sock` | mode `0660`, group `edy-rdp` |
+| Relay socket present | `ls -l /run/edy-rdp/guacd.sock` | mode `0660`, group `cockpit-guac-rdp` |
 | Reaper timer | `systemctl status edy-rdp-reaper.timer` | `active (waiting)` |
 | Credential rotation | `systemctl list-timers edy-rdp-rotate-rdplogin.timer` | next run shown |
 | Start-time bootstrap | `journalctl -u edy-rdp-relay -g bootstrap` | `[bootstrap] env OK`, `prereqs OK`, `venv.env: unchanged` (or `wrote`) at the last start; never a `FAIL` line |

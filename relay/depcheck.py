@@ -28,7 +28,7 @@
 # a privilege boundary needs crossing.
 #
 # Tracking scope, stated plainly (product decision, not an oversight — see
-# docs/KNOWN_ISSUES.md I51):
+# docs/KNOWN_ISSUES.md I64):
 #   * the FULL installed-package inventory (name/version/arch) is captured
 #     every snapshot.
 #   * a real dependency GRAPH (requires / required-by) is captured ONLY for
@@ -267,7 +267,7 @@ def pkg_for(name, pm):
 # <timestamp>.summary.json holding JUST that "summary" dict, so
 # list_snapshots() never has to walk the (possibly large) "packages" array of
 # every snapshot just to show one line per deploy -- genuinely cheap, not only
-# in name (KNOWN_ISSUES I51 F4: json.load() cannot partially parse a single
+# in name (KNOWN_ISSUES I64 F4: json.load() cannot partially parse a single
 # JSON document, so reading the full file to reach one small sub-object was no
 # cheaper than reading everything in it).
 
@@ -286,7 +286,7 @@ def list_snapshots(directory):
         if path.endswith(SUMMARY_SUFFIX):
             continue
         if not TIMESTAMP_RE.fullmatch(os.path.basename(path)[:-len(".json")]):
-            continue  # not one of ours (KNOWN_ISSUES I51 F5) -- e.g. a stray notes.json
+            continue  # not one of ours (KNOWN_ISSUES I64 F5) -- e.g. a stray notes.json
         summary_path = path[:-len(".json")] + SUMMARY_SUFFIX
         try:
             if os.path.isfile(summary_path):
@@ -319,7 +319,7 @@ def load_snapshot(directory, timestamp_or_latest="latest"):
     its JSON is missing/unreadable, or `timestamp_or_latest` is neither
     "latest" nor a genuine now_timestamp()-shaped value. "latest" resolves to
     the lexically-greatest (== chronologically newest) filename on disk.
-    KNOWN_ISSUES I51 F5/path-traversal: `deps-list` threads an authenticated
+    KNOWN_ISSUES I64 F5/path-traversal: `deps-list` threads an authenticated
     caller's own request field straight through to here as
     `timestamp_or_latest` -- rejecting anything that doesn't match
     TIMESTAMP_RE before it ever reaches a path join is load-bearing, not
@@ -400,7 +400,7 @@ def blast_radius(snapshot, package_name):
     from "the reverse-dependency check itself could not run" (no pactree on a
     pacman host, or a broken rpm/apt-cache query — see
     depcheck/edy-rdp-depsnapshot.py's own required_by_unavailable field on the
-    tracked entry, KNOWN_ISSUES I51 F5/F7); without this, a failed check and a
+    tracked entry, KNOWN_ISSUES I64 F5/F7); without this, a failed check and a
     real "nothing depends on this" looked identical here and to callers."""
     tracked = (snapshot or {}).get("tracked", {})
     entry = tracked.get(package_name)
@@ -505,7 +505,7 @@ class DepCheck:
     def diff(self, a="previous", b="latest"):
         """Not wired to a control-API op in this pass (the product decision
         capped this feature at four read ops + one write op — see
-        docs/KNOWN_ISSUES.md I51); kept as a real, independently-tested method
+        docs/KNOWN_ISSUES.md I64); kept as a real, independently-tested method
         because edy-rdp-depsnapshot.py's own "snapshot" subcommand calls
         diff_snapshots() directly (in-memory, before anything is written) to
         compute each new snapshot's own "changed_since_previous" summary

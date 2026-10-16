@@ -14,7 +14,7 @@
 # decide WHAT to link - only to record which it did.
 #
 # WHAT THIS NO LONGER DOES, and why
-#   It does not install OS packages, create the edy-rdp group or the edy-relay
+#   It does not install OS packages, create the cockpit-guac-rdp group or the edy-relay
 #   user, pull the guacd image, or enable/start/stop a single unit. All of that
 #   changes the RUNNING STATE of a host, and it belongs to deploy.sh - the script
 #   that only ever runs on a host being deployed to. install.sh runs in both
@@ -51,6 +51,7 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          relay/control.py:control.py
          relay/bridge.py:bridge.py
          relay/depcheck.py:depcheck.py
+         relay/selfupdate.py:selfupdate.py
          bridge/edy-rdp-bridge-start.sh:edy-rdp-bridge-start
          bridge/edy-rdp-krb-preflight.sh:edy-rdp-krb-preflight.sh
          headless/edy-rdp-headless-start.sh:edy-rdp-headless-start
@@ -62,7 +63,9 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin
          bootstrap/edy-rdp-bootstrap.sh:edy-rdp-bootstrap
          pulse/edy-rdp-pulse-bind.sh:edy-rdp-pulse-bind
-         depcheck/edy-rdp-depsnapshot.py:edy-rdp-depsnapshot)
+         depcheck/edy-rdp-depsnapshot.py:edy-rdp-depsnapshot
+         selfupdate/edy-rdp-selfupdate-apply.py:edy-rdp-selfupdate-apply
+         selfupdate/edy-rdp-selfupdate-rollback.py:edy-rdp-selfupdate-rollback)
 # Sourced libraries (not entry points): linked into $LIBEXECDIR beside the scripts
 # that source them, so a deployed host has ONE copy of the .env grammar and ONE
 # reading of requires.txt - the same code install.sh, deploy.sh and the start-time
@@ -81,12 +84,18 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        edy-rdp-unlock@.service edy-rdp-waylandvnc@.service edy-rdp-deskui@.service
        # Audio: a path unit per seat uid that binds the seat's pulse socket into the
        # SHARED /run/edy-rdp-pulse the moment it appears (login), so it propagates into
-       # the running guacd container without a restart (KNOWN_ISSUES I42).
+       # the running guacd container without a restart (KNOWN_ISSUES I42). The -auto
+       # pair (no %i) is what EDY_RDP_PULSE_SEAT_UID=auto (the default, I59) actually
+       # enables; the %i-templated pair stays for a pinned, explicit-uid seat.
        edy-rdp-pulse-seat@.path edy-rdp-pulse-rebind@.service
-       # Dependency-tracking rollback: deliberately NOT templated (no %i) -- see
-       # systemd/edy-rdp-depcheck-rollback.service.in for why that is a stronger
-       # property here, mirroring edy-rdp-rotate-rdplogin.service elsewhere in
-       # this project.
+       edy-rdp-pulse-seat-auto.path edy-rdp-pulse-rebind-auto.service
+       # Self-update: deliberately NOT templated (no %i) -- see
+       # systemd/edy-rdp-selfupdate-apply.service.in for why that is a stronger
+       # property here than the %i-templated units above.
+       edy-rdp-selfupdate-apply.service edy-rdp-selfupdate-rollback.service
+       # Dependency-tracking rollback: untemplated for the same reason -- see
+       # systemd/edy-rdp-depcheck-rollback.service.in, mirroring
+       # edy-rdp-rotate-rdplogin.service elsewhere in this project.
        edy-rdp-depcheck-rollback.service)
 # System files that are COPIED (rendered where they carry a placeholder), because
 # the software that reads them - systemd-tmpfiles, dbus, polkit, nft - does not
@@ -96,7 +105,10 @@ SYSFILES=(systemd/edy-rdp-tmpfiles.conf:/usr/lib/tmpfiles.d/edy-rdp.conf
           hardening/org.gnome.RemoteDesktop.handover.conf:/etc/dbus-1/system.d/org.gnome.RemoteDesktop.handover.conf
           hardening/edy-rdp-headless.rules:/etc/polkit-1/rules.d/49-edy-rdp-headless.rules
           hardening/edy-rdp-guacd.nft:/etc/nftables.d/edy-rdp-guacd.nft
-          hardening/edy-rdp-headless.nft:/etc/nftables.d/edy-rdp-headless.nft)
+          hardening/edy-rdp-headless.nft:/etc/nftables.d/edy-rdp-headless.nft
+          # Reserves the headless session ports (33000-33999) from the ephemeral
+          # allocator - KNOWN_ISSUES I61. Applied by edy-rdp-firewall.service.
+          hardening/edy-rdp-headless-sysctl.conf:/etc/sysctl.d/90-edy-rdp-headless.conf)
 SEEDS=()
 ENVDEFAULT=.envdefault
 REQUIRES=requires.txt          # OS prerequisites + guacd image (parsed by lib/edy-rdp-requires.sh)
@@ -109,7 +121,7 @@ REQUIRED_ENV=(EDY_RDP_GUACD EDY_RDP_ADMIN_GROUP EDY_RDP_STATE_FILE
 UNITDIR=/etc/systemd/system
 LIBEXECDIR=/usr/libexec/edy-rdp
 RELAY_USER=edy-relay
-RELAY_GROUP=edy-rdp
+RELAY_GROUP=cockpit-guac-rdp
 # END-MANIFEST
 # ---------------------------------------------------------------------------
 
@@ -307,6 +319,48 @@ leftover_placeholders() {   # $1 = file, or '-' for stdin; prints "@A@ @B@ " or 
     grep -v '^[[:space:]]*#' -- "${1:--}" | grep -o '@[A-Z_]\+@' | sort -u | tr '\n' ' ' || true
 }
 
+# KNOWN_ISSUES I61. The headless session ports (33000-33999) sit inside the
+# kernel's ephemeral range, so the headless input rule must be STATEFUL (accept
+# established/related before anything is dropped, drop only NEW connections) or
+# it black-holes the replies of this host's own outbound connections. Reads a
+# table on stdin - the shipped file or `nft list table` - and answers rc 0 when
+# an established/related accept comes before the first drop and every drop is
+# scoped to `ct state new`. Comments are stripped first: the file's own prose
+# says "drop" more than once. ALWAYS-defined exit status, never a bare grep.
+headless_rule_is_stateful() {
+    awk '{ sub(/#.*/, "") }
+         /ct state established,related accept/ && !est { est = NR }
+         /(^|[[:space:]])drop([[:space:]]*;?[[:space:]]*$)/ {
+             if (!first_drop) first_drop = NR
+             if ($0 !~ /ct state new[[:space:]]/) bad = 1 }
+         END { exit !(est && first_drop && est < first_drop && !bad) }'
+}
+
+# The reservation the sysctl drop-in asks for (net.ipv4.ip_local_reserved_ports),
+# read out of the file itself so there is one place the range is written.
+reserved_ports_wanted() {   # $1 = sysctl file; prints e.g. 33000-33999, or nothing
+    sed -n 's/^[[:space:]]*net[./]ipv4[./]ip_local_reserved_ports[[:space:]]*=[[:space:]]*//p' \
+        -- "$1" 2>/dev/null | tail -n 1 | tr -d '[:space:]' || true
+}
+
+# rc 0 when the kernel's live reserved list ($1, "a-b,c,...") covers every port
+# of $2 ("a-b,c,..."). Another reservation beside ours is fine; a gap is not.
+reserved_ports_cover() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+def ports(spec):
+    out = set()
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+want = ports(sys.argv[2])
+sys.exit(0 if want and want <= ports(sys.argv[1]) else 1)
+PY
+}
+
 libexec_src()  { printf '%s\n' "$SRC/${1%%:*}"; }
 libexec_name() { printf '%s\n' "${1#*:}"; }
 
@@ -468,12 +522,35 @@ $(sed 's/^/    /' <<<"$problems")
         local prereq_bad=0
         getent group "$RELAY_GROUP" >/dev/null || { fail "group $RELAY_GROUP does not exist"; prereq_bad=1; }
         getent passwd "$RELAY_USER" >/dev/null || { fail "user $RELAY_USER does not exist"; prereq_bad=1; }
-        ((prereq_bad)) && die "the relay's dedicated user/group are missing. install.sh does
+        if ((prereq_bad)); then
+            # A host that still carries the pre-rename "edy-rdp" group needs a
+            # RENAME (groupmod -n), never a fresh groupadd: a plain "groupadd
+            # $RELAY_GROUP" here would create a second, EMPTY group and silently
+            # orphan every existing edy-rdp member the next time a unit that
+            # references $RELAY_GROUP restarts. deploy.sh (run with no flags at
+            # all - this migration is NOT gated behind --with-users, see its
+            # migrate_group_rename()) already does this safely; naming BOTH
+            # remedies here is what fixing I51's install.sh gap requires - this
+            # message must never suggest groupadd alone while the old group
+            # might still exist.
+            if getent group edy-rdp >/dev/null; then
+                die "the relay's dedicated group is still named the OLD 'edy-rdp',
+    not '$RELAY_GROUP'. install.sh does not rename it itself: changing a system
+    group is deploy.sh's job. Run:
+        sudo ./deploy.sh            (no flags needed - the rename is unconditional, not
+                                     gated behind --with-users; it also creates the
+                                     $RELAY_USER user if this is a genuinely fresh host)
+    or by hand, preserving the group's GID and every existing member:
+        groupmod -n $RELAY_GROUP edy-rdp"
+            else
+                die "the relay's dedicated user/group are missing. install.sh does
     not create them: creating a system account changes the host, which is
     deploy.sh's job. Run:
         sudo ./deploy.sh --with-users            (or, by hand:)
         groupadd --system $RELAY_GROUP
         useradd --system --no-create-home --shell /usr/sbin/nologin -g $RELAY_GROUP $RELAY_USER"
+            fi
+        fi
         ok "8. $RELAY_USER:$RELAY_GROUP exist (uid $(id -u "$RELAY_USER"))"
 
         # 8b. the OS prerequisites, from the one list (requires.txt), presence and
@@ -616,15 +693,31 @@ verify_host_state() {
     if [[ -z "$D" ]]; then
         uid="$(env_get "$ENV_FILE" EDY_RDP_PULSE_SEAT_UID 2>/dev/null || true)"
         sock="$(env_get "$ENV_FILE" EDY_RDP_PULSE_SEAT_SOCKET 2>/dev/null || true)"
-        seat="${EDY_RDP_PULSE_SEAT_SOCKET:-${sock:-/run/user/${uid:-1000}/pulse/native}}"
-        if [[ ! -S "$seat" ]]; then
+        if [[ "$uid" == auto && -z "$sock" ]]; then
+            # I59: "auto" has no single fixed expected path to stat -- ask the
+            # bind script's OWN --check (read-only, no root needed) for its
+            # already-tested resolution instead of re-deriving "who is the
+            # active seat" a second time here, which could silently drift out
+            # of sync with it. Its plan line's own format is this project's,
+            # not an external tool's, so parsing it is stable.
+            plan="$(EDY_RDP_PULSE_SEAT_SOCKET= EDY_RDP_PULSE_SEAT_UID=auto "$LIBEXECDIR/edy-rdp-pulse-bind" --check 2>&1)"
+            seat="$(sed -n 's/^\[pulse-bind\] plan: dir=[^ ]* seat=\([^ ]*\) (\([a-z]*\)).*/\1|\2/p' <<<"$plan")"
+            state="${seat#*|}"; seat="${seat%%|*}"
+            [[ -n "$seat" && -n "$state" ]] \
+                || fail "could not parse edy-rdp-pulse-bind --check output to verify the audio bind:
+$(sed 's/^/    /' <<<"$plan")"
+        else
+            seat="${sock:-/run/user/${uid:-1000}/pulse/native}"
+            [[ -S "$seat" ]] && state=exists || state=absent
+        fi
+        if [[ "$state" != exists ]]; then
             say skipped "pulse bind (seat socket $seat absent - no seat login)"
         elif ! findmnt -no PROPAGATION /run/edy-rdp-pulse 2>/dev/null | grep -q shared; then
             fail "/run/edy-rdp-pulse is not a SHARED mountpoint (a later bind cannot reach the container; run edy-rdp-pulse-bind)"
         elif mountpoint -q /run/edy-rdp-pulse/native 2>/dev/null; then
             ok "/run/edy-rdp-pulse/native is a mountpoint (seat socket bound)"
         else
-            fail "/run/edy-rdp-pulse/native is not a mountpoint while the seat socket exists (run /usr/libexec/edy-rdp/edy-rdp-pulse-bind, or check edy-rdp-pulse-seat@<uid>.path)"
+            fail "/run/edy-rdp-pulse/native is not a mountpoint while the seat socket exists (run /usr/libexec/edy-rdp/edy-rdp-pulse-bind, or check edy-rdp-pulse-seat-auto.path / edy-rdp-pulse-seat@<uid>.path)"
         fi
     fi
     # 5. venv.env agrees with requirements.txt (the bootstrap rewrites it at
@@ -674,6 +767,49 @@ verify_host_state() {
     else
         fail "prerequisites missing or below minimum: ${REQ_MISSING[*]} ${REQ_OUTDATED[*]} - the relay's bootstrap refuses to start. Fix: $(req_fix_command "${REQ_MISSING[@]}" "${REQ_OUTDATED[@]}")"
     fi
+    # 7. I61: the headless session ports are reserved from the ephemeral
+    #    allocator, and the headless rule the KERNEL holds is the stateful one.
+    #    The files can be right while the kernel is not: nft and sysctl read them
+    #    only when edy-rdp-firewall.service starts or reloads, and an upgrade that
+    #    stopped at `systemctl enable --now` (a no-op on an active oneshot) keeps
+    #    enforcing the old stateless rule until the next reboot.
+    local rsv_file="$D/etc/sysctl.d/90-edy-rdp-headless.conf" rsv_want rsv_live other loaded
+    if [[ -n "$D" ]]; then
+        say skipped "reserved session ports (staged)"
+    elif [[ ! -f "$rsv_file" ]]; then
+        say skipped "reserved session ports ($rsv_file is not installed - reported above)"
+    else
+        rsv_want="$(reserved_ports_wanted "$rsv_file")"
+        rsv_live="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports 2>/dev/null || true)"
+        if [[ -n "$rsv_want" ]] && reserved_ports_cover "$rsv_live" "$rsv_want"; then
+            ok "net.ipv4.ip_local_reserved_ports covers $rsv_want (live: $rsv_live)"
+        else
+            fail "net.ipv4.ip_local_reserved_ports is '${rsv_live}', which does not cover '${rsv_want}' - an outbound connection can be handed a headless session port (I61). Fix: systemctl reload edy-rdp-firewall.service"
+        fi
+        # The kernel keeps ONE list and every writer replaces it whole, so a second
+        # sysctl.d file setting the key silently wins or loses against ours at boot.
+        other="$(grep -lsE '^[[:space:]]*-?net[./]ipv4[./]ip_local_reserved_ports' \
+                   /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf \
+                   /usr/local/lib/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf 2>/dev/null \
+                 | grep -vxF "$rsv_file" | sort -u || true)"
+        [[ -z "$other" ]] || warn "net.ipv4.ip_local_reserved_ports is ALSO set by: $(tr '\n' ' ' <<<"$other")
+       The kernel holds one list and the last file (by name) replaces it whole at boot.
+       Merge every reservation, including $rsv_want, into ONE value."
+    fi
+    if   [[ -n "$D" ]];      then say skipped "loaded headless rule (staged)"
+    elif [[ $EUID -ne 0 ]];  then say skipped "loaded headless rule (needs root to list nftables)"
+    elif ! systemctl is-active -q edy-rdp-firewall.service 2>/dev/null; then
+         say skipped "loaded headless rule (edy-rdp-firewall.service not active)"
+    else
+        loaded="$(nft list table inet edy_rdp_headless 2>/dev/null || true)"
+        if [[ -z "$loaded" ]]; then
+            fail "table inet edy_rdp_headless is not loaded although edy-rdp-firewall.service is active (systemctl reload edy-rdp-firewall.service)"
+        elif headless_rule_is_stateful <<<"$loaded"; then
+            ok "loaded edy_rdp_headless rule is stateful (established/related accepted before a NEW-only drop)"
+        else
+            fail "the LOADED edy_rdp_headless rule is not stateful - it drops replies to this host's own outbound connections whose local port is 33000-33999 (I61). Fix: systemctl reload edy-rdp-firewall.service"
+        fi
+    fi
 }
 
 do_uninstall() {
@@ -696,6 +832,22 @@ do_uninstall() {
         systemctl reset-failed 2>/dev/null || true   # else a removed unit lingers as failed
     fi
     for f in "${SYSFILES[@]}"; do remove_file "$D${f#*:}"; done
+    # I61: removing the sysctl drop-in only stops the NEXT boot reserving the
+    # headless ports; the running kernel still holds the list. Release it - but
+    # only when the live value is exactly what our drop-in asked for. Anything
+    # else is a list somebody else has written into since, and is theirs.
+    if [[ -z "$D" ]]; then
+        local rsv_want rsv_live
+        rsv_want="$(reserved_ports_wanted "$SRC/hardening/edy-rdp-headless-sysctl.conf")"
+        rsv_live="$(cat /proc/sys/net/ipv4/ip_local_reserved_ports 2>/dev/null || true)"
+        if [[ -n "$rsv_want" && "$rsv_live" == "$rsv_want" ]]; then
+            { printf '\n' > /proc/sys/net/ipv4/ip_local_reserved_ports; } 2>/dev/null \
+                && say released "net.ipv4.ip_local_reserved_ports ($rsv_want)" \
+                || warn "could not clear net.ipv4.ip_local_reserved_ports ($rsv_want); it lapses at reboot"
+        elif [[ -n "$rsv_live" ]]; then
+            say kept "net.ipv4.ip_local_reserved_ports=$rsv_live (not exactly ours, '$rsv_want'; not touched)"
+        fi
+    fi
     for f in "${LIBEXEC[@]}" "${LIBS[@]}"; do n="$(libexec_name "$f")"; remove_link "$LIBEXECDIR_D/$n"; done
     # A __pycache__ left by a version that ran before PYTHONDONTWRITEBYTECODE.
     # Swept file by file and then rmdir'd - NOT `rm -r`, which is banned under
@@ -869,7 +1021,7 @@ EOF
         [[ -e "$t" ]] || die "post-install: $LIBEXECDIR_D/$n dangles"
         case "$n" in
           *.py|edy-rdp-*) [[ "$n" == session_registry.py || "$n" == control.py \
-                             || "$n" == bridge.py || "$n" == depcheck.py ]] \
+                             || "$n" == bridge.py || "$n" == depcheck.py || "$n" == selfupdate.py ]] \
                           || [[ -x "$t" ]] || die "post-install: $t is not executable" ;;
         esac
     done
@@ -894,7 +1046,9 @@ installed ($KIND). NOTHING WAS ENABLED OR STARTED - that is deploy.sh's job.
                                                   edy-rdp-relay.socket
                                                   edy-rdp-control.socket
                                                   edy-rdp-reaper.timer)
-  who may use it:          usermod -aG $RELAY_GROUP <user>
+  who may use it:          usermod -aG $RELAY_GROUP <user>  (docs/GROUP-ACCESS-MODEL.md -
+                           who that actually admits, and what console/remote/vnc need
+                           on top of it)
   cockpit.socket was NOT touched. Reload the browser (Ctrl-Shift-R for the menu).
 EOF
     [[ "$KIND" == dev ]] && cat <<EOF

@@ -206,9 +206,9 @@ env_place_reconcile_keeps_values() {
         || { echo "EDY_RDP_GUACD was changed (an operator value must never be touched)"; bad=1; }
     local hdr key
     hdr="$(grep -n -m1 "added by install.sh $WANT_VERSION" "$env" | cut -d: -f1)"
-    key="$(grep -n -m1 '^EDY_RDP_PULSE_SEAT_UID=1000$' "$env" | cut -d: -f1)"
+    key="$(grep -n -m1 '^EDY_RDP_PULSE_SEAT_UID=auto$' "$env" | cut -d: -f1)"
     [[ -n "$hdr" ]] || { echo "no '# added by install.sh $WANT_VERSION' header"; bad=1; }
-    [[ -n "$key" ]] || { echo "EDY_RDP_PULSE_SEAT_UID=1000 was not appended"; bad=1; }
+    [[ -n "$key" ]] || { echo "EDY_RDP_PULSE_SEAT_UID=auto was not appended"; bad=1; }
     [[ -n "$hdr" && -n "$key" && "$key" -gt "$hdr" ]] \
         || { echo "EDY_RDP_PULSE_SEAT_UID is not under the 'added by' header"; bad=1; }
     return $bad
@@ -380,6 +380,256 @@ pulse_check_case() {   # $1 = label, $2 = bind dir, $3 = seat socket, $4 = uid, 
     return 0
 }
 
+# 10d. I59: EDY_RDP_PULSE_SEAT_UID=auto (the default) resolves via loginctl to
+#      whichever session is active on seat0 - the GDM greeter before a login,
+#      a logged-in user's own session after, without needing to know which one
+#      ahead of time - and falls back to uid 1000 when no such session exists
+#      at all (e.g. a headless host). A lingering, non-seat session (matches
+#      edt1's own lingering "eddie" --user manager: uid 1000, no Seat= at all)
+#      is listed first and must be skipped rather than mistaken for the active
+#      seat. An explicit --seat-uid still wins outright; auto-resolution must
+#      not even run. Hermetic: a fake loginctl earlier in PATH.
+pulse_bind_auto_resolves_seat_uid() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local bin="$TMP/fakebin-loginctl" bad=0 out
+    install -d -- "$bin"
+    cat > "$bin/loginctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "list-sessions --no-legend" ]]; then
+    for s in $FAKE_SESSION_IDS; do printf '%s\n' "$s"; done
+elif [[ "$1" == show-session ]]; then
+    var="FAKE_PROPS_$2"; printf '%s\n' "${!var}"
+fi
+EOF
+    chmod +x "$bin/loginctl"
+
+    export FAKE_SESSION_IDS="3 c1"
+    # session 3: an active but SEAT-LESS, non-"user"-class session (e.g. a
+    # podman-* service account's systemd --user manager) - must be skipped
+    # independent of the Active check (a session that is merely inactive
+    # would be skipped either way and not exercise this filter on its own).
+    export FAKE_PROPS_3=$'Seat=\nActive=yes\nUser=1000\nType=unspecified\nClass=manager'
+    export FAKE_PROPS_c1=$'Seat=seat0\nActive=yes\nUser=60578\nType=wayland\nClass=greeter'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-auto1" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 60578' <<<"$out" \
+        || { echo "greeter-active case: no resolution log:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF '/run/user/60578/pulse/native' <<<"$out" \
+        || { echo "greeter-active case: plan does not use the resolved uid:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    export FAKE_SESSION_IDS="3"
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-auto2" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: no active user session and no seat0 session found' <<<"$out" \
+        || { echo "no-active-session case: no fallback log:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF '/run/user/1000/pulse/native' <<<"$out" \
+        || { echo "no-active-session case: did not fall back to uid 1000:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-auto3" "$SRC/pulse/edy-rdp-pulse-bind.sh" --seat-uid 4242 --check 2>&1)"
+    grep -qF 'auto:' <<<"$out" \
+        && { echo "explicit --seat-uid case: auto-resolution ran anyway:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF '/run/user/4242/pulse/native' <<<"$out" \
+        || { echo "explicit --seat-uid case: plan lost the pinned uid:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    unset FAKE_SESSION_IDS FAKE_PROPS_3 FAKE_PROPS_c1
+    return $bad
+}
+
+# 10d1b. I59 follow-up, found LIVE on edt1 by the user actually using this
+#      feature (auto-resolved to the GDM greeter's uid, which has real audio
+#      hardware, while the desktop they were actually looking at and hearing
+#      from showed "Dummy Output" as its only device): this project's RDP door
+#      hands off into an EXISTING desktop session rather than a fresh physical
+#      login, and `loginctl show-seat seat0` was confirmed live to report
+#      ActiveSession=<the greeter's own session> PERMANENTLY -- the handed-off
+#      session shows up as a SEPARATE session with Remote=yes and Seat= empty
+#      (gnome-remote-desktop-daemon --handover), invisible to a Seat=seat0
+#      filter no matter who is actually logged in and listening. A real,
+#      active, graphical (wayland/x11) Class=user session must be preferred
+#      over the seat0 greeter regardless of Seat=/Remote=; a Class=user "web"
+#      session (e.g. a Cockpit browser tab) must NOT be treated as a desktop
+#      with its own audio; the seat0 greeter is still the right (only) answer
+#      when no such session exists at all.
+pulse_bind_auto_prefers_active_user_session_over_seat0_greeter() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local bin="$TMP/fakebin-loginctl2" bad=0 out
+    install -d -- "$bin"
+    cat > "$bin/loginctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "list-sessions --no-legend" ]]; then
+    for s in $FAKE_SESSION_IDS; do printf '%s\n' "$s"; done
+elif [[ "$1" == show-session ]]; then
+    var="FAKE_PROPS_$2"; printf '%s\n' "${!var}"
+fi
+EOF
+    chmod +x "$bin/loginctl"
+
+    # Reproduces the exact live edt1 topology: the greeter is listed FIRST
+    # (order must not matter) and IS the only Seat=seat0 session, but a real,
+    # active, remote, unlocked desktop (no Seat=, Remote=yes -- matching
+    # gnome-remote-desktop's handover session exactly) exists for a different
+    # uid and must win.
+    export FAKE_SESSION_IDS="c1 27"
+    export FAKE_PROPS_c1=$'Seat=seat0\nActive=yes\nUser=60578\nType=wayland\nClass=greeter'
+    export FAKE_PROPS_27=$'Seat=\nActive=yes\nUser=1000\nType=wayland\nClass=user'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-prefer1" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 1000' <<<"$out" \
+        || { echo "handed-off-session case: did not prefer the real user session:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF '/run/user/1000/pulse/native' <<<"$out" \
+        || { echo "handed-off-session case: plan does not use uid 1000:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    # A Class=user session that is NOT graphical (a Cockpit "web" session, e.g.
+    # eddie2's own real session on edt1) must not be mistaken for a desktop.
+    export FAKE_SESSION_IDS="c1 54"
+    export FAKE_PROPS_54=$'Seat=\nActive=yes\nUser=1008\nType=web\nClass=user'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-prefer2" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 60578' <<<"$out" \
+        || { echo "web-session case: a non-graphical Class=user session was preferred over the greeter:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    # Locked is still a legitimate mirror target (the whole point of this
+    # project's "Allow Locked Remote Desktop" extension) -- LockedHint must
+    # never exclude a real user session from being preferred.
+    export FAKE_SESSION_IDS="c1 27"
+    export FAKE_PROPS_27=$'Seat=\nActive=yes\nUser=1000\nType=wayland\nClass=user\nLockedHint=yes'
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$TMP/pulse-prefer3" "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF 'auto: resolved the active session to uid 1000' <<<"$out" \
+        || { echo "locked-session case: a LOCKED real user session was not preferred:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    unset FAKE_SESSION_IDS FAKE_PROPS_c1 FAKE_PROPS_27 FAKE_PROPS_54
+    return $bad
+}
+
+# 10d2. I59 follow-up (adversarial review): EDY_RDP_PULSE_SEAT_SOCKET is
+#      documented to WIN over the uid outright. With EDY_RDP_PULSE_SEAT_UID
+#      left at its "auto" default, a mismatched active-seat0 uid (reported by
+#      a fake loginctl) must NOT make the override start refusing a socket
+#      that never changed -- the override's own real owner is what the
+#      ownership check has to use, not an unrelated "who is active" answer.
+#      Hermetic: fake loginctl reporting an active uid that does NOT own the
+#      real (test-created) override socket.
+pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local d="$TMP/pulse-override-vs-auto" bin="$TMP/fakebin-loginctl2" bad=0 out me
+    me="$(id -u)"
+    install -d -m 0755 -- "$d/seat"
+    python3 - "$d/seat" <<'PY' || { echo "cannot create a test socket"; return 1; }
+import os, socket, sys
+os.chdir(sys.argv[1]); socket.socket(socket.AF_UNIX).bind("native")
+PY
+    install -d -- "$bin"
+    cat > "$bin/loginctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "list-sessions --no-legend" ]]; then
+    printf 'c1\n'
+elif [[ "$1" == show-session ]]; then
+    printf 'Seat=seat0\nActive=yes\nUser=%s\n' "$FAKE_ACTIVE_UID"
+fi
+EOF
+    chmod +x "$bin/loginctl"
+    export FAKE_ACTIVE_UID=424242   # deliberately NOT $me: someone else is "active" at seat0
+
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$d/dir" EDY_RDP_PULSE_SEAT_SOCKET="$d/seat/native" \
+           "$SRC/pulse/edy-rdp-pulse-bind.sh" --check 2>&1)"
+    grep -qF "seat=$d/seat/native (exists)" <<<"$out" \
+        || { echo "override case: the pinned socket was not accepted despite a mismatched active seat0 uid:"; sed 's/^/  /' <<<"$out"; bad=1; }
+    grep -qF "not a socket owned by uid $FAKE_ACTIVE_UID" <<<"$out" \
+        && { echo "override case: auto-resolution's active-seat uid leaked into the ownership check:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    unset FAKE_ACTIVE_UID
+    return $bad
+}
+
+# 10e. I59: PULSE_SOURCE=auto resolves the seat's current default sink (via
+#      `pactl get-default-sink` over the bound socket) instead of a hand-typed
+#      name that goes stale the moment the audio topology changes; a pin, or
+#      "unset" (audio off, the default), is never previewed as if it were auto.
+#      Hermetic: a fake pactl earlier in PATH, a real (never actually recorded
+#      from) unix socket standing in for the seat's.
+pulse_bind_auto_resolves_source_preview() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local d="$TMP/pulse-source-preview" bin="$TMP/fakebin-pactl" bad=0 out me
+    me="$(id -u)"
+    install -d -m 0755 -- "$d/seat"
+    python3 - "$d/seat" <<'PY' || { echo "cannot create a test socket"; return 1; }
+import os, socket, sys
+os.chdir(sys.argv[1]); socket.socket(socket.AF_UNIX).bind("native")
+PY
+    install -d -- "$bin"
+    cat > "$bin/pactl" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == get-default-sink ]] && printf '%s\n' "${FAKE_DEFAULT_SINK:-}"
+EOF
+    chmod +x "$bin/pactl"
+
+    export FAKE_DEFAULT_SINK="alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink"
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$d/dir" EDY_RDP_PULSE_SEAT_SOCKET="$d/seat/native" \
+           PULSE_SOURCE=auto "$SRC/pulse/edy-rdp-pulse-bind.sh" --seat-uid "$me" --check 2>&1)"
+    grep -qF "plan: PULSE_SOURCE=auto -> would resolve to ${FAKE_DEFAULT_SINK}.monitor" <<<"$out" \
+        || { echo "auto-source preview: wrong/missing plan line:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$d/dir2" EDY_RDP_PULSE_SEAT_SOCKET="$d/seat/native" \
+           PULSE_SOURCE=my-pinned-sink.monitor "$SRC/pulse/edy-rdp-pulse-bind.sh" --seat-uid "$me" --check 2>&1)"
+    grep -qF 'PULSE_SOURCE=auto' <<<"$out" \
+        && { echo "pinned-source case: previewed auto-resolution anyway:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    out="$(PATH="$bin:$PATH" EDY_RDP_PULSE_DIR="$d/dir3" EDY_RDP_PULSE_SEAT_SOCKET="$d/seat/native" \
+           "$SRC/pulse/edy-rdp-pulse-bind.sh" --seat-uid "$me" --check 2>&1)"
+    grep -qF 'PULSE_SOURCE=auto' <<<"$out" \
+        && { echo "unset-source case: previewed auto-resolution anyway:"; sed 's/^/  /' <<<"$out"; bad=1; }
+
+    unset FAKE_DEFAULT_SINK
+    return $bad
+}
+
+# 10f. I59 follow-up, found by LIVE testing on edt1 during this feature's own
+#      rollout (not the adversarial review): edy-rdp-guacd.service loads the
+#      generated $DIR/pulse-source.env as a SECOND EnvironmentFile=, so podman
+#      sees the resolved value -- but that means resolve_and_persist_source()'s
+#      OWN next invocation (guacd's ExecStartPre, moments later, same
+#      restart -- systemd was confirmed live to re-read EnvironmentFile=s
+#      fresh per Exec* step, not once for the whole activation) can inherit
+#      that SAME resolved value as "$PULSE_SOURCE" and mistake it for an
+#      operator pin, deleting the file this project's own comment says a pin
+#      should never touch -- and since that delete can land BEFORE podman's
+#      own fresh environment read, the RUNNING CONTAINER ended up with the
+#      literal string "auto" as PULSE_SOURCE (confirmed on edt1: `podman
+#      inspect edy-rdp-guacd` showed exactly that after a live auto-resolution
+#      restart). Extracts resolve_and_persist_source() (and its two
+#      dependencies) directly by function name -- this function is reachable
+#      hermetically without root: unlike the mount/bind logic elsewhere in
+#      this script, it never touches the real filesystem below $DIR beyond
+#      writing this one text file.
+pulse_bind_reentrant_read_does_not_delete_its_own_resolution() {
+    need_file pulse/edy-rdp-pulse-bind.sh 4.6 || return 1
+    local src="$SRC/pulse/edy-rdp-pulse-bind.sh" d="$TMP/pulse-reentrant" bad=0
+    install -d -- "$d"
+    for fn in log resolve_default_sink_monitor resolve_and_persist_source; do
+        eval "$(sed -n "/^$fn() {/,/^}/p" "$src")"
+    done
+    DIR="$d"; AUTO_RESTART=0
+    systemctl() { return 0; }   # not exercised (AUTO_RESTART=0); present so a call never errors
+    resolve_default_sink_monitor() { printf '%s\n' 'a-real-sink.monitor'; }
+
+    # First resolution: writes the file.
+    PULSE_SOURCE=auto resolve_and_persist_source /fake/sock
+    [[ -f "$d/pulse-source.env" ]] || { echo "first resolution did not create $d/pulse-source.env"; return 1; }
+    [[ "$(cat -- "$d/pulse-source.env")" == "PULSE_SOURCE=a-real-sink.monitor" ]] \
+        || { echo "unexpected file content: $(cat -- "$d/pulse-source.env")"; bad=1; }
+
+    # Re-entrant read: $PULSE_SOURCE now holds that SAME resolved value (as it
+    # would if this were guacd's own ExecStartPre re-running moments later,
+    # inheriting the generated file as a second EnvironmentFile=) -- the file
+    # must survive, not be deleted as if it were a stale/foreign pin.
+    PULSE_SOURCE='a-real-sink.monitor' resolve_and_persist_source /fake/sock
+    [[ -f "$d/pulse-source.env" ]] \
+        || { echo "a reentrant read of its own resolved value deleted the generated file"; bad=1; }
+
+    # A GENUINE pin (a different value than what's on disk) must still clean up.
+    PULSE_SOURCE='some-other-pinned-sink.monitor' resolve_and_persist_source /fake/sock
+    [[ -f "$d/pulse-source.env" ]] \
+        && { echo "a genuine pin (different from the file's content) did not clean up the stale auto file"; bad=1; }
+
+    return $bad
+}
+
 # 10c. deploy.sh itself, STAGED, end to end: copy, alias swap, the installed
 #      install.sh placing .env and linking, then --verify. Nothing had run this
 #      path to completion anywhere but a host with a masking job wrapper (I41).
@@ -397,11 +647,11 @@ deploy_staged_completes_and_verifies() {
     [[ -f "$root/payload/requires.txt" && -f "$root/payload/requirements.txt" ]] \
         || { echo "requires.txt / requirements.txt did not ship in the payload"; bad=1; }
     [[ -L "$T/root$LIBEXECDIR/edy-rdp-bootstrap" ]] || { echo "libexec was not linked out of the payload"; bad=1; }
-    # Both dependency snapshots run UNCONDITIONALLY (KNOWN_ISSUES I51), even
+    # Both dependency snapshots run UNCONDITIONALLY (KNOWN_ISSUES I64), even
     # without --with-deps: a "before" and an "after" file should both land.
     [[ -d "$root/dep-history" && $(ls -1 "$root/dep-history"/*.json 2>/dev/null | grep -vc '\.summary\.json$') -ge 2 ]] \
         || { echo "dep-history does not hold at least 2 full snapshots after a plain deploy"; bad=1; }
-    # KNOWN_ISSUES I51 F3: the "before" snapshot must run BEFORE install_deps()
+    # KNOWN_ISSUES I64 F3: the "before" snapshot must run BEFORE install_deps()
     # -- the one step in do_deploy() that can actually invoke the package
     # manager -- or it already reflects whatever --with-deps just installed,
     # defeating the whole point of a before/after diff. Checked against
@@ -415,7 +665,7 @@ deploy_staged_completes_and_verifies() {
     if [[ -z "$before_ln" || -z "$deps_ln" ]]; then
         echo "could not find 'run_depsnapshot before' / 'install_deps;' in do_deploy()"; bad=1
     elif (( before_ln >= deps_ln )); then
-        echo "'before' dependency snapshot (do_deploy() line $before_ln) does not precede install_deps (line $deps_ln) - I51 F3"
+        echo "'before' dependency snapshot (do_deploy() line $before_ln) does not precede install_deps (line $deps_ln) - I64 F3"
         bad=1
     fi
     out="$(DESTDIR="$T/root" "$T/src/deploy.sh" --verify 2>&1)"; rc=$?
@@ -470,6 +720,194 @@ shell_syntax() {
     return $bad
 }
 
+# 12/13 helper: migrate_shadow_group_rename() and ensure_shadow_group() call
+# real groupadd/groupmod/getent against the actual system group table -
+# exactly like migrate_group_rename()/create_users() do - and deploy.sh's own
+# root-or-DESTDIR gate at the top of the file makes it impossible to reach
+# their UNGUARDED (real, non-staged) code path through the script itself
+# without being root. So these two tests extract just the one function's
+# source (the same sed-range-then-eval technique load_manifest() above
+# already uses for install.sh's BEGIN-MANIFEST/END-MANIFEST) and drive it
+# directly against FAKE getent/groupmod/groupadd/say/die shell functions
+# (a bare command name resolves to a same-named shell function before PATH,
+# so these shadow the real tools with no PATH trick needed) - the host's
+# actual /etc/group is never touched no matter who runs this suite.
+load_deploy_fn() {   # $1 = function name; sources that one function into THIS shell
+    eval "$(sed -n "/^$1() {/,/^}/p" "$SRC/deploy.sh")"
+}
+
+# 12. migrate_shadow_group_rename(): (a) a real "rdp-shadow" group is renamed
+#     to "cockpit-guac-rdp-shadow", (b) an .env carrying the exact old default
+#     is rewritten, (c) an .env with a clearly-customized value is untouched by
+#     both the rename and the rewrite, (d) a second run of each case is a safe
+#     no-op (idempotent).
+deploy_migrate_shadow_group_rename() {
+    load_deploy_fn migrate_shadow_group_rename
+    local bad=0 env="$TMP/shadow-migrate.env"
+    local -a SAY_LOG=() GROUPMOD_CALLS=()
+    local FAKE_GROUPS DIED=0
+    say()     { SAY_LOG+=("$1 $2"); }
+    die()     { DIED=1; SAY_LOG+=("DIE: $*"); }
+    getent()  { [[ "$1" == group ]] || return 1
+                local g; for g in $FAKE_GROUPS; do [[ "$g" == "$2" ]] && return 0; done; return 2; }
+    groupmod() { GROUPMOD_CALLS+=("$*")
+                 [[ "$*" == "-n cockpit-guac-rdp-shadow rdp-shadow" ]] \
+                     && FAKE_GROUPS="cockpit-guac-rdp-shadow"; }
+
+    # (a) a real "rdp-shadow" group exists, "cockpit-guac-rdp-shadow" does not.
+    D=""; FAKE_GROUPS="rdp-shadow"; ENVF="$TMP/no-such-env"
+    migrate_shadow_group_rename
+    (( ! DIED )) || { echo "(a) die() was called: ${SAY_LOG[*]}"; bad=1; }
+    [[ "${GROUPMOD_CALLS[*]:-}" == "-n cockpit-guac-rdp-shadow rdp-shadow" ]] \
+        || { echo "(a) groupmod calls: '${GROUPMOD_CALLS[*]:-}'"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"renamed"*"rdp-shadow -> cockpit-guac-rdp-shadow"* ]] \
+        || { echo "(a) no 'renamed ... rdp-shadow -> cockpit-guac-rdp-shadow' log: ${SAY_LOG[*]:-}"; bad=1; }
+    # (d) run again: "cockpit-guac-rdp-shadow" now exists, so this must be a no-op.
+    GROUPMOD_CALLS=(); SAY_LOG=()
+    migrate_shadow_group_rename
+    [[ -z "${GROUPMOD_CALLS[*]:-}" ]] || { echo "(a/d) second run called groupmod again: ${GROUPMOD_CALLS[*]}"; bad=1; }
+
+    # cockpit-guac-rdp-shadow already exists (e.g. an operator made it by hand
+    # under the new name already) -> do nothing, not an error, EVEN IF a real
+    # "rdp-shadow" also still happens to exist alongside it.
+    GROUPMOD_CALLS=(); SAY_LOG=(); FAKE_GROUPS="rdp-shadow cockpit-guac-rdp-shadow"
+    migrate_shadow_group_rename
+    [[ -z "${GROUPMOD_CALLS[*]:-}" ]] || { echo "(a) renamed although cockpit-guac-rdp-shadow already existed"; bad=1; }
+    (( ! DIED )) || { echo "(a) die() was called when the new group already existed"; bad=1; }
+
+    # (b) .env carries the exact old default -> rewritten in place.
+    FAKE_GROUPS=""; ENVF="$env"
+    printf 'EDY_RDP_GUACD=127.0.0.1:4822\nEDY_RDP_SHADOW_GROUP=rdp-shadow\n' > "$env"
+    migrate_shadow_group_rename
+    grep -qx 'EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow' "$env" \
+        || { echo "(b) .env was not rewritten: $(cat "$env")"; bad=1; }
+    grep -qx 'EDY_RDP_SHADOW_GROUP=rdp-shadow' "$env" \
+        && { echo "(b) old line is still present"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"updated"*"EDY_RDP_SHADOW_GROUP rdp-shadow -> cockpit-guac-rdp-shadow"* ]] \
+        || { echo "(b) no 'updated ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+    # (d) run again on the now-rewritten .env: a safe no-op.
+    SAY_LOG=()
+    migrate_shadow_group_rename
+    [[ -z "${SAY_LOG[*]:-}" ]] || { echo "(b/d) second run touched an already-migrated .env: ${SAY_LOG[*]}"; bad=1; }
+    grep -qx 'EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow' "$env" \
+        || { echo "(b/d) .env no longer carries the new value after a second run"; bad=1; }
+
+    # (c) a deliberately-customized .env value: untouched by the rewrite, and a
+    # real "rdp-shadow" group existing at the same time must not touch it either.
+    FAKE_GROUPS="rdp-shadow"; GROUPMOD_CALLS=(); SAY_LOG=()
+    printf 'EDY_RDP_SHADOW_GROUP=my-custom-shadow-group\n' > "$env"
+    migrate_shadow_group_rename
+    grep -qx 'EDY_RDP_SHADOW_GROUP=my-custom-shadow-group' "$env" \
+        || { echo "(c) a customized .env value was changed: $(cat "$env")"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" != *updated* ]] || { echo "(c) .env-rewrite logic fired on a customized value"; bad=1; }
+    # the group rename in (a) is independent of the .env content and DID fire
+    # here too (a real "rdp-shadow" group existed) - that is correct: (a) and
+    # (b)/(c) are separate, unrelated checks, not an accidental linkage.
+    [[ "${GROUPMOD_CALLS[*]:-}" == "-n cockpit-guac-rdp-shadow rdp-shadow" ]] \
+        || { echo "(c) unexpected groupmod calls: '${GROUPMOD_CALLS[*]:-}'"; bad=1; }
+    return $bad
+}
+
+# 12b. migrate_pulse_auto_defaults() (I59): (a) an .env carrying the exact old
+#      EDY_RDP_PULSE_SEAT_UID=1000 default is rewritten to "auto", (b) same for
+#      the exact old PULSE_SOURCE example default, (c) a customized value of
+#      either is left untouched, (d) a second run is a safe no-op.
+deploy_migrate_pulse_auto_defaults() {
+    load_deploy_fn migrate_pulse_auto_defaults
+    local bad=0 env="$TMP/pulse-auto-migrate.env"
+    local -a SAY_LOG=() SYSTEMCTL_CALLS=()
+    say() { SAY_LOG+=("$1 $2"); }
+    systemctl() { SYSTEMCTL_CALLS+=("$*"); return 0; }
+
+    D=""; ENVF="$env"
+    printf 'EDY_RDP_PULSE_SEAT_UID=1000\nPULSE_SOURCE=alsa_output.pci-0000_01_00.1.hdmi-stereo.monitor\n' > "$env"
+    migrate_pulse_auto_defaults
+    grep -qx 'EDY_RDP_PULSE_SEAT_UID=auto' "$env" \
+        || { echo "(a) EDY_RDP_PULSE_SEAT_UID was not migrated: $(cat "$env")"; bad=1; }
+    grep -qx 'PULSE_SOURCE=auto' "$env" \
+        || { echo "(b) PULSE_SOURCE was not migrated: $(cat "$env")"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"EDY_RDP_PULSE_SEAT_UID 1000 -> auto"* ]] \
+        || { echo "(a) no 'updated ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"PULSE_SOURCE <old default example> -> auto"* ]] \
+        || { echo "(b) no 'updated ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+    # (e) the superseded per-uid pair (for exactly the uid just migrated away
+    # from) is disabled/stopped, so it cannot keep re-binding uid 1000's own
+    # socket/sink over the new -auto pair's resolution.
+    [[ " ${SYSTEMCTL_CALLS[*]:-} " == *" disable --now edy-rdp-pulse-seat@1000.path "* ]] \
+        || { echo "(e) old per-uid path unit was not disabled: ${SYSTEMCTL_CALLS[*]:-}"; bad=1; }
+    [[ " ${SYSTEMCTL_CALLS[*]:-} " == *" stop edy-rdp-pulse-rebind@1000.service "* ]] \
+        || { echo "(e) old per-uid rebind service was not stopped: ${SYSTEMCTL_CALLS[*]:-}"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"disabled"*"edy-rdp-pulse-seat@1000.path"* ]] \
+        || { echo "(e) no 'disabled ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+
+    # (d) a second run on the now-migrated .env is a safe no-op (no .env
+    # rewrite, no further systemctl calls -- the uid line no longer matches
+    # the old-default pattern this migration looks for).
+    SAY_LOG=(); SYSTEMCTL_CALLS=()
+    migrate_pulse_auto_defaults
+    [[ -z "${SAY_LOG[*]:-}" ]] || { echo "(d) second run touched an already-migrated .env: ${SAY_LOG[*]}"; bad=1; }
+    [[ -z "${SYSTEMCTL_CALLS[*]:-}" ]] || { echo "(d) second run made systemctl calls: ${SYSTEMCTL_CALLS[*]}"; bad=1; }
+
+    # (c) deliberately-customized values of either key are left untouched, and
+    # no systemctl call is made against a uid that was never the old default.
+    SAY_LOG=(); SYSTEMCTL_CALLS=()
+    printf 'EDY_RDP_PULSE_SEAT_UID=4242\nPULSE_SOURCE=my-custom-sink.monitor\n' > "$env"
+    migrate_pulse_auto_defaults
+    grep -qx 'EDY_RDP_PULSE_SEAT_UID=4242' "$env" \
+        || { echo "(c) a customized EDY_RDP_PULSE_SEAT_UID was changed: $(cat "$env")"; bad=1; }
+    grep -qx 'PULSE_SOURCE=my-custom-sink.monitor' "$env" \
+        || { echo "(c) a customized PULSE_SOURCE was changed: $(cat "$env")"; bad=1; }
+    [[ -z "${SAY_LOG[*]:-}" ]] || { echo "(c) migration fired on customized values: ${SAY_LOG[*]}"; bad=1; }
+    [[ -z "${SYSTEMCTL_CALLS[*]:-}" ]] || { echo "(c) systemctl called for a customized (non-1000) uid: ${SYSTEMCTL_CALLS[*]}"; bad=1; }
+    return $bad
+}
+
+# 13. ensure_shadow_group(): creates the resolved group when it is missing and
+#     EDY_RDP_SHADOW_GROUP is non-empty; creates nothing when it is blank; and
+#     (structurally) is only ever called under --with-users in do_deploy().
+deploy_ensure_shadow_group() {
+    load_deploy_fn ensure_shadow_group
+    . "$SRC/lib/edy-rdp-env.sh" || { echo "cannot source lib/edy-rdp-env.sh"; return 1; }
+    local bad=0 env="$TMP/ensure-shadow.env"
+    local -a SAY_LOG=() GROUPADD_CALLS=()
+    local FAKE_GROUPS
+    say()      { SAY_LOG+=("$1 $2"); }
+    getent()   { [[ "$1" == group ]] || return 1
+                 local g; for g in $FAKE_GROUPS; do [[ "$g" == "$2" ]] && return 0; done; return 2; }
+    groupadd() { GROUPADD_CALLS+=("$*"); }
+
+    # non-empty EDY_RDP_SHADOW_GROUP, group missing -> created.
+    ENVF="$env"; FAKE_GROUPS=""
+    printf 'EDY_RDP_SHADOW_GROUP=cockpit-guac-rdp-shadow\n' > "$env"
+    ensure_shadow_group
+    [[ "${GROUPADD_CALLS[*]:-}" == "--system cockpit-guac-rdp-shadow" ]] \
+        || { echo "missing-group case: groupadd calls '${GROUPADD_CALLS[*]:-}'"; bad=1; }
+    [[ "${SAY_LOG[*]:-}" == *"created"*"cockpit-guac-rdp-shadow"* ]] \
+        || { echo "missing-group case: no 'created ...' log: ${SAY_LOG[*]:-}"; bad=1; }
+
+    # non-empty, group already exists -> no-op (idempotent).
+    GROUPADD_CALLS=(); SAY_LOG=(); FAKE_GROUPS="cockpit-guac-rdp-shadow"
+    ensure_shadow_group
+    [[ -z "${GROUPADD_CALLS[*]:-}" ]] \
+        || { echo "existing-group case: groupadd was still called: ${GROUPADD_CALLS[*]}"; bad=1; }
+
+    # blanked EDY_RDP_SHADOW_GROUP (the gate turned off) -> nothing is created.
+    GROUPADD_CALLS=(); SAY_LOG=(); FAKE_GROUPS=""
+    printf 'EDY_RDP_SHADOW_GROUP=\n' > "$env"
+    ensure_shadow_group
+    [[ -z "${GROUPADD_CALLS[*]:-}" ]] \
+        || { echo "blank-group case: groupadd was called although the gate is off: ${GROUPADD_CALLS[*]}"; bad=1; }
+
+    # without --with-users at all, do_deploy() must never reach this function -
+    # asserted structurally, the same way run_tests.sh's own DEPLOY-CONTRACT
+    # section asserts other call-site properties by grep rather than by driving
+    # a real unflagged deploy (which would need the group to pre-exist to tell
+    # "not called" apart from "called and it was a no-op").
+    grep -qE '\(\(WITH_USERS\)\) && \{ step "shadow group"; ensure_shadow_group; \}' "$SRC/deploy.sh" \
+        || { echo "ensure_shadow_group is no longer gated behind ((WITH_USERS)) in do_deploy()"; bad=1; }
+    return $bad
+}
+
 # ---------------------------------------------------------------------------
 # Order matters: 2, 3, 8 and 9 read the tree test 1 installs.
 for t in installer_staged_install_completes \
@@ -483,9 +921,17 @@ for t in installer_staged_install_completes \
          bootstrap_builds_venv_offline_and_is_idempotent \
          pulse_bind_check_mode \
          pulse_bind_refuses_unsafe_seat_socket \
+         pulse_bind_auto_resolves_seat_uid \
+         pulse_bind_auto_prefers_active_user_session_over_seat0_greeter \
+         pulse_bind_auto_uid_never_overrides_a_pinned_seat_socket \
+         pulse_bind_auto_resolves_source_preview \
+         pulse_bind_reentrant_read_does_not_delete_its_own_resolution \
          deploy_staged_completes_and_verifies \
          deploy_refuses_stale_env_before_swap \
-         shell_syntax; do
+         shell_syntax \
+         deploy_migrate_shadow_group_rename \
+         deploy_migrate_pulse_auto_defaults \
+         deploy_ensure_shadow_group; do
     run_test "$t"
 done
 
