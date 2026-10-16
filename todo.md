@@ -6,23 +6,15 @@ and add a line when new open work appears. `docs/KNOWN_ISSUES.md` holds the per-
 do. Memory only points here.
 
 ## Deploy state
-- **edt1 runs the same payload as `origin/main`, 1.10.10.20261015**, from the 2026-10-15 deploy of the architecture-diagram change
-  (I63). Check with `cat /opt/cockpit-guac-rdp/payload/VERSION` against `git show origin/main:VERSION`. The diagram had run on
-  edt1 unreviewed since 2026-10-03 as 1.10.9 and was never committed; it was validated against the code, the docs and the live
-  host before it landed (see KNOWN_ISSUES I63), and the rescue branch was deleted after the merge.
+- **edt1 runs 1.11.0.20261016**, deployed 2026-10-16 from `origin/main` 7c26250 (#42, I64 dependency tracking). Check with
+  `cat /opt/cockpit-guac-rdp/payload/VERSION` against `git show origin/main:VERSION`. That deploy pruned
+  `payload-1.10.10.20261015` because payload retention sorted names lexically (fixed by #43, `sort -rV`), so the kept older
+  payload is 1.9.3.20260929 and a rollback to 1.10.10 means redeploying `dedc49b`.
 - Everything shipped is on main and live: I59 (#34-#36), I60 Logs… viewer (#37), I61 (#38), I62 (#39), I63 the Architecture tab
-  diagram.
+  diagram, I64 dependency tracking + native-rollback-where-available (#42; rollback exercised in containers on dnf, apt, pacman
+  and zypper).
 
 ## Owner decisions
-- **`feat/dependency-tracking`** (5 commits of 2026-09-29, tip f50d894, 35 commits behind main; the shared checkout still sits on
-  it): "dependency tracking + native-rollback admin tab". **Fate (owner, 2026-10-15): keep it, never delete it.** It was the only
-  copy, so it is now also pushed to `origin/feat/dependency-tracking` as a backup (no PR). It is still unreviewed and unmerged.
-  Its issue id collided with main's I51 (group rename) and its VERSION 1.7.0.20260929 was the exact string main's I49
-  shipped as. **Both resolved 2026-10-16** on `merge/i51-main-20261016`: the feature is renumbered **I51 -> I64** (36 code/doc
-  refs, the KNOWN_ISSUES section moved after I63, main's own I54 cross-reference updated; main's I51 refs in `install.sh`
-  and `docs/GROUP-ACCESS-MODEL.md` deliberately untouched) and the version bumped to **1.11.0.20261016**. When the owner wants the rollback tab: review, rebase onto
-  main, then PR; test its rollback only in a container. With the checkout left on it, read current main with
-  `git show origin/main:<file>`.
 
 ## Live verification still owed
 - **I60 "Logs…" viewer (#37)**: unit-tested and deployed, but never click-tested in a live Cockpit session (main window or
