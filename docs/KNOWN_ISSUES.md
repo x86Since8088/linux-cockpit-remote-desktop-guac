@@ -1897,7 +1897,7 @@ independent validators) before landing, and the statements that were wrong or mi
 the 1.10.10.20261015 CHANGELOG entry. The validation also found problems that are NOT in the diagram and are
 tracked in `todo.md`: Remote VNC is probably refused for everyone when `EDY_RDP_REMOTE_ADMIN_ONLY=1` (the page
 never asks for administrator proof for `vnc`), wayvnc runs with no password and no firewall rule on its port,
-the guacd owner gate is ordered After but not Required by the firewall unit, and the reason recorded for
+guacd is ordered after the firewall unit but does not require it (so the owner gate can be absent), and the reason recorded for
 pinning the FreeRDP 3 (Janua) guacd does not match how the relay uses it.
 
 **Hard-coded facts.** The legend names edt1 for the patched gnome-remote-desktop because that patch is

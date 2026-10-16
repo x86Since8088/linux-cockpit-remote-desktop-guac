@@ -1,8 +1,8 @@
 # Scenarios (with screenshots)
 
 The plugin exposes seven connection scenarios (Login screen, Console, Virtual monitor, Isolated session,
-Wayland desktop, Remote RDP, Remote VNC) plus a session-tracking view. The Architecture tab lists all seven;
-the screenshots below cover Isolated, Console, Virtual monitor and Remote RDP. The images
+Wayland desktop, Remote RDP, Remote VNC) plus a session-tracking view. The Architecture tab lists all seven; the sections below describe Isolated, Console, Virtual monitor and
+Remote RDP, and screenshots exist only for the idle page, the Isolated desktop and the Console gate refusal. The images
 below are captured from the live system by `cockpit-e2e/tests/doc-shots.spec.js`, running
 as the **non-admin** throwaway user `cptest` — so the isolated desktop shown is a fresh,
 empty session with no private content.

@@ -58,9 +58,9 @@ do. Memory only points here.
   on `127.0.0.1:34000+(uid-1000)`, and the live ruleset has no rule for 34000-34999 (only guacd's 4822 and 33000-33999), so any
   local user can attach to another user's Wayland desktop. Code-derived; no Wayland session was running to observe the listener.
   Idea: extend the loopback/owner rule to 34000-34999 and/or enable wayvnc auth.
-- **The guacd owner gate is fail-open at the unit level.** `edy-rdp-guacd.service` is `After=` but not `Requires=`
-  `edy-rdp-firewall.service`, and the firewall unit's ExecStop deletes both tables, so guacd can run with no owner-match if the
-  firewall unit is stopped or fails.
+- **The guacd owner gate is fail-open at the unit level.** `edy-rdp-firewall.service` is ordered before guacd, but
+  `edy-rdp-guacd.service` does not `Require=` it, and the firewall unit's ExecStop deletes both tables, so guacd can run
+  with no owner-match if the firewall unit is stopped or fails.
 - **Why the FreeRDP 3 (Janua) guacd is pinned.** `requires.txt` justifies it by the 3390 RDSTLS greeter, yet on every path the
   Architecture tab draws the relay rewrites guacd's connect to VNC against x11vnc and never uses guacd's RDP client. Either the
   pin is unnecessary for those paths or another reason is unrecorded.

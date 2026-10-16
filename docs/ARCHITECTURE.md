@@ -28,7 +28,7 @@ protected sessions.
 
 ### Rendering path: the FreeRDP3 bridge
 The guacd RDP client this design started with (the official image's *bundled FreeRDP 2*) cannot negotiate
-NLA to grd's 3389 nor RDSTLS to the 3390 greeter (KNOWN_ISSUES I26), and an earlier FreeRDP 3 guacd regressed
+NLA to grd's 3389 nor RDSTLS to the 3390 greeter (KNOWN_ISSUES I26, requires.txt), and an earlier FreeRDP 3 guacd regressed
 3389 rendering (I29). The pinned guacd image is now Janua (FreeRDP 3), but the relay still does **not** use
 guacd's RDP client. Instead, per connection it
 starts a bridge — a vanilla **FreeRDP 3** client (`xfreerdp3`) that speaks to grd and draws into a

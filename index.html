@@ -192,11 +192,11 @@
   <section id="panel-architecture" class="panel" hidden>
     <div class="arch">
       <h2>How a connection reaches a desktop</h2>
-      <p>Opening this tab leaves a live connection on Connect running. The browser opens no network connection to guacd or to a desktop. Cockpit's HTTPS session carries the frames to a local relay, and a firewall rule lets only the relay's user (and root) open guacd. Before some connections this page does read or set gnome-remote-desktop settings through Cockpit: the port-3389 sharing mode and, for the login screen, the door key.</p>
+      <p>Opening this tab leaves a live connection on Connect running. The browser opens no network connection to guacd or to a desktop. Cockpit's HTTPS session carries the frames to a local relay, and a firewall rule lets only the relay's user (and root) open guacd. Before some connections this page does read or set gnome-remote-desktop settings through Cockpit: the port-3389 sharing mode and, in automatic sign-in, the door key (port 3389's from your own keyring; port 3390's, for the login screen, with administrative access).</p>
       <div class="arch-flow">
         <ul class="arch-key">
           <li><span class="swatch ours"></span> Code in this plugin</li>
-          <li><span class="swatch stock"></span> Not changed by this plugin: distro packages, guacd (a third-party fork pinned by digest), and other people's servers</li>
+          <li><span class="swatch stock"></span> Not changed by this plugin: distro packages, guacd (a third-party build pinned by digest), and other people's servers</li>
           <li><span class="swatch patch"></span> gnome-remote-desktop as rebuilt on edt1 with the handover patch (other hosts run the stock package)</li>
           <li><span class="swatch frame"></span> A group this plugin starts</li>
         </ul>
@@ -226,7 +226,7 @@
             VNC frame: x=16 y=348 w=800 h=116.
             VNC slot: x=492 y=390 w=220 h=52. wayvnc for Wayland, their server for Remote VNC.
             Wayland starter: x=252 y=390 w=220 h=52, level with the slot.
-            VNC rail: x=844, from guacd's right edge (808, 68) down to (844, 416), then left to the slot's right edge (716, 416).
+            VNC rail: x=844, from guacd's right edge (808, 68) down to (844, 416), then left to (716, 416), 4 px short of the slot's right edge (x=712).
 
           Classes (CSS in guac-rdp.css, keyed off the radios above):
             n-ours    code this repository ships and runs
@@ -299,11 +299,11 @@
             <text x="576" y="62" text-anchor="middle">Firewall rule</text>
             <text x="576" y="82" text-anchor="middle" class="sub">this plugin</text>
           </g>
-          <!-- seq-4. guacd. Janua fork of Apache guacd, pinned by digest, not modified by this plugin. Last common hop. -->
+          <!-- seq-4. guacd. Janua build of guacd (FreeRDP 3), pinned by digest, not modified by this plugin. Last common hop. -->
           <g id="arch-n-guacd" class="n-stock seq seq-4">
             <rect x="672" y="36" width="136" height="64" rx="8"/>
             <text x="740" y="62" text-anchor="middle">guacd</text>
-            <text x="740" y="82" text-anchor="middle" class="sub">third-party fork</text>
+            <text x="740" y="82" text-anchor="middle" class="sub">third-party build</text>
           </g>
 
           <!-- lane-rdp. The bridge script is ours. The three programs it starts are not. -->
@@ -392,7 +392,7 @@
         </svg>
         </div>
         <div class="arch-caps" aria-live="polite" aria-atomic="true">
-          <p class="arch-cap cap-greeter">Login screen uses the whole RDP bridge. This page, the relay, the firewall rule, and the bridge script are this plugin. Cockpit, Xvfb, x11vnc, and xfreerdp3 are unmodified distro packages; guacd is a pinned third-party build (Janua, a fork of Apache guacd with FreeRDP 3). On edt1, gnome-remote-desktop is a locally rebuilt daemon that carries the handover patch, and the login screen is the path that needs it. After you sign in, gnome-remote-desktop moves the connection onto a desktop session of your own that has no seat, so it is not the physical screen. A later connection to port 3390 is handed back to that same session.</p>
+          <p class="arch-cap cap-greeter">Login screen uses the whole RDP bridge. This page, the relay, the firewall rule, and the bridge script are this plugin. Cockpit, Xvfb, x11vnc, and xfreerdp3 are unmodified distro packages; guacd is a pinned third-party build (Janua, guacd built against FreeRDP 3). On edt1, gnome-remote-desktop is a locally rebuilt daemon that carries the handover patch, and the login screen is the path that needs it. After you sign in, gnome-remote-desktop moves the connection onto a desktop session of your own that has no seat, so it is not the physical screen. A later connection to port 3390 is handed back to that same session.</p>
           <p class="arch-cap cap-console">Console uses the same bridge and lands on port 3389 as a mirror of the physical screen; this page sets that port's screen-share mode to mirror before it connects. It does not go through the greeter, except that this page opens the Login screen instead when nobody is signed in at the physical seat. Port 3389 is served by the signed-in user's own gnome-remote-desktop; on edt1 it is the same rebuilt file as the login-screen door, but the handover patch is not used on this path. The programs inside the bridge are unmodified distro packages.</p>
           <p class="arch-cap cap-virtual">A virtual monitor uses the same bridge and asks port 3389 for an extra monitor inside your own session; this page sets that port's screen-share mode to extend before it connects, so switching between Console and Virtual monitor changes what the one per-user daemon delivers. Port 3389 is served by the signed-in user's own gnome-remote-desktop; on edt1 it is the same rebuilt file as the login-screen door, but the handover patch is not used on this path. The programs inside the bridge are unmodified distro packages.</p>
           <p class="arch-cap cap-isolated">Isolated uses the same bridge to your own headless desktop, a second GNOME with its own gnome-remote-desktop, on port 33000 + (uid − 1000), for uids 1000 to 1999. It is refused while you are signed in at the machine's own screen. The relay starts it on demand through a starter that is this plugin and is not drawn here. Xvfb, x11vnc, and xfreerdp3 are unmodified distro packages; guacd is the pinned third-party build. On edt1 the headless gnome-remote-desktop is the same rebuilt file as on the login screen, but the handover patch is not used on this path.</p>
@@ -401,7 +401,7 @@
           <p class="arch-cap cap-vnc">Remote VNC stops at guacd, the same way Wayland does. guacd dials their VNC server. The bridge is not started. The relay checks the address and port against the allow-list; an entry with no port means 3389, so a VNC server on 5900 needs :5900 or :*.</p>
         </div>
       </div>
-      <p>Each RDP connection gets its own bridge. <code>xfreerdp3</code> speaks to gnome-remote-desktop and draws into a private <code>Xvfb</code>, and <code>x11vnc</code> publishes that screen on a loopback port with a per-connection password. guacd dials x11vnc over VNC, and xfreerdp3 dials gnome-remote-desktop. The bridge exists because the guacd RDP client this design started with (the official image, FreeRDP 2) could not complete NLA to port 3389 or the RDSTLS redirect on port 3390 (KNOWN_ISSUES I26), and an earlier FreeRDP 3 guacd regressed port-3389 rendering (I29). The pinned guacd image now links FreeRDP 3, but this plugin does not use its RDP client. Closing the connection removes the bridge. Your desktop session keeps running: a seated desktop indefinitely, an isolated or Wayland desktop for about 15 minutes after the last connection, and a login screen that nobody signed in to is closed after about a minute.</p>
+      <p>Each RDP connection gets its own bridge. <code>xfreerdp3</code> speaks to gnome-remote-desktop and draws into a private <code>Xvfb</code>, and <code>x11vnc</code> publishes that screen on a loopback port with a per-connection password. guacd dials x11vnc over VNC, and xfreerdp3 dials gnome-remote-desktop. The bridge exists because the guacd RDP client this design started with (the official image, FreeRDP 2) could not complete the RDSTLS redirect on port 3390 (KNOWN_ISSUES I26) or connect to gnome-remote-desktop's port 3389 (requires.txt), and an earlier FreeRDP 3 guacd regressed port-3389 rendering (I29). The pinned guacd image now links FreeRDP 3, but this plugin does not use its RDP client. Closing the connection removes the bridge. Your desktop session keeps running: a seated desktop indefinitely, an isolated or Wayland desktop for about 15 minutes after the last connection, and a login screen that nobody signed in to is closed after about a minute.</p>
 
       <h2>Session choices</h2>
       <table>
@@ -461,7 +461,7 @@
         <li>The <code>cockpit-guac-rdp</code> group is required to open the relay socket.</li>
         <li>Console always requires Cockpit administrative access, and the relay checks a proof from the server, not the state of a control on this page. The login screen is not admin-gated by the relay: any member of the <code>cockpit-guac-rdp</code> group who holds the door key can reach it, and this page asks for administrative access only because reading that key needs it. Remote hosts (RDP and VNC) require administrative access only when the administrator sets <code>EDY_RDP_REMOTE_ADMIN_ONLY=1</code>.</li>
         <li>Mirroring a physical screen where someone else is signed in also requires the shadow group.</li>
-        <li>An isolated session and a Wayland desktop are started for the uid the kernel reported. The page cannot aim them at another user.</li>
+        <li>An isolated session and a Wayland desktop are started for the uid the kernel reported (SO_PEERCRED). The page cannot aim them at another user.</li>
         <li>A remote host must match an entry in <code>EDY_RDP_REMOTE_ALLOW</code>: an IPv4 address or range, with an optional port (no port means 3389, <code>:*</code> means any port). An empty list denies every remote target.</li>
         <li>guacd listens only on the host's loopback address (<code>127.0.0.1:4822</code>); it is not published to the network, and the firewall rule lets only the relay's user and root connect to it.</li>
         <li>That firewall rule covers only guacd's port and the isolated-session ports <code>33000-33999</code>. This plugin installs no firewall rule for gnome-remote-desktop's ports <code>3389</code> and <code>3390</code> (they listen on every interface on edt1; NLA protects them, KNOWN_ISSUES I7) or for the Wayland ports <code>34000-34999</code>, which also have no password.</li>

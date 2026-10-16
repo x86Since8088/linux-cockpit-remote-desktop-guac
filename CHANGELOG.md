@@ -10,7 +10,7 @@ The diagram ran on edt1 from 2026-10-03 as 1.10.9 without ever being committed. 
 validated on 2026-10-15 against the current code, the docs and the live host before it
 landed, and the validation corrected what it said:
 
-- guacd is a third-party fork (Janua, pinned by digest), not an unmodified program. The
+- guacd is a third-party build (Janua, pinned by digest), not an unmodified program. The
   firewall rule lets the relay's user and root open it, and it covers only guacd's port
   and the isolated ports 33000-33999, not 3389/3390 (I7) or the Wayland ports.
 - The relay requires administrator mode only for Console, and for remote hosts when
@@ -22,7 +22,7 @@ landed, and the validation corrected what it said:
   allow-list matches host and port. The remote certificate is pinned only until reboot.
   Idle desktops are reaped after about 15 minutes, an unused greeter after about one.
 - Layout: one shared slot for wayvnc and their VNC server, the x11vnc/Xvfb/xfreerdp3 order,
-  wires that touch the boxes they point at, animations that stop on dimmed nodes, a
+  wires that end at the boxes they point at, animations that stop on dimmed nodes, a
   readable accent in dark mode, and a keyboard-reachable scroll area.
 
 Documentation corrected in the same change: KNOWN_ISSUES I29 addendum 6 (the grd patch
