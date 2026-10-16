@@ -1,3 +1,106 @@
+## 1.11.0.20261016 - 2026-10-16
+
+Adds a new "Dependencies" tab: tracking of this project's own OS prerequisites against a
+full package inventory, an append-only snapshot history across deploys, and native
+rollback where the host's package manager genuinely supports one.
+
+- **New (I64): dependency tracking + native-rollback-where-available.** Every
+  `deploy.sh` run now captures ONE snapshot (before the payload swap, and again at the
+  end) covering BOTH the 9-package `requires.txt` set (flagged `tracked: true`) and a
+  full installed-package inventory (name/version/arch, every package) — appended,
+  never overwritten, to `<install-root>/dep-history/`, so drift is visible across many
+  deploys. For the tracked set, each snapshot also records a bounded dependency graph
+  (what it requires, and what else on the host requires it — a "blast radius", scoped
+  to the tracked set for cost reasons) and a compliance flag against `requires.txt`'s
+  own stated minimum, reusing `lib/edy-rdp-requires.sh`'s existing version-comparison
+  logic rather than a second copy of it.
+- **Rollback is real only on dnf/yum** (`dnf history undo`, the one package manager
+  family with a safe built-in transaction-undo), and only after re-verifying at
+  rollback time that no OTHER transaction has happened on the host since the snapshot
+  was taken — refusing rather than guessing if one has (an unrelated `dnf update` in
+  between must never be blindly undone). `apt-get`/`pacman`/`zypper` get an
+  informational manual command per changed tracked package instead — never executed
+  by any part of this project. Rollback is always manual: admin-gated, with the same
+  typed-hostname confirmation the Desktop UI tab's Stop/Disable already use, never
+  automatic.
+- **New backend:** `relay/depcheck.py` (stdlib, read-only — no package-manager query
+  ever runs in the unprivileged relay) and the root-run
+  `depcheck/edy-rdp-depsnapshot.py` (`snapshot`/`rollback`), five new `relay/control.py`
+  ops (`deps-status`/`deps-history`/`deps-list`/`deps-blast-radius`, and the
+  admin-gated `deps-rollback`), and a new parameterless
+  `edy-rdp-depcheck-rollback.service` unit (the same parameterless-privileged-unit
+  shape `edy-rdp-rotate-rdplogin.service` already uses elsewhere in this project:
+  zero caller-influenced data crosses that privilege boundary).
+- **Explicitly out of scope, named in KNOWN_ISSUES I64:** a full all-packages
+  dependency graph (bounded to the tracked set only), and a periodic background
+  drift scan that would also catch package changes between deploys from outside this
+  project's control — snapshots are taken only when `deploy.sh` itself runs.
+- **Verification:** `run_tests.sh` green (`relay/test_depcheck.py`, new); snapshot
+  capture smoke-tested end to end against this dev host's own live `apt-get`/`dpkg`
+  inventory (2656 packages, all 9 tracked prerequisites correctly mapped and
+  compliant); `dnf`/`yum`/`pacman`/`zypper` paths were code-reviewed and
+  unit-tested with mocks, not exercised against a live host of those distros.
+- **Follow-up fixes from three rounds of adversarial review**, before this
+  reaches `main`. Round one: the rollback unit's timeout chain (unit/script/relay
+  each disagreed on how long a `dnf history undo` may run); the recorded
+  transaction id was "whatever is newest on the host" rather than verified to
+  have been caused by this run's own `install_deps()`; the "before" snapshot ran
+  after `install_deps()` had already changed packages; `list_snapshots()` read
+  full package arrays just for a summary; a failed reverse-dependency check
+  rendered identically to a real "nothing depends on this"; and stale comments
+  pointing at files that don't exist on this branch. Round two, found because
+  round one's own `<timestamp>.summary.json` companion file broke
+  `load_snapshot()`'s "latest" lookup: attribution was silently defeated in real
+  execution even though every test passed, because "latest" resolved to the
+  small summary object instead of the full snapshot (fixed by excluding
+  summary files from that lookup, with a regression test that writes both
+  files together). Round three, found by a cross-model check of round two's own
+  fix: **rollback could still undo an unrelated transaction whenever the latest
+  snapshot on disk was a "before" baseline rather than a completed "after"** —
+  reachable through an aborted deploy, a failed "after" write, or rollback
+  triggered mid-deploy, not an exotic race. `cmd_rollback()` now refuses unless
+  the latest snapshot is labeled `after`. Attribution itself was also redesigned
+  to be precise rather than inferred: `install_deps()` now brackets its own
+  package-manager invocation tightly (a new `current-tx` subcommand, called
+  immediately before and after `eval "$cmd"`) and threads the exact transaction
+  id it observed through `--install-tx`, rather than comparing against any
+  snapshot's own "current" reading — a coarser comparison could misattribute
+  unrelated dnf/yum activity happening anywhere in the wider window between
+  `install_deps()` finishing and the "after" snapshot actually running, at the
+  very end of `deploy.sh`. Also hardened in this round: `deps-list`'s snapshot
+  timestamp parameter (an authenticated caller's own request field) is now
+  validated against the exact shape `now_timestamp()` produces before it can
+  reach a filesystem path, closing a path-traversal read of any `.json` file
+  the relay user can see; the same validation tightens "latest" against a stray
+  non-snapshot `.json` file in the history directory. `run_tests.sh` green
+  throughout (188 relay unit tests, up from 185; mutation-tested by reverting
+  each of the round-three fixes individually and confirming the new tests
+  fail).
+  Round four, found by an independent cross-model check of round three's own
+  fix: **the `install_deps()` bracket could still misattribute a pre-existing
+  transaction.** `depsnapshot_current_tx()` returned empty stdout for both
+  "no dnf/yum history yet" and "the query itself failed" alike; if the
+  `tx_before` reading failed while `tx_after` happened to succeed, an
+  already-existing transaction looked newly created — reproduced live via the
+  reviewer's own harness. Fixed by making `get_latest_transaction_id()` return
+  `(ok, tx_id)` instead of conflating the two states, with a new `current-tx`
+  exit code `install_deps()`'s bracket now checks before comparing readings at
+  all. Also closed: `cmd_rollback()` refusing only a `"before"`-labeled
+  snapshot rather than anything that isn't `"after"`; the stale-transaction
+  check (exit 4) and the round-three path-traversal fix both had zero test
+  coverage of their own (confirmed by mutating away each check and finding the
+  suite stayed green); `TIMESTAMP_RE` tightened against non-ASCII digits and a
+  trailing newline; and a stale canned UI message for rollback's exit code 3
+  that predated the new label check and masked the real refusal reason.
+  **Explicitly deferred, named rather than silently left:** an unrelated dnf/yum
+  transaction landing while `install_deps()`'s own install waits on dnf's lock,
+  with that install then having nothing left to do, is still indistinguishable
+  from a normal install — closing it needs inspecting the transaction's own
+  command line or a dnf-only tagging scheme, not attempted this pass.
+  `run_tests.sh` green throughout (198 relay unit tests, up from 188); the
+  exact reviewer-reproduced scenario was reproduced standalone in bash and
+  confirmed fixed; every fix mutation-tested individually.
+
 ## 1.10.10.20261015 - 2026-10-15
 
 The Architecture tab shows the path from this page to the desktop as an interactive

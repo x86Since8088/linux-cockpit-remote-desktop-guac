@@ -20,6 +20,18 @@ administer remotely. It is off unless the host opts in, admin-gated, and Stop/Di
 require typing the host's name to confirm. See
 [docs/DESKTOP-UI-CONTROL.md](docs/DESKTOP-UI-CONTROL.md).
 
+A **Dependencies** tab tracks this project's own OS prerequisites (`requires.txt`)
+against a full installed-package inventory, both captured together in an append-only
+snapshot history taken only when `deploy.sh` itself runs (not a background scan — see
+KNOWN_ISSUES I64). It shows, per tracked package, its compliance against
+`requires.txt`'s own stated minimum and a bounded "blast radius" (what it requires, and
+what else on the host requires it); the package table can filter to the tracked set or
+show everything. Rolling back is native — a real `dnf`/`yum history undo` — only where
+that package manager genuinely offers one; on `apt-get`/`pacman`/`zypper` a snapshot
+diff instead shows the exact manual command per changed tracked package (informational
+only, never executed). Rollback is manual, admin-gated, and requires typing the host's
+name to confirm, the same pattern the Desktop UI tab's Stop/Disable already use.
+
 Traffic rides Cockpit's own HTTPS; guacd is reached only through a local relay over an
 AF_UNIX socket. The same path is on the page's Architecture tab. See
 [docs/SCENARIOS.md](docs/SCENARIOS.md) for screenshots and

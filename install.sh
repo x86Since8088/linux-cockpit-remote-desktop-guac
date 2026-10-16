@@ -50,6 +50,7 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          relay/session_registry.py:session_registry.py
          relay/control.py:control.py
          relay/bridge.py:bridge.py
+         relay/depcheck.py:depcheck.py
          relay/selfupdate.py:selfupdate.py
          bridge/edy-rdp-bridge-start.sh:edy-rdp-bridge-start
          bridge/edy-rdp-krb-preflight.sh:edy-rdp-krb-preflight.sh
@@ -62,6 +63,7 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin
          bootstrap/edy-rdp-bootstrap.sh:edy-rdp-bootstrap
          pulse/edy-rdp-pulse-bind.sh:edy-rdp-pulse-bind
+         depcheck/edy-rdp-depsnapshot.py:edy-rdp-depsnapshot
          selfupdate/edy-rdp-selfupdate-apply.py:edy-rdp-selfupdate-apply
          selfupdate/edy-rdp-selfupdate-rollback.py:edy-rdp-selfupdate-rollback)
 # Sourced libraries (not entry points): linked into $LIBEXECDIR beside the scripts
@@ -90,7 +92,11 @@ UNITS=(edy-rdp-guacd.service edy-rdp-relay.socket edy-rdp-control.socket
        # Self-update: deliberately NOT templated (no %i) -- see
        # systemd/edy-rdp-selfupdate-apply.service.in for why that is a stronger
        # property here than the %i-templated units above.
-       edy-rdp-selfupdate-apply.service edy-rdp-selfupdate-rollback.service)
+       edy-rdp-selfupdate-apply.service edy-rdp-selfupdate-rollback.service
+       # Dependency-tracking rollback: untemplated for the same reason -- see
+       # systemd/edy-rdp-depcheck-rollback.service.in, mirroring
+       # edy-rdp-rotate-rdplogin.service elsewhere in this project.
+       edy-rdp-depcheck-rollback.service)
 # System files that are COPIED (rendered where they carry a placeholder), because
 # the software that reads them - systemd-tmpfiles, dbus, polkit, nft - does not
 # follow a symlink out of its own configuration directory in every distro's
@@ -1015,7 +1021,7 @@ EOF
         [[ -e "$t" ]] || die "post-install: $LIBEXECDIR_D/$n dangles"
         case "$n" in
           *.py|edy-rdp-*) [[ "$n" == session_registry.py || "$n" == control.py \
-                             || "$n" == bridge.py || "$n" == selfupdate.py ]] \
+                             || "$n" == bridge.py || "$n" == depcheck.py || "$n" == selfupdate.py ]] \
                           || [[ -x "$t" ]] || die "post-install: $t is not executable" ;;
         esac
     done

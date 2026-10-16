@@ -18,7 +18,7 @@ echo "== py_compile relay =="
 python3 -m py_compile "$SRC"/relay/*.py && echo "  ok" || { echo "  FAIL"; fail=1; }
 
 echo "== relay unit tests (isolation, console gate, session tokens, allow-list, keepalive codec, registry, reaper) =="
-( cd "$SRC/relay" && python3 -m unittest test_edy_rdp_relay test_session_registry test_control test_selfupdate ) \
+( cd "$SRC/relay" && python3 -m unittest test_edy_rdp_relay test_session_registry test_control test_depcheck test_selfupdate ) \
   || { echo "  FAIL"; fail=1; }
 
 echo "== JS syntax (gjs if present) =="
@@ -61,11 +61,11 @@ hits() { local h; h="$(grep -RIn --exclude-dir=.git "$@" 2>/dev/null || true)"
          [[ -z "$h" ]] || { printf '%s\n' "$h"; return 0; }; return 1; }
 # 1. no shipped file names a source .env
 if hits -e 'source/\.env' -e '"\.env"' -e "'\.env'" \
-     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ ./*.js ./*.sh; then
+     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ depcheck/ ./*.js ./*.sh; then
   echo "  FAIL a shipped file names a source .env"; g=1; fi
 # 2. nothing resolves .env relative to itself
 if hits -e 'dirname.*\.env' -e '__file__.*\.env' -e 'BASH_SOURCE.*\.env' \
-     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ lib/ bootstrap/ pulse/; then
+     -- relay/ bridge/ headless/ rotate/ deskui/ extensions/ lib/ bootstrap/ pulse/ depcheck/; then
   echo "  FAIL something resolves .env relative to itself"; g=1; fi
 # The one true DEV location, and the RETIRED checkout-under-/opt this contract
 # exists because of - assembled from named parts so that NEITHER appears as a
@@ -81,7 +81,7 @@ DEV_ROOT="/srv/smb/share/sc/${_ao}-group/${_ao}-storage/projects"
 RETIRED_ROOT="/opt/sc/${_retired}"
 if hits -e "$DEV_ROOT" -e "$RETIRED_ROOT" \
      -- ./*.js ./*.json ./*.html .envdefault systemd/ hardening/ relay/ bridge/ \
-        headless/ rotate/ deskui/ extensions/ lib/ bootstrap/ pulse/ \
+        headless/ rotate/ deskui/ extensions/ lib/ bootstrap/ pulse/ depcheck/ \
         requires.txt requirements.txt; then
   echo "  FAIL a shipped file hardcodes a development or retired root"; g=1; fi
 # PAGE_DIRS must be installed as REAL directories of per-file links. cockpit-ws

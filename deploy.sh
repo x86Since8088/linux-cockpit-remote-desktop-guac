@@ -152,14 +152,34 @@ report_prereqs() {   # always runs; only --with-deps installs
 }
 
 install_deps() {
-    local cmd
+    local cmd tx_before tx_after tx_before_ok=0 tx_after_ok=0
     report_prereqs && return 0
     cmd="$(req_fix_command "${MISSING_PREREQS[@]}")"
     [[ "$cmd" != "install manually"* ]] || die "no supported package manager found; $cmd
     (see docs/COMPATIBILITY.md)"
+    # Bracketed as tightly as possible around the one command that can actually
+    # create a new dnf/yum transaction, so the dependency-snapshot "after" call
+    # (run_depsnapshot(), below) attributes a rollback candidate ONLY to what
+    # THIS eval itself did -- not to anything else that runs later in this same
+    # deploy (image pull, unit install, config steps), which comparing against
+    # a snapshot taken at the very end of the whole run could otherwise
+    # misattribute (KNOWN_ISSUES I64 F3). depsnapshot_current_tx() is
+    # best-effort and never fails the deploy on its own -- but BOTH readings
+    # must have genuinely succeeded before comparing them: depsnapshot_current_tx()
+    # returns empty stdout for "no dnf/yum history yet" (a real answer) AND for
+    # "the query itself failed" (unknown) alike, distinguished only by its own
+    # exit status. Comparing on VALUE alone let a failed tx_before reading
+    # (empty, indistinguishable from "no history") plus a successful tx_after
+    # reading make an already-existing transaction look newly created by this
+    # run (KNOWN_ISSUES I64 follow-up) -- require both exit codes to be 0.
+    tx_before="$(depsnapshot_current_tx)" && tx_before_ok=1
     say installing "$cmd"
     eval "$cmd" || die "prerequisite install failed (docs/COMPATIBILITY.md has the
     per-distro notes)"
+    tx_after="$(depsnapshot_current_tx)" && tx_after_ok=1
+    if (( tx_before_ok && tx_after_ok )) && [[ -n "$tx_after" && "$tx_after" != "$tx_before" ]]; then
+        DEPSNAPSHOT_INSTALL_TX="$tx_after"
+    fi
     req_freerdp_bin >/dev/null 2>&1 || die "a FreeRDP >= 3 client is still absent.
     Debian 12 and RHEL 8 ship only FreeRDP 2, which lacks RDSTLS - the protocol
     grd's port 3390 handover requires. See docs/COMPATIBILITY.md."
@@ -301,6 +321,81 @@ create_users() {
         || { useradd --system --no-create-home --shell /usr/sbin/nologin \
                      -g "$RELAY_GROUP" "$RELAY_USER"; say created "user $RELAY_USER"; }
     ok "$RELAY_USER:$RELAY_GROUP present (uid $(id -u "$RELAY_USER"))"
+}
+
+# ---------------------------------------------------------------------------
+# Dependency tracking (KNOWN_ISSUES I64): a snapshot of this host's full
+# package inventory, plus a bounded dependency graph for the requires.txt
+# tracked set, taken TWICE per deploy.sh run -- once right after the payload
+# swap (the "before" picture: what this host had BEFORE anything below this
+# point touches it) and once at the very end (the "after" picture, including
+# whatever --with-deps/--with-units just did). Both run UNCONDITIONALLY, on
+# every deploy.sh invocation, not just --with-deps ones: a plain deploy
+# showing "nothing changed" is itself a useful, correct data point.
+#
+# Runs the NEWLY-INSTALLED payload's OWN copy of the script (never this
+# checkout's), the same "run the installed copy, not the checkout" principle
+# do_deploy() already applies to install.sh. ALWAYS best-effort: a snapshot
+# failure must never fail an actual deployment (this is diagnostic tooling,
+# not load-bearing) -- warn and continue, matching pull_image()'s own graceful
+# degradation on a pull failure.
+# ---------------------------------------------------------------------------
+# DEPSNAPSHOT_INSTALL_TX carries the exact dnf/yum transaction id
+# install_deps() itself was observed to create (see its own tx_before/tx_after
+# bracket) forward to the matching "after" call, within THIS SAME deploy.sh
+# process only (never persisted, never read from anywhere else). Deliberately
+# NOT derived from comparing two full snapshots' own transaction readings --
+# see attributable_transaction_id() in depcheck/edy-rdp-depsnapshot.py for why
+# that was imprecise (KNOWN_ISSUES I64 F3) and depsnapshot_current_tx() below.
+DEPSNAPSHOT_INSTALL_TX=""
+
+# A cheap, standalone read of this host's current dnf/yum transaction id (pm
+# detection + one history query, no inventory scan) -- used only to bracket
+# install_deps()'s own package-manager invocation. Best-effort like every
+# other depsnapshot call here: never fails the deploy on its own.
+# Exit 0 with the current dnf/yum transaction id on stdout (possibly empty,
+# meaning "no history yet" -- a real answer) ONLY when the query genuinely
+# completed; exit 1 with nothing on stdout otherwise (script missing, or
+# edy-rdp-depsnapshot.py's own current-tx exited non-zero because the
+# underlying query itself failed). install_deps() MUST check this exit
+# status, not just the printed value -- see its own comment for why
+# conflating "failed" with "no history" is unsafe.
+depsnapshot_current_tx() {
+    local script="$ROOT_D/payload/depcheck/edy-rdp-depsnapshot.py" out
+    [[ -x "$script" ]] || return 1
+    out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" current-tx 2>/dev/null)" || return 1
+    sed -n 's/^CURRENT_TX=//p' <<<"$out" | tail -n1
+}
+
+run_depsnapshot() {
+    local label=$1 script="$ROOT_D/payload/depcheck/edy-rdp-depsnapshot.py" out rc=0
+    local -a extra_args=()
+    if [[ ! -x "$script" ]]; then
+        warn "dependency snapshot ($label) skipped: $script missing or not executable"
+        return 0
+    fi
+    if [[ "$label" == after && -n "$DEPSNAPSHOT_INSTALL_TX" ]]; then
+        extra_args=(--install-tx "$DEPSNAPSHOT_INSTALL_TX")
+    fi
+    # depcheck/edy-rdp-depsnapshot.py imports its sibling module (relay/depcheck.py)
+    # the same sys.path.insert(dirname(__file__)) idiom relay/edy_rdp_reaper.py
+    # already uses to import relay/session_registry.py, which only resolves
+    # once install.sh has linked both into the SAME flattened $LIBEXECDIR.
+    # The "before" snapshot runs before install.sh
+    # (see this function's callers), so PYTHONPATH points straight at the
+    # payload's own relay/ directory instead of relying on that flattening.
+    out="$(PYTHONPATH="$ROOT_D/payload/relay" "$script" snapshot --root "$ROOT_D" \
+                              --requires "$ROOT_D/payload/$REQUIRES" \
+                              --deploy-version "$VERSION" --label "$label" \
+                              "${extra_args[@]}" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+        say snapshot "dependency snapshot ($label) recorded"
+    else
+        warn "dependency snapshot ($label) failed (non-fatal, diagnostic only -- see
+       docs/KNOWN_ISSUES.md I64):
+$(sed 's/^/    /' <<<"$out")"
+    fi
+    return 0
 }
 
 # Guarantees the console shadow-gate's group exists under --with-users, the
@@ -488,7 +583,6 @@ $(sed 's/^/    /' <<<"$problems")
 do_deploy() {
     STEP=pre-flight
     preflight
-    ((WITH_DEPS)) && { step "OS prerequisites"; install_deps; }
     step "deploy $PROJECT $VERSION -> $ROOT"
     install -d -m 0755 "${OWN[@]}" -- "$ROOT_D"
 
@@ -500,6 +594,15 @@ do_deploy() {
     ln -sfn -- "payload-$VERSION" "$ROOT_D/payload.new"
     mv -T -- "$ROOT_D/payload.new" "$ROOT_D/payload"
     say swapped "$ROOT_D/payload -> payload-$VERSION"
+
+    # BEFORE install_deps(): install_deps() is the one step in this whole
+    # function that can actually invoke the package manager (--with-deps). A
+    # "before" snapshot taken after it would already reflect whatever it just
+    # installed/upgraded, defeating the entire point of a before/after diff.
+    STEP="dependency snapshot (before)"
+    run_depsnapshot before
+
+    ((WITH_DEPS)) && { step "OS prerequisites"; install_deps; }
 
     step "configuration"
     migrate_legacy_env
@@ -610,6 +713,9 @@ do_deploy() {
                 || warn "enable-locked-remote-desktop failed (run it in $au's graphical session)"
         fi
     fi
+
+    STEP="dependency snapshot (after)"
+    run_depsnapshot after
 
     cat <<EOF
 

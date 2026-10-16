@@ -17,8 +17,10 @@ do. Memory only points here.
 - **`feat/dependency-tracking`** (5 commits of 2026-09-29, tip f50d894, 35 commits behind main; the shared checkout still sits on
   it): "dependency tracking + native-rollback admin tab". **Fate (owner, 2026-10-15): keep it, never delete it.** It was the only
   copy, so it is now also pushed to `origin/feat/dependency-tracking` as a backup (no PR). It is still unreviewed and unmerged.
-  Its issue id **I51 collides with main's I51** (group rename) and its VERSION 1.7.0.20260929 is the exact string main's I49
-  shipped as, so it needs a renumber and a version bump if revived. When the owner wants the rollback tab: review, rebase onto
+  Its issue id collided with main's I51 (group rename) and its VERSION 1.7.0.20260929 was the exact string main's I49
+  shipped as. **Both resolved 2026-10-16** on `merge/i51-main-20261016`: the feature is renumbered **I51 -> I64** (36 code/doc
+  refs, the KNOWN_ISSUES section moved after I63, main's own I54 cross-reference updated; main's I51 refs in `install.sh`
+  and `docs/GROUP-ACCESS-MODEL.md` deliberately untouched) and the version bumped to **1.11.0.20261016**. When the owner wants the rollback tab: review, rebase onto
   main, then PR; test its rollback only in a container. With the checkout left on it, read current main with
   `git show origin/main:<file>`.
 

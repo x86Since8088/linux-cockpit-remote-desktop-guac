@@ -2090,6 +2090,311 @@
         });
     }
 
+    // ---- Dependency tracking panel --------------------------------------------
+    // Reads this host's tracked-package (requires.txt) compliance and full package
+    // inventory, both captured only at deploy time (KNOWN_ISSUES I64 — no
+    // background polling here either, matching deskui's "read once per tab-open,
+    // explicit Refresh button" convention). Rollback is native (dnf/yum history
+    // undo) where the host's package manager actually has one; everywhere else the
+    // history diff shows the exact manual command instead, never executed here.
+    var depsState = null;            // last deps-status payload
+    var depsHistory = [];            // last deps-history payload (newest first)
+    var depsListCache = {};          // timestamp -> deps-list result (this session only)
+    var depsBlastCache = {};         // package name -> deps-blast-radius result
+    var depsTrackedOnly = true;
+
+    function depsRow(label, value, warn) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td"); k.textContent = label;
+        var v = document.createElement("td"); v.textContent = value;
+        if (warn) v.className = "warn";
+        tr.appendChild(k); tr.appendChild(v);
+        return tr;
+    }
+
+    function depsSyncButtons() {
+        var st = depsState || {};
+        var canRollback = !!st.admin && !!st.native_rollback_available;
+        var confirmEl = $("deps-confirm");
+        var confirmOk = canRollback && confirmEl && confirmEl.value === st.hostname && !!st.hostname;
+        $("deps-rollback").disabled = !confirmOk;
+        $("deps-confirm-wrap").hidden = !canRollback;
+        $("deps-rollback").title = st.native_rollback_available
+            ? "Undo the most recent dnf/yum transaction on this host"
+            : "This host's package manager has no native rollback (only dnf/yum do) "
+             + "— see the manual command for each changed tracked package in a history diff below.";
+    }
+
+    // Client-side port of relay/depcheck.py's rollback_command_hint() — display
+    // only, so the browser can show a hint without a round trip per changed
+    // package; NOTHING here is ever executed, by this plugin or the relay.
+    function depsRollbackHint(pkgMgr, name, oldVersion) {
+        if (pkgMgr === "apt-get") return "apt-get install " + name + "=" + oldVersion;
+        if (pkgMgr === "zypper") return "zypper install " + name + "=" + oldVersion;
+        if (pkgMgr === "pacman") return "pacman -U /var/cache/pacman/pkg/" + name + "-" + oldVersion + "-*.pkg.tar.zst";
+        return null;   // dnf/yum: native rollback instead
+    }
+
+    function renderDepsStatus() {
+        var body = $("deps-status-body");
+        body.innerHTML = '<tr><td colspan="2" class="muted">Loading…</td></tr>';
+        return controlRequest({ op: "deps-status" }).then(function (r) {
+            depsState = r || {};
+            if (!r || !r.ok) {
+                body.innerHTML = '<tr><td colspan="2" class="muted">'
+                    + ((r && r.error) || "Dependency tracking is not available on this host.") + '</td></tr>';
+                depsSyncButtons();
+                return;
+            }
+            body.innerHTML = "";
+            body.appendChild(depsRow("Package manager", r.pkg_mgr || "not detected", !r.pkg_mgr));
+            body.appendChild(depsRow("Total packages", r.total_packages != null ? String(r.total_packages) : "—"));
+            body.appendChild(depsRow("Tracked (requires.txt)", r.tracked_count != null ? String(r.tracked_count) : "—"));
+            var nc = r.noncompliant_count || 0;
+            body.appendChild(depsRow("Out of compliance", r.noncompliant_count != null ? String(nc) : "—", nc > 0));
+            body.appendChild(depsRow("Native rollback", r.native_rollback_available
+                ? "available (dnf/yum)" : "not available on this host's package manager"));
+            body.appendChild(depsRow("Snapshots recorded", String(r.snapshot_count || 0)));
+            body.appendChild(depsRow("Last snapshot", r.latest_timestamp
+                ? (r.latest_timestamp + " (deploy " + (r.deploy_version || "?") + ")") : "none yet — run deploy.sh"));
+            $("deps-hostname").textContent = r.hostname || "";
+            depsSyncButtons();
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="2" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    function renderDepsHistory() {
+        var body = $("deps-history-body");
+        body.innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
+        return controlRequest({ op: "deps-history" }).then(function (r) {
+            if (!r || !r.ok) {
+                body.innerHTML = '<tr><td colspan="6" class="muted">Could not read history.</td></tr>';
+                return;
+            }
+            depsHistory = r.snapshots || [];
+            if (!depsHistory.length) {
+                body.innerHTML = '<tr><td colspan="6" class="muted">No snapshots yet — one is taken at every deploy.sh run.</td></tr>';
+                return;
+            }
+            body.innerHTML = "";
+            depsHistory.forEach(function (s) {
+                var tr = document.createElement("tr");
+                function td(txt) { var e = document.createElement("td"); e.textContent = txt; return e; }
+                tr.appendChild(td(s.timestamp || ""));
+                tr.appendChild(td(s.deploy_version || ""));
+                tr.appendChild(td(String(s.total_packages != null ? s.total_packages : "")));
+                tr.appendChild(td(String(s.tracked_count != null ? s.tracked_count : "")));
+                tr.appendChild(td(String(s.noncompliant_count || 0)));
+                var chTd = document.createElement("td");
+                chTd.textContent = s.changed_since_previous ? "yes" : "no";
+                if (s.changed_since_previous) chTd.className = "warn";
+                tr.appendChild(chTd);
+                tr.style.cursor = "pointer";
+                tr.title = "View this snapshot's diff against its predecessor";
+                tr.addEventListener("click", function () { showDepsDiff(s.timestamp); });
+                body.appendChild(tr);
+            });
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="6" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    function depsListCached(snapshot) {
+        if (Object.prototype.hasOwnProperty.call(depsListCache, snapshot)) {
+            return Promise.resolve(depsListCache[snapshot]);
+        }
+        return controlRequest({ op: "deps-list", snapshot: snapshot, tracked_only: false }).then(function (r) {
+            if (r && r.ok) depsListCache[snapshot] = r;
+            return r;
+        });
+    }
+
+    // Pure client-side diff (mirrors relay/depcheck.py's diff_snapshots()) over
+    // two already-fetched full package lists — no extra control-API op for this;
+    // deps-list already carries everything the browser needs for a two-snapshot
+    // comparison.
+    function depsDiffPackages(olderPkgs, newerPkgs) {
+        var older = {}, newer = {};
+        (olderPkgs || []).forEach(function (p) { older[p.name + "\u0000" + (p.arch || "")] = p; });
+        (newerPkgs || []).forEach(function (p) { newer[p.name + "\u0000" + (p.arch || "")] = p; });
+        var added = [], removed = [], changed = [], unchanged = 0;
+        Object.keys(newer).forEach(function (key) {
+            var np = newer[key], op = older[key];
+            if (!op) { added.push(np); return; }
+            if (op.version !== np.version) {
+                changed.push({ name: np.name, arch: np.arch, old_version: op.version,
+                              new_version: np.version, tracked: !!(np.tracked || op.tracked) });
+            } else unchanged++;
+        });
+        Object.keys(older).forEach(function (key) { if (!newer[key]) removed.push(older[key]); });
+        return { added: added, removed: removed, changed: changed, unchanged_count: unchanged };
+    }
+
+    function showDepsDiff(timestamp) {
+        var idx = depsHistory.findIndex(function (s) { return s.timestamp === timestamp; });
+        var prev = (idx >= 0 && idx + 1 < depsHistory.length) ? depsHistory[idx + 1].timestamp : null;
+        $("deps-diff-wrap").hidden = false;
+        $("deps-diff-title").textContent = prev ? (prev + " → " + timestamp) : (timestamp + " (first snapshot recorded)");
+        var body = $("deps-diff-body");
+        body.innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
+        if (!prev) { body.innerHTML = '<tr><td colspan="6" class="muted">No earlier snapshot to compare against.</td></tr>'; return; }
+        Promise.all([depsListCached(prev), depsListCached(timestamp)]).then(function (rs) {
+            var older = rs[0], newer = rs[1];
+            if (!older || !older.ok || !newer || !newer.ok) {
+                body.innerHTML = '<tr><td colspan="6" class="muted">Could not load one of the two snapshots.</td></tr>';
+                return;
+            }
+            var pkgMgr = newer.pkg_mgr;
+            var d = depsDiffPackages(older.packages, newer.packages);
+            var rows = []
+                .concat(d.added.map(function (p) { return { kind: "added", name: p.name, oldv: "", newv: p.version, tracked: p.tracked }; }))
+                .concat(d.removed.map(function (p) { return { kind: "removed", name: p.name, oldv: p.version, newv: "", tracked: p.tracked }; }))
+                .concat(d.changed.map(function (c) { return { kind: "changed", name: c.name, oldv: c.old_version, newv: c.new_version, tracked: c.tracked }; }));
+            if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="muted">No package changes between these two snapshots.</td></tr>'; return; }
+            body.innerHTML = "";
+            rows.forEach(function (row) {
+                var tr = document.createElement("tr");
+                function td(txt) { var e = document.createElement("td"); e.textContent = txt; return e; }
+                tr.appendChild(td(row.kind));
+                tr.appendChild(td(row.name));
+                tr.appendChild(td(row.oldv));
+                tr.appendChild(td(row.newv));
+                tr.appendChild(td(row.tracked ? "yes" : ""));
+                var hintTd = document.createElement("td");
+                if (row.tracked && row.kind === "changed" && pkgMgr !== "dnf" && pkgMgr !== "yum") {
+                    hintTd.textContent = depsRollbackHint(pkgMgr, row.name, row.oldv) || "";
+                    hintTd.className = "mono";
+                }
+                tr.appendChild(hintTd);
+                body.appendChild(tr);
+            });
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="6" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    function depsBlastRadiusCached(name) {
+        if (Object.prototype.hasOwnProperty.call(depsBlastCache, name)) {
+            return Promise.resolve(depsBlastCache[name]);
+        }
+        return controlRequest({ op: "deps-blast-radius", package: name }).then(function (r) {
+            if (r && r.ok) depsBlastCache[name] = r;
+            return r;
+        });
+    }
+
+    function depsToggleBlastRow(tr, name) {
+        var next = tr.nextSibling;
+        if (next && next.classList && next.classList.contains("deps-blast-row")) {
+            next.parentNode.removeChild(next);
+            return;
+        }
+        var detail = document.createElement("tr");
+        detail.className = "deps-blast-row";
+        var td = document.createElement("td");
+        td.colSpan = 6;
+        td.textContent = "Loading…";
+        detail.appendChild(td);
+        tr.parentNode.insertBefore(detail, tr.nextSibling);
+        depsBlastRadiusCached(name).then(function (r) {
+            if (!r || !r.ok || !r.found) {
+                td.textContent = "No dependency graph captured for " + name + ".";
+                return;
+            }
+            td.textContent = "";
+            var req = document.createElement("div");
+            req.textContent = "Requires: " + (r.requires.length ? r.requires.join(", ") : "(none recorded)");
+            var reqBy = document.createElement("div");
+            if (r.required_by_unavailable) {
+                // Distinct from "(nothing else on this host)" below: the check
+                // itself could not run (no pactree/rpm/apt-cache query tool, or
+                // a broken one) -- showing "none" here would be false confidence.
+                reqBy.appendChild(document.createTextNode("Required by: "));
+                var unk = document.createElement("span");
+                unk.className = "muted";
+                unk.textContent = "unable to determine";
+                reqBy.appendChild(unk);
+            } else {
+                reqBy.textContent = "Required by: " + (r.required_by.length ? r.required_by.join(", ") : "(nothing else on this host)");
+            }
+            td.appendChild(req); td.appendChild(reqBy);
+        });
+    }
+
+    function renderDepsPackages() {
+        var body = $("deps-packages-body");
+        body.innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
+        return controlRequest({ op: "deps-list", snapshot: "latest", tracked_only: depsTrackedOnly }).then(function (r) {
+            if (!r || !r.ok) {
+                body.innerHTML = '<tr><td colspan="6" class="muted">'
+                    + ((r && r.error) || "No snapshot history on this host yet.") + '</td></tr>';
+                return;
+            }
+            var tracked = r.tracked || {};
+            var pkgs = r.packages || [];
+            if (!pkgs.length) { body.innerHTML = '<tr><td colspan="6" class="muted">No packages to show.</td></tr>'; return; }
+            body.innerHTML = "";
+            pkgs.forEach(function (p) {
+                var tr = document.createElement("tr");
+                function td(txt, cls) { var e = document.createElement("td"); e.textContent = txt; if (cls) e.className = cls; return e; }
+                var expandTd = document.createElement("td");
+                var t = tracked[p.name];
+                if (p.tracked && t) {
+                    var btn = document.createElement("button");
+                    btn.className = "sec"; btn.textContent = "▸";
+                    btn.title = "Show what " + p.name + " requires, and what requires it";
+                    btn.addEventListener("click", function () { depsToggleBlastRow(tr, p.name); });
+                    expandTd.appendChild(btn);
+                }
+                tr.appendChild(expandTd);
+                tr.appendChild(td(p.name));
+                tr.appendChild(td(p.version || ""));
+                tr.appendChild(td(p.arch || ""));
+                tr.appendChild(td(p.tracked ? "yes" : "", p.tracked ? "live-yes" : "muted"));
+                var compliantTxt = "", compliantCls = "";
+                if (t) { compliantTxt = t.compliant ? "yes (≥ " + t.minimum_version + ")"
+                                                   : "NO (have " + (t.installed_version || "missing") + ", need ≥ " + t.minimum_version + ")";
+                         compliantCls = t.compliant ? "" : "warn"; }
+                tr.appendChild(td(compliantTxt, compliantCls));
+                body.appendChild(tr);
+            });
+        }).catch(function (e) {
+            body.innerHTML = '<tr><td colspan="6" class="muted">Control API error: ' + e + '</td></tr>';
+        });
+    }
+
+    function renderDeps() {
+        depsListCache = {};
+        renderDepsStatus();
+        renderDepsHistory();
+        renderDepsPackages();
+        $("deps-diff-wrap").hidden = true;
+    }
+
+    function depsRollbackAction() {
+        var st = depsState || {};
+        var confirm = $("deps-confirm") ? $("deps-confirm").value : "";
+        var s = $("deps-status");
+        s.textContent = "Rolling back…"; s.className = "status";
+        $("deps-rollback").disabled = true;
+        controlRequest({ op: "deps-rollback", confirm: confirm }).then(function (r) {
+            if (r && r.ok) {
+                s.textContent = "Rolled back: " + (r.detail || "done") + ".";
+                s.className = "status ok";
+                if ($("deps-confirm")) $("deps-confirm").value = "";
+            } else {
+                var why = (r && (r.detail || r.error)) || "refused";
+                if (r && r.need_confirm) why = "type the host name (" + (r.hostname || st.hostname || "") + ") to confirm";
+                s.textContent = "Rollback failed: " + why; s.className = "status err";
+            }
+            renderDeps();
+        }).catch(function (e) {
+            s.textContent = "Rollback error: " + e; s.className = "status err";
+            renderDeps();
+        });
+    }
+
     function renderSessions() {
         var body = $("sessions-body");
         body.innerHTML = '<tr><td colspan="7" class="muted">Loading…</td></tr>';
@@ -2720,7 +3025,7 @@
     // Tab names as they appear in the URL hash (?tab=connect etc.) -- the main
     // page only; pop-outs never show tabs at all (html.monitor .tabs is
     // display:none), so this never runs there.
-    var TAB_NAMES = ["connect", "sessions", "deskui", "update", "selftests", "architecture"];
+    var TAB_NAMES = ["connect", "sessions", "deskui", "deps", "update", "selftests", "architecture"];
     function selectTab(id) {
         var name = id.replace(/^tab-/, "");
         TAB_NAMES.forEach(function (n) {
@@ -2731,6 +3036,7 @@
         });
         if (id === "tab-sessions") renderSessions();
         if (id === "tab-deskui") renderDeskUi();
+        if (id === "tab-deps") renderDeps();
         if (id === "tab-update") renderUpdate();
         // Reflect the active tab in the URL, the same way URL_CONTROLS persists
         // Session/Resolution/etc: rewritten via writeHash() (replaceState, so no
@@ -2852,6 +3158,7 @@
         $("tab-connect").addEventListener("click", function () { selectTab("tab-connect"); });
         $("tab-sessions").addEventListener("click", function () { selectTab("tab-sessions"); });
         $("tab-deskui").addEventListener("click", function () { selectTab("tab-deskui"); });
+        $("tab-deps").addEventListener("click", function () { selectTab("tab-deps"); });
         $("tab-update").addEventListener("click", function () { selectTab("tab-update"); });
         $("tab-selftests").addEventListener("click", function () { selectTab("tab-selftests"); });
         $("tab-architecture").addEventListener("click", function () { selectTab("tab-architecture"); });
@@ -2864,6 +3171,15 @@
         $("deskui-start").addEventListener("click", function () { deskuiAction("start"); });
         $("deskui-disable").addEventListener("click", function () { deskuiAction("disable"); });
         $("deskui-stop").addEventListener("click", function () { deskuiAction("stop"); });
+        // Dependencies panel
+        $("deps-refresh").addEventListener("click", renderDeps);
+        $("deps-confirm").addEventListener("input", depsSyncButtons);
+        $("deps-rollback").addEventListener("click", depsRollbackAction);
+        $("deps-diff-close").addEventListener("click", function () { $("deps-diff-wrap").hidden = true; });
+        $("deps-tracked-only").addEventListener("change", function () {
+            depsTrackedOnly = $("deps-tracked-only").checked;
+            renderDepsPackages();
+        });
         // Update panel
         $("update-check").addEventListener("click", updateCheckAction);
         $("update-confirm").addEventListener("input", updateSyncButtons);

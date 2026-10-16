@@ -68,6 +68,7 @@ import uuid as uuidlib
 from session_registry import SessionRegistry
 from control import LiveConnections, handle_control
 import bridge
+from depcheck import DepCheck
 from selfupdate import SelfUpdate
 
 log = logging.getLogger("edy-rdp-relay")
@@ -633,6 +634,11 @@ class DesktopUI:
 #: from the --deskui-write flag so the control server's closure can reach it.
 DESKTOP_UI = DesktopUI()
 
+#: module-level singleton for the deps-* control ops (KNOWN_ISSUES I64). No
+#: opt-in flag (unlike DESKTOP_UI) -- the four reads are open to any
+#: authenticated caller by product decision, and the one write is admin +
+#: typed-hostname-confirm gated in handle_control() itself.
+DEPCHECK = DepCheck()
 #: module-level singleton (mirrors DESKTOP_UI): the repo is read straight out of
 #: the process environment, not through argparse -- EDY_RDP_UPDATE_REPO reaches
 #: this process via the unit's EnvironmentFile=@ENV_FILE@ exactly like every
@@ -1495,7 +1501,7 @@ def control_server(srv, table, live, admin_group, path_label=""):
             else:
                 resp = handle_control(req, uid, table, live, admin, SESSION_TOKENS,
                                       unlock=unlock_seat_session, deskui=DESKTOP_UI,
-                                      selfupdate=SELF_UPDATE)
+                                      depcheck=DEPCHECK, selfupdate=SELF_UPDATE)
             conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
         except OSError:
             pass

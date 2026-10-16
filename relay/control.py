@@ -55,7 +55,7 @@ class LiveConnections:
 
 
 def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
-                   unlock=None, deskui=None, selfupdate=None):
+                   unlock=None, deskui=None, depcheck=None, selfupdate=None):
     """Dispatch one control request. Returns a JSON-serialisable dict.
 
     request: parsed dict with "op" in {"list","terminate","ping","register","elevate"}.
@@ -75,6 +75,20 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
           .hostname      -> str    this host's name (the confirmation phrase)
           .status()      -> dict   current desktop/DM/session state
           .control(action, force) -> (ok, detail)   run the privileged verb
+    depcheck: optional dependency-tracking controller (duck-typed, mirrors
+        deskui's injection). The four reads are open to any authenticated
+        caller (a host's own package inventory is not a secret, same trust
+        level as deskui-status); the one write (deps-rollback) is admin-gated
+        with the SAME typed-hostname confirmation deskui's stop/disable
+        already use — rolling back system packages is a bigger blast radius
+        than restarting this project's own relay, so it gets at least as much
+        friction, never less. Must expose:
+          .hostname            -> str    this host's name (the confirmation phrase)
+          .status()            -> dict   summary: counts, pkg_mgr, native-rollback flag
+          .history()           -> list   past snapshot summaries
+          .list(snapshot, tracked_only) -> dict|None   one snapshot's package list
+          .blast_radius(name)  -> dict|None  {found, requires, required_by}
+          .rollback()          -> (ok, detail)   run the privileged verb
     selfupdate: optional self-update controller (duck-typed, mirrors deskui's
         injection). Admin gate + typed-hostname confirmation for "update-apply"
         live HERE (same split as deskui), so a leaked/forged confirm string is
@@ -190,6 +204,81 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
                 force = True
         ok, detail = deskui.control(action, force)
         return {"ok": bool(ok), "action": action, "forced": bool(force), "detail": detail}
+
+    # -- dependency tracking: read cached snapshot data -----------------------
+    #
+    # Read-only, ANY authenticated caller (same trust level as deskui-status):
+    # this host's own package inventory is not a secret. Every one of these is
+    # served from JSON already on disk — no package-manager query ever runs
+    # here (see relay/depcheck.py's module docstring); an error means "no
+    # snapshot yet" or "no such snapshot", not "the host refused."
+    if op == "deps-status":
+        if depcheck is None:
+            return {"ok": False, "error": "dependency tracking is not available on this server"}
+        out = {"ok": True, "admin": bool(is_admin), "hostname": depcheck.hostname}
+        try:
+            out.update(depcheck.status())
+        except Exception as exc:                        # never let a read error 500 the panel
+            out["ok"] = False
+            out["error"] = "could not read dependency status: %s" % exc
+        return out
+
+    if op == "deps-history":
+        if depcheck is None:
+            return {"ok": False, "error": "dependency tracking is not available on this server"}
+        try:
+            return {"ok": True, "snapshots": depcheck.history()}
+        except Exception as exc:
+            return {"ok": False, "error": "could not read dependency history: %s" % exc}
+
+    if op == "deps-list":
+        if depcheck is None:
+            return {"ok": False, "error": "dependency tracking is not available on this server"}
+        try:
+            result = depcheck.list(request.get("snapshot", "latest"), bool(request.get("tracked_only")))
+        except Exception as exc:
+            return {"ok": False, "error": "could not read that snapshot: %s" % exc}
+        if result is None:
+            return {"ok": False, "error": "no such snapshot, or no snapshot history on this host"}
+        result["ok"] = True
+        return result
+
+    if op == "deps-blast-radius":
+        if depcheck is None:
+            return {"ok": False, "error": "dependency tracking is not available on this server"}
+        name = request.get("package")
+        if not name:
+            return {"ok": False, "error": "deps-blast-radius requires a package name"}
+        try:
+            result = depcheck.blast_radius(name)
+        except Exception as exc:
+            return {"ok": False, "error": "could not compute blast radius: %s" % exc}
+        if result is None:
+            return {"ok": False, "error": "no snapshot history on this host yet"}
+        result["ok"] = True
+        return result
+
+    # -- dependency tracking: roll back the most recent tracked-dependency
+    # change -----------------------------------------------------------------
+    #
+    # Admin-gated, with the SAME typed-hostname confirmation pattern deskui's
+    # stop/disable already use (read relay/edy_rdp_relay.py's DesktopUI.control()
+    # and guac-rdp.js's deskuiAction() for the exact template this mirrors).
+    # Unlike deskui there is no separate opt-in flag and no "force" escalation —
+    # depcheck.rollback() itself refuses cleanly (and says why: not a dnf/yum
+    # host, no transaction on record, a newer transaction exists, or the undo
+    # itself failed) rather than this function guessing at those reasons.
+    if op == "deps-rollback":
+        if depcheck is None:
+            return {"ok": False, "error": "dependency tracking is not available on this server"}
+        if not is_admin:
+            return {"ok": False, "error": "rolling back a dependency change needs administrative access"}
+        if request.get("confirm") != depcheck.hostname:
+            return {"ok": False, "error": "confirmation required",
+                    "need_confirm": True, "hostname": depcheck.hostname,
+                    "detail": "type this host's name (%s) to confirm" % depcheck.hostname}
+        ok, detail = depcheck.rollback()
+        return {"ok": bool(ok), "detail": detail}
 
     # -- self-update: read cached state, forcing a live check for "update-check" --
     #

@@ -15,7 +15,12 @@ polkit.addRule(function(action, subject) {
                      // "apply"/"rollback" take no caller-influenced data of any
                      // kind, so an exact match is both correct and sufficient.
                      unit === "edy-rdp-selfupdate-apply.service" ||
-                     unit === "edy-rdp-selfupdate-rollback.service")) {
+                     unit === "edy-rdp-selfupdate-rollback.service" ||
+                     // Dependency-tracking rollback (I64): EXACT name for the
+                     // same reason -- also untemplated, no caller-influenced
+                     // data, matching edy-rdp-rotate-rdplogin.service elsewhere
+                     // in this project.
+                     unit === "edy-rdp-depcheck-rollback.service")) {
             return polkit.Result.YES;
         }
     }

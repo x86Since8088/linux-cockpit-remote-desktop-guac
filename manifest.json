@@ -1,5 +1,5 @@
 {
-    "version": "1.10.10.20261015",
+    "version": "1.11.0.20261016",
     "requires": { "cockpit": "266" },
     "menu": {
         "index": {

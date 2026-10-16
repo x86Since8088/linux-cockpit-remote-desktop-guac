@@ -30,6 +30,16 @@ button.danger:not(:disabled) { background:var(--err); color:#fff; border-color:v
 #deskui-state-table td:first-child, #update-state-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
 #deskui-state-table td.warn, #update-state-table td.warn { color:var(--err); font-weight:600; }
 
+/* Dependencies panel: same key/value read-out as deskui's state table, plus an
+   expandable "blast radius" row under a tracked package (KNOWN_ISSUES I64). */
+#deps-status-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
+#deps-status-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
+#deps-status-table td.warn, table.sessions td.warn { color:var(--err); font-weight:600; }
+tr.deps-blast-row td { background:var(--bg); font-size:.8em; padding:.4rem .9rem; white-space:pre-line; }
+tr.deps-blast-row .muted { color:var(--muted); font-style:italic; }
+#deps-packages-table td:first-child { width:2.2rem; padding:.15rem .3rem; }
+#deps-packages-table td:first-child button { padding:.05rem .4rem; font-size:.75rem; }
+
 /* "Add Monitor" pop-up (index.html opened with #monitor): chromeless — no tabs,
    toolbar or app bar — with the virtual monitor filling the whole window. Only a
    connection error surfaces (as a bottom overlay). */

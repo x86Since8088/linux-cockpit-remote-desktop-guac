@@ -16,6 +16,7 @@
     <button class="tab active" id="tab-connect" data-panel="panel-connect">Connect</button>
     <button class="tab" id="tab-sessions" data-panel="panel-sessions">Active Sessions</button>
     <button class="tab" id="tab-deskui" data-panel="panel-deskui">Desktop UI</button>
+    <button class="tab" id="tab-deps" data-panel="panel-deps">Dependencies</button>
     <button class="tab" id="tab-update" data-panel="panel-update">Update<span id="update-badge" class="badge-dot" hidden></span></button>
     <button class="tab" id="tab-selftests" data-panel="panel-selftests">Self Tests</button>
     <button class="tab" id="tab-architecture" data-panel="panel-architecture">Architecture</button>
@@ -146,6 +147,58 @@
              placeholder="host name">
     </div>
     <div class="status" id="deskui-status">Read-only view of this host's desktop state.</div>
+  </section>
+
+  <section id="panel-deps" class="panel" hidden>
+    <div class="bar">
+      <button id="deps-refresh">Refresh</button>
+      <span class="hint">Package inventory + requires.txt compliance, captured only at deploy time (not a live background scan).</span>
+    </div>
+    <table class="sessions" id="deps-status-table">
+      <tbody id="deps-status-body"><tr><td colspan="2" class="muted">Loading…</td></tr></tbody>
+    </table>
+
+    <div class="bar"><strong>Snapshot history</strong><span class="hint">Click a row to see what changed since the one before it.</span></div>
+    <table class="sessions" id="deps-history-table">
+      <thead><tr>
+        <th>Snapshot</th><th>Deploy version</th><th>Packages</th><th>Tracked</th><th>Non-compliant</th><th>Changed</th>
+      </tr></thead>
+      <tbody id="deps-history-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+
+    <div id="deps-diff-wrap" hidden>
+      <div class="bar">
+        <strong id="deps-diff-title"></strong>
+        <button id="deps-diff-close" class="sec">Close</button>
+      </div>
+      <table class="sessions" id="deps-diff-table">
+        <thead><tr>
+          <th>Change</th><th>Package</th><th>Old version</th><th>New version</th><th>Tracked</th>
+          <th>Manual command (no native rollback on this host's package manager)</th>
+        </tr></thead>
+        <tbody id="deps-diff-body"></tbody>
+      </table>
+    </div>
+
+    <div class="bar">
+      <label><input type="checkbox" id="deps-tracked-only" checked> Tracked dependencies only</label>
+    </div>
+    <table class="sessions" id="deps-packages-table">
+      <thead><tr><th></th><th>Package</th><th>Version</th><th>Arch</th><th>Tracked</th><th>Compliant</th></tr></thead>
+      <tbody id="deps-packages-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+
+    <div class="bar" id="deps-actions">
+      <button id="deps-rollback" class="sec danger" disabled
+              title="Undo the most recent dnf/yum transaction on this host">Roll back last dependency change</button>
+    </div>
+    <div class="f" id="deps-confirm-wrap" hidden>
+      <label for="deps-confirm">To roll back, type this host's name (<span id="deps-hostname" class="mono"></span>)</label>
+      <input id="deps-confirm" type="text" name="deps-confirm-host"
+             autocomplete="off" autocapitalize="off" spellcheck="false" size="24"
+             placeholder="host name">
+    </div>
+    <div class="status" id="deps-status">Read-only view of this host's tracked dependencies.</div>
   </section>
 
   <section id="panel-update" class="panel" hidden>
@@ -469,6 +522,6 @@
     </div>
   </section>
 
-  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.10.10.20261015</span></footer>
+  <footer id="appfoot" class="muted">cockpit-guac-rdp <span id="appver">1.11.0.20261016</span></footer>
 </body>
 </html>
