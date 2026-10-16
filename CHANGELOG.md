@@ -1,8 +1,4 @@
-## Unreleased - I64 dependency tracking + native-rollback-where-available
-
-On branch `feat/dependency-tracking` (draft PR #42); NOT released. Version numbering is
-deliberately left to whoever merges it, since `main` has moved to 1.10.10 since this
-work was written.
+## 1.11.0.20261016 - 2026-10-16
 
 Adds a new "Dependencies" tab: tracking of this project's own OS prerequisites against a
 full package inventory, an append-only snapshot history across deploys, and native

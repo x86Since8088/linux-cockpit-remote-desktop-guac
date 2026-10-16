@@ -1903,7 +1903,7 @@ pinning the FreeRDP 3 (Janua) guacd does not match how the relay uses it.
 **Hard-coded facts.** The legend names edt1 for the patched gnome-remote-desktop because that patch is
 hand-built and not shipped. If another host gets the patch, derive the label from the I54 self-test instead.
 
-### I64 · Dependency tracking + native-rollback-where-available admin tab · Sev N/A · ON BRANCH `feat/dependency-tracking` (draft PR #42) - NOT in main
+### I64 · Dependency tracking + native-rollback-where-available admin tab · Sev N/A · SHIPPED (1.11.0.20261016)
 Not a bug fix — a new diagnostic/recovery capability, recorded here in the same spirit as I47/I49/I50.
 Tracks this project's own OS prerequisites (the 9-package `requires.txt` set, read from the file — never
 hardcoded separately) TOGETHER with a full installed-package inventory (name/version/arch, every
@@ -2038,3 +2038,12 @@ reviewer-reproduced scenario (a failed `tx_before` reading followed by a success
 returning a pre-existing, unrelated transaction) was reproduced standalone in bash and confirmed fixed;
 every one of the round's fixes was mutation-tested by reverting it individually and confirming the
 corresponding new test fails.
+
+**Residual, accepted (review of PR #42):** `cmd_rollback` reads the newest dnf/yum transaction id,
+compares it with the recorded one, and only then runs `<pm> history undo <id>` as a second call, so a
+transaction that lands in the gap between the two is not caught by that check. The undo still targets
+the recorded id explicitly, so it never reverts the newer transaction itself, and dnf serialises
+transactions under its own lock. Closing the gap would mean holding dnf's lock across both calls, which
+dnf does not expose. Rollback stays manual, admin-gated and typed-hostname-confirmed, which keeps the
+window to an operator racing their own host.
+

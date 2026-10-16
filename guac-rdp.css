@@ -31,7 +31,7 @@ button.danger:not(:disabled) { background:var(--err); color:#fff; border-color:v
 #deskui-state-table td.warn, #update-state-table td.warn { color:var(--err); font-weight:600; }
 
 /* Dependencies panel: same key/value read-out as deskui's state table, plus an
-   expandable "blast radius" row under a tracked package (KNOWN_ISSUES I51). */
+   expandable "blast radius" row under a tracked package (KNOWN_ISSUES I64). */
 #deps-status-table td { padding:.3rem .9rem; border-bottom:1px solid var(--line); }
 #deps-status-table td:first-child { font-weight:600; color:var(--muted); width:14rem; }
 #deps-status-table td.warn, table.sessions td.warn { color:var(--err); font-weight:600; }

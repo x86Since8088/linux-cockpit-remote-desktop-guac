@@ -279,6 +279,7 @@ def handle_control(request, peer_uid, registry, live, is_admin, tokens=None,
                     "detail": "type this host's name (%s) to confirm" % depcheck.hostname}
         ok, detail = depcheck.rollback()
         return {"ok": bool(ok), "detail": detail}
+
     # -- self-update: read cached state, forcing a live check for "update-check" --
     #
     # Read-only, ANY authenticated caller (same trust level as deskui-status):
