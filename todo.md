@@ -6,10 +6,12 @@ and add a line when new open work appears. `docs/KNOWN_ISSUES.md` holds the per-
 do. Memory only points here.
 
 ## Deploy state
-- **edt1 runs 1.11.0.20261016**, deployed 2026-10-16 from `origin/main` 7c26250 (#42, I64 dependency tracking). Check with
-  `cat /opt/cockpit-guac-rdp/payload/VERSION` against `git show origin/main:VERSION`. That deploy pruned
-  `payload-1.10.10.20261015` because payload retention sorted names lexically (fixed by #43, `sort -rV`), so the kept older
-  payload is 1.9.3.20260929 and a rollback to 1.10.10 means redeploying `dedc49b`.
+- **edt1 runs 1.11.1.20261016**, deployed 2026-10-16 from `origin/main` 65bc67c (#44). Check with
+  `cat /opt/cockpit-guac-rdp/payload/VERSION` against `git show origin/main:VERSION`. The kept rollback payload is
+  `payload-1.11.0.20261016` (one step back: `ln -sfn payload-1.11.0.20261016 /opt/cockpit-guac-rdp/payload.new` and the rest
+  of the printed rollback). The 1.11.0 deploy had pruned `payload-1.10.10.20261015` because retention sorted names lexically;
+  #43 fixed that (`sort -rV`) and the 1.11.1 deploy proved it live, keeping 1.11.0 and pruning 1.9.3. A rollback to 1.10.10
+  itself means redeploying `dedc49b`.
 - Everything shipped is on main and live: I59 (#34-#36), I60 Logs… viewer (#37), I61 (#38), I62 (#39), I63 the Architecture tab
   diagram, I64 dependency tracking + native-rollback-where-available (#42; rollback exercised in containers on dnf, apt, pacman
   and zypper).
