@@ -1,3 +1,16 @@
+## 1.11.1.20261016 - 2026-10-16
+
+Patch release for the deploy script only; nothing a session uses changes.
+
+- **Fix (#43): `deploy.sh` keeps the newest previous payload by version, not by spelling.**
+  Retention picked the payload to keep with a plain `sort -r`, which orders names lexically,
+  so `payload-1.9.3…` outranked `payload-1.10.10…`. Deploying 1.11.0.20261016 on edt1
+  therefore deleted `payload-1.10.10.20261015`, the real rollback target, and kept
+  `payload-1.9.3.20260929`. It now uses `sort -rV`, and `deploy_keeps_newest_previous_payload`
+  in the installer tests fails on the old script with exactly that symptom.
+- Deploying this release is what repairs the live rollback posture: the fixed retention keeps
+  1.11.0.20261016 as the rollback target and prunes 1.9.3.20260929.
+
 ## 1.11.0.20261016 - 2026-10-16
 
 Adds a new "Dependencies" tab: tracking of this project's own OS prerequisites against a
