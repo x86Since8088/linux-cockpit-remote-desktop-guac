@@ -27,8 +27,10 @@ protected sessions.
 ```
 
 ### Rendering path: the FreeRDP3 bridge
-guacd's *bundled FreeRDP2* cannot negotiate NLA to grd's 3389 nor RDSTLS to the 3390 greeter
-(KNOWN_ISSUES I26), so the relay does **not** use guacd's RDP client. Instead, per connection it
+The guacd RDP client this design started with (the official image's *bundled FreeRDP 2*) cannot negotiate
+NLA to grd's 3389 nor RDSTLS to the 3390 greeter (KNOWN_ISSUES I26), and an earlier FreeRDP 3 guacd regressed
+3389 rendering (I29). The pinned guacd image is now Janua (FreeRDP 3), but the relay still does **not** use
+guacd's RDP client. Instead, per connection it
 starts a bridge — a vanilla **FreeRDP 3** client (`xfreerdp3`) that speaks to grd and draws into a
 headless **Xvfb**, published by **x11vnc** on a loopback VNC port — and rewrites guacd's connect to
 use guacd's reliable **VNC** client against that port. The VNC leg is password-gated per connection
@@ -54,8 +56,9 @@ ownership and the console-admin gate, adds keepalives, and only then relays to g
   `cockpit-guac-rdp` membership is the coarse gate; SO_PEERCRED is the identity. See
   [GROUP-ACCESS-MODEL.md](GROUP-ACCESS-MODEL.md) for what that gate does and does not grant.
 - **Relay↔guacd:** host loopback, nftables owner-gated to the relay uid; not reachable by other local uids.
-- **guacd↔desktop:** RDP with NLA over TLS for the gnome-remote-desktop doors, or VNC for the
-  Wayland and remote-VNC scenarios. The door key authenticates the RDP transport. On the login
+- **xfreerdp3↔desktop:** RDP with NLA over TLS (RDSTLS for the greeter) to the gnome-remote-desktop doors.
+  **guacd↔desktop:** guacd speaks only VNC: to x11vnc on a loopback port for the RDP scenarios, or directly to
+  the Wayland and remote-VNC servers. The door key authenticates the RDP transport. On the login
   screen, GDM authenticates the person. On an isolated session, the headless unit's PAM login does.
   A remote host uses the credential typed for that host.
 
@@ -84,7 +87,9 @@ resolves each RDP scenario in `_grd_target`. The two VNC scenarios never start a
 ## What is deliberately NOT built
 - No noVNC-to-host-desktop (I14: grd has no VNC).
 - No per-connection credential minted into credentials.ini (I15/I16: no hot reload, single-valued).
-- No client-side-only gate anywhere (I4).
+- No client-side-only gate for the console (I4). The login screen's administrator prompt is page-side only: it
+  exists because reading the door key needs it, and the relay does not require admin for that scenario
+  (GROUP-ACCESS-MODEL.md).
 
 ## Session lifecycle & state authority
 The **relay is the single writer/authority** of the session registry, persisted to
