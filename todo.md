@@ -1,28 +1,26 @@
 # cockpit-guac-rdp: open work
 
-The single list of open work for this repo. Verified 2026-10-15 against `origin/main` (5a04438, 1.10.8.20261003), the live
-payload on edt1 and GitHub, then re-checked by an independent validator. Tick or delete an item in the SAME PR that closes it,
+The single list of open work for this repo. Verified 2026-10-15 against `origin/main` (1.10.10.20261015, the architecture-diagram change
+included), the live payload on edt1 and GitHub, then re-checked by an independent validator. Tick or delete an item in the SAME PR that closes it,
 and add a line when new open work appears. `docs/KNOWN_ISSUES.md` holds the per-issue detail; this file holds what is still to
 do. Memory only points here.
 
 ## Deploy state
-- **edt1 runs 1.10.9.20261003 (deployed 2026-10-03 14:08 CDT); `origin/main` is 1.10.8.20261003.** The only difference from main
-  is an interactive "How a connection reaches a desktop" SVG diagram in `index.html` + `guac-rdp.css` (+300/-11 lines, plus the
-  footer version). It was never committed and no PR ever held it. Every other shipped file in the live payload is byte-identical
-  to main (`diff -r`, 2026-10-15). A snapshot is on **`origin/rescue/arch-diagram-deployed-1.10.9`** (a verbatim copy of the
-  three live files, `run_tests.sh` PASS, no PR). Until it is PR'd or dropped, the next deploy of main removes the diagram from
-  the live page. The only other copy is the live payload directory (the older `payload-1.9.3.20260929` beside it does not have
-  the diagram). See Owner decisions.
-- Everything else shipped is on main and live: I59 (#34-#36), I60 Logs… viewer (#37), I61 (#38), I62 (#39).
+- **edt1 runs the same payload as `origin/main`, 1.10.10.20261015**, from the 2026-10-15 deploy of the architecture-diagram change
+  (I63). Check with `cat /opt/cockpit-guac-rdp/payload/VERSION` against `git show origin/main:VERSION`. The diagram had run on
+  edt1 unreviewed since 2026-10-03 as 1.10.9 and was never committed; it was validated against the code, the docs and the live
+  host before it landed (see KNOWN_ISSUES I63), and the rescue branch was deleted after the merge.
+- Everything shipped is on main and live: I59 (#34-#36), I60 Logs… viewer (#37), I61 (#38), I62 (#39), I63 the Architecture tab
+  diagram.
 
 ## Owner decisions
-- **Architecture diagram**: PR the rescue branch (it needs a version bump above 1.10.8, a CHANGELOG entry and a KNOWN_ISSUES
-  entry) or drop it.
-- **`feat/dependency-tracking`** (the branch the shared checkout sits on; 5 commits of 2026-09-29, tip f50d894, 35 commits behind
-  main; **local only, it has no remote branch, so dropping it deletes the only copy**; no PR): "dependency tracking +
-  native-rollback admin tab". Its issue id **I51 collides with main's I51** (group rename) and its VERSION 1.7.0.20260929 is
-  the exact string main's I49 shipped as, so it needs a renumber and a version bump if revived. Review, then PR or drop. Test
-  its rollback only in a container. With the checkout left on it, read current main with `git show origin/main:<file>`.
+- **`feat/dependency-tracking`** (5 commits of 2026-09-29, tip f50d894, 35 commits behind main; the shared checkout still sits on
+  it): "dependency tracking + native-rollback admin tab". **Fate (owner, 2026-10-15): keep it, never delete it.** It was the only
+  copy, so it is now also pushed to `origin/feat/dependency-tracking` as a backup (no PR). It is still unreviewed and unmerged.
+  Its issue id **I51 collides with main's I51** (group rename) and its VERSION 1.7.0.20260929 is the exact string main's I49
+  shipped as, so it needs a renumber and a version bump if revived. When the owner wants the rollback tab: review, rebase onto
+  main, then PR; test its rollback only in a container. With the checkout left on it, read current main with
+  `git show origin/main:<file>`.
 
 ## Live verification still owed
 - **I60 "Logs…" viewer (#37)**: unit-tested and deployed, but never click-tested in a live Cockpit session (main window or
@@ -52,9 +50,26 @@ do. Memory only points here.
 - **I6**: edt1's RDP :3390 gate credential is stored recoverably. `gnome-remote-desktop` (uid 980) is in no group but its own, `tss`
   is gid 987, and `/dev/tpmrm0` is `tss`-only. Untried fix: add it to `tss`. (Group membership re-checked 2026-10-15; the
   credentials file is root-only and was not re-read.)
-- **I5 register contradiction**: I29 addendum 5 (2026-09-01) reverted the patched `gnome-remote-desktop` to stock, which per I5
-  re-introduces the one-time-credential D-Bus broadcast, yet I54's "grd patch integrity" self-test (2026-09-29) presumes the patch
-  is installed. No re-application is recorded. Check which binary is live (root compare) and make the docs and the self-test agree.
+- **Remote VNC is probably refused for everyone while `EDY_RDP_REMOTE_ADMIN_ONLY=1` (inferred from code, not tested).** The page's
+  `needAdmin = !!t.admin || (key === "remote" && isAdmin)` never asks for administrator proof for `vnc`, but the relay requires
+  it for `remote` and `vnc` when `REMOTE_ADMIN_ONLY` is set. edt1's `.env` sets it to 1, and the relay journal has no
+  `scenario=vnc` line since 2026-09-01, so the path has never run here. Fix: include `vnc` in the page condition, with a test.
+- **wayvnc has no password and no firewall rule on its port.** `waylandvnc/edy-rdp-waylandvnc-start.sh` writes `enable_auth=false`
+  on `127.0.0.1:34000+(uid-1000)`, and the live ruleset has no rule for 34000-34999 (only guacd's 4822 and 33000-33999), so any
+  local user can attach to another user's Wayland desktop. Code-derived; no Wayland session was running to observe the listener.
+  Idea: extend the loopback/owner rule to 34000-34999 and/or enable wayvnc auth.
+- **The guacd owner gate is fail-open at the unit level.** `edy-rdp-firewall.service` is ordered before guacd, but
+  `edy-rdp-guacd.service` does not `Require=` it, and the firewall unit's ExecStop deletes both tables, so guacd can run
+  with no owner-match if the firewall unit is stopped or fails.
+- **Why the FreeRDP 3 (Janua) guacd is pinned.** `requires.txt` justifies it by the 3390 RDSTLS greeter, yet on every path the
+  Architecture tab draws the relay rewrites guacd's connect to VNC against x11vnc and never uses guacd's RDP client. Either the
+  pin is unnecessary for those paths or another reason is unrecorded.
+- **I5 status.** Its heading still reads OPEN, but I29 addendum 4 says the patch also carries the I5 fix and addendum 6 records
+  that the patched daemon is live (verified 2026-10-15). Re-verify I5 live and update its status.
+- **Root leftover**: `/usr/libexec/gnome-remote-desktop-daemon.bak-20260909-152628` is byte-identical to `.orig-edt1` (both the
+  stock package file): redundant, a root/owner decision.
+- **The diagram's amber label is static text** that names edt1 (the patch is hand-built and not shipped). If another host gets the
+  patch, derive the label from the I54 "grd patch integrity" self-test instead.
 - **Docs: KNOWN_ISSUES statuses.** I43 still reads OPEN (reclaim procedure) but the live state is clean (2026-10-15: payload ->
   payload-1.10.9.20261003, every page and libexec link resolves into it, no regular file directly under
   `/usr/share/cockpit/guac-rdp`); flip it to RESOLVED with the date. Still genuinely open and deferred: **I46** (numpad

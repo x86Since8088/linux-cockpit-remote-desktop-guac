@@ -422,7 +422,7 @@ locally needs its own XDG_RUNTIME_DIR/bus (separate compositor namespace) — no
 current safe behavior. LESSON: never signal by process NAME for a shared-uid resource; never reap logind
 sessions without checking Seat + Class.
 
-### I29 addendum 5 (2026-09-01) — patched daemon REVERTED to stock (user request)
+### I29 addendum 5 (2026-09-01) — patched daemon REVERTED to stock (user request) — SUPERSEDED by addendum 6 (2026-09-09)
 The locally-built grd daemon (method-call handover patch + audit hardening, sha `5c08514e…`) was removed
 and the STOCK package binary restored (sha `c117146f…`, dpkg-verified clean); the
 `org.gnome.RemoteDesktop.handover.conf` drop-in was removed (bus policy reloaded) and the apt hold on
@@ -433,6 +433,18 @@ ORIGINAL "TakeClientReady never delivered" symptom was almost certainly caused b
 drop-in (now gone), so stock grd with NO drop-in may in fact hand over correctly — UNTESTED; verify with a
 single careful native-client connect if the greeter is wanted (mind I31 disconnect-crash churn). The
 rdplogin door credential + rotation timer remain in place and are harmless either way.
+
+### I29 addendum 6 (2026-09-09) — method-call patch RE-DEPLOYED on edt1; addendum 5 is superseded
+The method-call handover daemon (`patches/grd-handover-method-call.patch`, sha `5c08514e…`) was installed
+again on 2026-09-09 (CHANGELOG 1.1.4.20260909, `patches/README.md`): stock backed up to `.orig-edt1` and
+the package put on `apt-mark hold`. **Verified live 2026-10-15:** `dpkg -V gnome-remote-desktop` flags only
+`/usr/libexec/gnome-remote-desktop-daemon` as modified, `apt-mark showhold` lists the package, and both
+running daemons (`--system` on 3390 and the user daemon on 3389) execute that sha. The patch edits only
+`src/grd-daemon-system.c` and `src/grd-daemon-handover.c`, so it is exercised on the login-screen path; the
+same file also serves 3389 and `--headless`, where it is not used. Addendum 5's "REVERTED to stock" and the
+line "The 3390 greeter remains OPEN upstream; the plugin no longer uses it" earlier in I29 are historical.
+The patch is hand-built and not shipped (`deploy.sh` does not ship `patches/`), so another host runs the
+stock package; the Architecture tab's amber label names edt1 for that reason.
 
 ## Security gates hardening (2026-09-01, FreeRDP3-bridge architecture)
 
@@ -1871,3 +1883,22 @@ restart performed, and grd attaches it to the desktop that already exists. A sec
 before that connection has been up for 15 seconds does not chain. Sound and resolution
 reconnects disarm the follow so they do not double-connect. `shouldFollowGreeterDrop`
 is covered by `tests/js/greeter_follow.test.js`.
+
+### I63 · New capability: interactive path diagram on the Architecture tab · Sev N/A · SHIPPED (1.10.10.20261015)
+The Architecture tab replaces its text block with an SVG that follows one connection from this page to the
+desktop, for each of the seven session types (radio buttons), with a legend (code in this plugin / not changed
+by this plugin / gnome-remote-desktop as rebuilt on edt1) and one caption per type. Presentation only: no
+relay, bridge or unit change.
+
+**History.** It was deployed to edt1 on 2026-10-03 14:08 as 1.10.9.20261003 and never committed; the live
+payload directory was the only copy until 2026-10-15, when the live payload was compared with `origin/main`.
+It was validated the same day against the current code, docs and live host (three investigators, then two
+independent validators) before landing, and the statements that were wrong or misleading were corrected: see
+the 1.10.10.20261015 CHANGELOG entry. The validation also found problems that are NOT in the diagram and are
+tracked in `todo.md`: Remote VNC is probably refused for everyone when `EDY_RDP_REMOTE_ADMIN_ONLY=1` (the page
+never asks for administrator proof for `vnc`), wayvnc runs with no password and no firewall rule on its port,
+guacd is ordered after the firewall unit but does not require it (so the owner gate can be absent), and the reason recorded for
+pinning the FreeRDP 3 (Janua) guacd does not match how the relay uses it.
+
+**Hard-coded facts.** The legend names edt1 for the patched gnome-remote-desktop because that patch is
+hand-built and not shipped. If another host gets the patch, derive the label from the I54 self-test instead.

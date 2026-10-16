@@ -1,3 +1,36 @@
+## 1.10.10.20261015 - 2026-10-15
+
+The Architecture tab shows the path from this page to the desktop as an interactive
+picture instead of a text block (I63). Pick one of the seven session types and the
+path, the ports and the programs involved light up. The legend separates code in this
+plugin, programs it does not change, and the gnome-remote-desktop that was rebuilt by
+hand on edt1.
+
+The diagram ran on edt1 from 2026-10-03 as 1.10.9 without ever being committed. It was
+validated on 2026-10-15 against the current code, the docs and the live host before it
+landed, and the validation corrected what it said:
+
+- guacd is a third-party build (Janua, pinned by digest), not an unmodified program. The
+  firewall rule lets the relay's user and root open it, and it covers only guacd's port
+  and the isolated ports 33000-33999, not 3389/3390 (I7) or the Wayland ports.
+- The relay requires administrator mode only for Console, and for remote hosts when
+  `EDY_RDP_REMOTE_ADMIN_ONLY=1`. It does not require it for the login screen.
+- The patched gnome-remote-desktop label names edt1 and the login-screen path: the patch
+  is hand-built, is not shipped, and is not used by the 3389 and headless daemons.
+- The login-screen desktop has no seat. Isolated is refused while you are signed in at
+  the machine, and only for uids 1000 to 1999. The Wayland desktop has no password. The
+  allow-list matches host and port. The remote certificate is pinned only until reboot.
+  Idle desktops are reaped after about 15 minutes, an unused greeter after about one.
+- Layout: one shared slot for wayvnc and their VNC server, the x11vnc/Xvfb/xfreerdp3 order,
+  wires that end at the boxes they point at, animations that stop on dimmed nodes, a
+  readable accent in dark mode, and a keyboard-reachable scroll area.
+
+Documentation corrected in the same change: KNOWN_ISSUES I29 addendum 6 (the grd patch
+was re-deployed on 2026-09-09 and is live), ARCHITECTURE.md (why the bridge exists, which
+leg speaks RDP and which VNC, the client-side administrator prompt) and SCENARIOS.md
+(seven scenarios). `manifest.json`'s version is brought back in line with `VERSION`.
+Presentation only: no relay, bridge or unit change.
+
 ## 1.10.8.20261003 - 2026-10-03
 
 When the sign-in connection drops on its own after a GDM login, the page reconnects
