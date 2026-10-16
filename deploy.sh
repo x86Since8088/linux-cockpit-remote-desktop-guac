@@ -635,7 +635,11 @@ do_deploy() {
 
     STEP="pruning old payloads"
     local p keepers
-    mapfile -t keepers < <(ls -1d "$ROOT_D"/payload-* 2>/dev/null | grep -v "payload-$VERSION\$" | sort -r)
+    # Newest by VERSION, not by spelling: plain sort -r ranks payload-1.9.3
+    # above payload-1.10.10 (the '9' outsorts the '1'), so crossing a digit
+    # boundary deleted the real rollback target and kept a stale one -- it did,
+    # live on edt1, deploying 1.11.0.20261016 over 1.10.10.
+    mapfile -t keepers < <(ls -1d "$ROOT_D"/payload-* 2>/dev/null | grep -v "payload-$VERSION\$" | sort -rV)
     for p in "${keepers[@]:$KEEP}"; do [[ -n "$p" ]] && remove_old_payload "$p"; done
 
     if ((WITH_UNITS)) && [[ -z "$D" ]]; then

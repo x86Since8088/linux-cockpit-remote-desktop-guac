@@ -910,6 +910,27 @@ deploy_ensure_shadow_group() {
 
 # ---------------------------------------------------------------------------
 # Order matters: 2, 3, 8 and 9 read the tree test 1 installs.
+
+# deploy.sh keeps the KEEP newest PREVIOUS payloads so that the printed
+# rollback (`ln -sfn payload-<older> ...`) has a target. "Newest" must be by
+# version, not by spelling: sort -r ranked payload-1.9.3 above payload-1.10.10,
+# so crossing from 1.9 to 1.10 deleted the real rollback target and kept a
+# stale one. That happened live on edt1 deploying 1.11.0.20261016.
+deploy_keeps_newest_previous_payload() {
+    local T="$TMP/deploy-retain" out rc root bad=0
+    fresh_tree "$T"; root="$T/root/opt/$PROJECT"
+    mkdir -p "$root/payload-1.9.3.20260929" "$root/payload-1.10.10.20261015"
+    out="$(DESTDIR="$T/root" "$T/src/deploy.sh" 2>&1)"; rc=$?
+    (( rc == 0 )) || { echo "deploy.sh exited $rc:"; grep -E '^(FATAL|  FAIL|DEPLOY)' <<<"$out" | head -n 8; return 1; }
+    [[ -d "$root/payload-1.10.10.20261015" ]] \
+        || { echo "the version-newest previous payload (1.10.10) was removed: rollback target lost"; bad=1; }
+    [[ ! -e "$root/payload-1.9.3.20260929" ]] \
+        || { echo "the OLDER payload (1.9.3) was kept instead of the newer one (KEEP=1)"; bad=1; }
+    [[ "$(readlink -- "$root/payload")" == "payload-$WANT_VERSION" ]] \
+        || { echo "payload alias is '$(readlink -- "$root/payload" 2>&1)', want payload-$WANT_VERSION"; bad=1; }
+    return $bad
+}
+
 for t in installer_staged_install_completes \
          installer_staged_verify_passes \
          env_place_missing_env \
@@ -928,6 +949,7 @@ for t in installer_staged_install_completes \
          pulse_bind_reentrant_read_does_not_delete_its_own_resolution \
          deploy_staged_completes_and_verifies \
          deploy_refuses_stale_env_before_swap \
+         deploy_keeps_newest_previous_payload \
          shell_syntax \
          deploy_migrate_shadow_group_rename \
          deploy_migrate_pulse_auto_defaults \
