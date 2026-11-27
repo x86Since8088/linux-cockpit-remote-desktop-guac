@@ -39,10 +39,11 @@ const block = SRC.slice(beginIdx, endIdx);
 // keysyms this block sends and in what order, not that wiring again.
 function makeSandbox() {
     const calls = [];
-    const sendGuestKeyEvent = (down, ks) => calls.push([down ? 'down' : 'up', ks]);
+    const shifts = [];   // the forceShift argument of each call (I65), parallel to calls
+    const sendGuestKeyEvent = (down, ks, sh) => { calls.push([down ? 'down' : 'up', ks]); shifts.push(sh); };
     const ctx = vm.createContext({ sendGuestKeyEvent });
     vm.runInContext(block, ctx);
-    return { ctx, calls };
+    return { ctx, calls, shifts };
 }
 
 function tap(ks) { return [['down', ks], ['up', ks]]; }
@@ -191,4 +192,114 @@ test('typeTextIntoSession: mixed multi-line, multi-script text end to end', () =
         ...tap(0xFF0D),
         ...tap(0x01004E2D), ...tap(0x01006587),
     ]);
+});
+
+// ---- I65: letter case. Injected text has no physical Shift, and x11vnc
+// -nomodtweak presses the lowest-level keycode with whatever modifiers the
+// client holds, so 'A' arrived as 'a'. The block now passes the wanted Shift
+// state to sendGuestKeyEvent; the second half drives the REAL
+// sendGuestKeyEvent (KEYREMAP block) and checks the wire events.
+
+test('letterShift: upper-case letters need Shift, lower-case must not, others untouched', () => {
+    const s = makeSandbox();
+    for (const c of 'ABCXYZ') assert.strictEqual(s.ctx.letterShift(c.codePointAt(0)), true, c);
+    for (const c of 'abcxyz') assert.strictEqual(s.ctx.letterShift(c.codePointAt(0)), false, c);
+    for (const c of 'ÀÉÖØÞÅ') assert.strictEqual(s.ctx.letterShift(c.codePointAt(0)), true, c);
+    for (const c of 'àéöøþßÿå') assert.strictEqual(s.ctx.letterShift(c.codePointAt(0)), false, c);
+    assert.strictEqual(s.ctx.letterShift(0xD7), undefined, 'multiplication sign');
+    assert.strictEqual(s.ctx.letterShift(0xF7), undefined, 'division sign');
+    for (const c of '0123456789 !"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') {
+        assert.strictEqual(s.ctx.letterShift(c.codePointAt(0)), undefined, JSON.stringify(c));
+    }
+    assert.strictEqual(s.ctx.letterShift(0x0A), undefined);
+    assert.strictEqual(s.ctx.letterShift(0x4E2D), undefined, 'caseless CJK');
+    assert.strictEqual(s.ctx.letterShift(0x20AC), undefined, 'euro sign');
+    assert.strictEqual(s.ctx.letterShift(0x1F600), undefined, 'emoji');
+    assert.strictEqual(s.ctx.letterShift(0x0416), undefined, 'above Latin-1: keysym carries the case itself');
+    assert.strictEqual(s.ctx.letterShift(0x0436), undefined);
+});
+
+test('typeTextIntoSession: passes the wanted Shift state with every letter press AND release', () => {
+    const s = makeSandbox();
+    s.ctx.typeTextIntoSession('Hi!');
+    assert.deepStrictEqual(s.shifts, [true, true, false, false, undefined, undefined]);
+});
+
+// Real sendGuestKeyEvent + injected block, wire-level.
+function makeWire() {
+    const rm = fs.readFileSync(path.join(__dirname, '..', '..', 'guac-rdp.js'), 'utf8');
+    const a = rm.indexOf('// TESTHOOK:KEYREMAP:BEGIN'), b = rm.indexOf('// TESTHOOK:KEYREMAP:END');
+    assert.ok(a !== -1 && b > a);
+    const wire = [];
+    const pressed = {};
+    const ctx = vm.createContext({
+        client: { sendKeyEvent(d, ks) { wire.push([d, ks]); } },
+        keyboard: { pressed }, navigator: { platform: '', userAgent: '' },
+    });
+    vm.runInContext(rm.slice(a, b), ctx);
+    vm.runInContext(block, ctx);
+    return { ctx, wire, pressed };
+}
+const SHIFT = 0xFFE1;
+const wireTap = (ks) => [[1, ks], [0, ks]];
+
+test('wire: an upper-case letter is typed with Shift held, then Shift released', () => {
+    const w = makeWire();
+    w.ctx.typeTextIntoSession('H');
+    assert.deepStrictEqual(w.wire, [[1, SHIFT], [1, 0x48], [0, 0x48], [0, SHIFT]]);
+});
+
+test('wire: "Hello World" -- Shift brackets exactly the capitals, lower-case gets none', () => {
+    const w = makeWire();
+    w.ctx.typeTextIntoSession('Hello World');
+    const exp = [];
+    for (const c of 'Hello World') {
+        const ks = c.codePointAt(0);
+        if (c >= 'A' && c <= 'Z') exp.push([1, SHIFT], ...wireTap(ks), [0, SHIFT]);
+        else exp.push(...wireTap(ks));
+    }
+    assert.deepStrictEqual(w.wire, exp);
+});
+
+test('wire: upper-case while the user physically holds Shift -> no extra Shift traffic', () => {
+    const w = makeWire();
+    w.pressed[SHIFT] = true;
+    w.ctx.typeTextIntoSession('H');
+    assert.deepStrictEqual(w.wire, wireTap(0x48));
+});
+
+test('wire: lower-case while the user physically holds Shift -> Shift released around the key, then restored', () => {
+    const w = makeWire();
+    w.pressed[SHIFT] = true;
+    w.ctx.typeTextIntoSession('h');
+    assert.deepStrictEqual(w.wire, [[0, SHIFT], [1, 0x68], [0, 0x68], [1, SHIFT]]);
+});
+
+test('wire: punctuation/digits keep the I45 behaviour (table-driven, unchanged by I65)', () => {
+    const w = makeWire();
+    w.ctx.typeTextIntoSession('1(,');
+    assert.deepStrictEqual(w.wire, [
+        ...wireTap(0x31),
+        [1, SHIFT], ...wireTap(0x39), [0, SHIFT],     // '(' -> Shift+9
+        ...wireTap(0x2c),
+    ]);
+    const w2 = makeWire(); w2.pressed[SHIFT] = true;
+    w2.ctx.typeTextIntoSession('1');
+    assert.deepStrictEqual(w2.wire, [[0, SHIFT], ...wireTap(0x31), [1, SHIFT]]);
+});
+
+test('wire: Latin-1 upper-case is Shifted, lower-case is not; control keys untouched', () => {
+    const w = makeWire();
+    w.ctx.typeTextIntoSession('Éé\t');
+    assert.deepStrictEqual(w.wire, [[1, SHIFT], ...wireTap(0xC9), [0, SHIFT], ...wireTap(0xE9), ...wireTap(0xFF09)]);
+});
+
+test('wire: injected typing never touches keyboard.pressed and leaves no stale shiftAdjust', () => {
+    const w = makeWire();
+    w.ctx.typeTextIntoSession('AbC(');
+    assert.deepStrictEqual(Object.keys(w.pressed), []);
+    // a second run from a clean state must behave identically (no leaked entries)
+    const first = w.wire.slice(); w.wire.length = 0;
+    w.ctx.typeTextIntoSession('AbC(');
+    assert.deepStrictEqual(w.wire, first);
 });

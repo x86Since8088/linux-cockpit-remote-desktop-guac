@@ -1,3 +1,16 @@
+## 1.11.2.20261127 - 2026-11-27
+
+- **Fix (I65): "Type Clipboard" sent only lower-case letters.** "Hello World" arrived as
+  "hello world". The bridge's `x11vnc -nomodtweak` presses the lowest-shift-level keycode
+  for a keysym with whatever modifiers the client holds, and an injected keystroke holds
+  none, so the keysym `A` became the unshifted `a` key. The I45 Shift table exempts
+  letters because a physical Shift normally supplies the case. Injected text now passes
+  the wanted Shift state to `sendGuestKeyEvent` (new optional third argument): upper-case
+  ASCII/Latin-1 letters get Shift, lower-case ones get Shift released even if the user is
+  physically holding it, and the user's real Shift is restored afterwards. Punctuation and
+  digits keep the I45 behaviour. Real keystrokes are unchanged. Tests extended; verified
+  against Xvfb + `x11vnc -nomodtweak`. Static files only; no bridge or relay change.
+
 ## 1.11.1.20261016 - 2026-10-16
 
 Patch release for the deploy script only; nothing a session uses changes.

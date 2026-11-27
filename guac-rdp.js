@@ -203,8 +203,12 @@
     // sidesteps that whole path: instead of asking the guest to receive a
     // clipboard update, it TYPES the local clipboard's text into the session one
     // keysym at a time over the same key-event channel real keystrokes already
-    // use reliably (sendGuestKeyEvent, with its existing KEYCODE_FIX/SHIFT_LEVEL
-    // corrections applying identically to typed characters).
+    // use reliably (sendGuestKeyEvent). Its KEYCODE_FIX/SHIFT_LEVEL corrections
+    // (I45) apply to typed punctuation/digits; LETTERS are handled here instead
+    // (I65): the I45 table exempts letters because a physical keyboard's own
+    // Shift already makes them the right case, but an injected keystroke has no
+    // physical Shift, so typeOneCodePoint passes the wanted Shift state
+    // explicitly (sendGuestKeyEvent's third argument).
     //
     // Character -> keysym mirrors the vendored Guacamole.Keyboard's own (unused
     // here) codepoint-to-keysym function EXACTLY -- extracted from
@@ -253,14 +257,42 @@
     // adversarial review, which also found it can permanently kill a real
     // key's auto-repeat-to-guest stream even with no keysym collision at all,
     // via the same shared timer. sendGuestKeyEvent(down, ks) called directly
-    // -- exactly what the existing one-shot sendKeysymTap() helper already
-    // does -- never touches keyboard.pressed or its repeat timers, so injected
+    // -- the same direct-injection approach the one-shot sendKeysymTap() helper
+    // uses -- never touches keyboard.pressed or its repeat timers, so injected
     // typing cannot desync from concurrent real physical typing, while still
     // getting the same KEYCODE_FIX/SHIFT_LEVEL corrections (I45).
+    //
+    // Case (I65): x11vnc -nomodtweak resolves a keysym to the lowest-shift-level
+    // keycode and presses it with whatever modifiers the client holds, so the
+    // keysym 'A' arrives as the unshifted 'a' key -> "a". Real typing gets its
+    // case from the physical Shift; injected text has none. letterShift() says
+    // what Shift state a character needs: true for an upper-case letter, false
+    // for a lower-case one, undefined for everything else (digits/punctuation
+    // keep the I45 SHIFT_LEVEL table, controls are untouched). It is passed to
+    // sendGuestKeyEvent, which then forces Shift ON/OFF around the key regardless
+    // of the user's real Shift, and restores the real state afterwards with the
+    // same shiftAdjust bookkeeping I45 uses. Covers ASCII and Latin-1 letters
+    // (A-Z, U+00C0-DE except the multiplication sign; a-z, U+00DF-FF except
+    // the division sign). Letters above Latin-1 are deliberately NOT touched:
+    // x11vnc -add_keysyms gives them a keycode of their own whose columns all
+    // carry the exact keysym, so the case already survives (verified under
+    // Xvfb + x11vnc -nomodtweak, I65) and an extra Shift is not needed there.
+    // Caps Lock on the GUEST inverts the result (Shift+key under Caps Lock is
+    // lower case) -- deliberately not compensated: the guest's lock state is
+    // not observable from here.
+    function letterShift(cp) {
+        if (cp < 0x41 || cp > 0xFF || cp === 0xD7 || cp === 0xF7) return undefined;
+        var ch = String.fromCodePoint(cp), lo = ch.toLowerCase(), up = ch.toUpperCase();
+        if (lo !== ch && up === ch) return true;     // upper-case letter
+        if (up !== ch && lo === ch) return false;    // lower-case letter
+        if (cp === 0xDF) return false;               // sharp s: upper form is "SS", still a lower-case key
+        return undefined;
+    }
     function typeOneCodePoint(cp) {
         var ks = keysymForCodePoint(cp);
-        sendGuestKeyEvent(true, ks);
-        sendGuestKeyEvent(false, ks);
+        var sh = letterShift(cp);
+        sendGuestKeyEvent(true, ks, sh);
+        sendGuestKeyEvent(false, ks, sh);
     }
     function typeTextIntoSession(text) {
         var i = 0, n = 0;
@@ -569,7 +601,12 @@
         return !!(keyboard && keyboard.pressed &&
                   (keyboard.pressed[GUAC_SHIFT_L] || keyboard.pressed[GUAC_SHIFT_R]));
     }
-    function sendGuestKeyEvent(down, ks) {
+    // forceShift (optional boolean, injected text only -- see letterShift, I65):
+    // the Shift state this keysym needs, overriding the SHIFT_LEVEL lookup so
+    // letters (which SHIFT_LEVEL exempts) can be corrected independent of the
+    // user's real Shift. Ignored for KEYCODE_FIX keysyms. Real keystrokes never
+    // pass it.
+    function sendGuestKeyEvent(down, ks, forceShift) {
         if (!client) return;
         var target = KEYCODE_FIX[ks];
         var needsShift;
@@ -581,7 +618,7 @@
             needsShift = true;
         } else {
             target = ks;
-            needsShift = SHIFT_LEVEL[ks];
+            needsShift = (typeof forceShift === "boolean") ? forceShift : SHIFT_LEVEL[ks];
         }
         if (needsShift === undefined) { client.sendKeyEvent(down ? 1 : 0, remapKeysym(ks)); return; }
         if (down) {
