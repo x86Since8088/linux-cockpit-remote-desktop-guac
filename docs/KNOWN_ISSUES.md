@@ -2050,15 +2050,18 @@ window to an operator racing their own host.
 ### I65 · wayvnc (Wayland VNC scenario) has no authentication and no firewall rule · Sev M · FIXED (1.11.2.20261127)
 `waylandvnc/edy-rdp-waylandvnc-start.sh` starts wayvnc with `enable_auth=false` on
 `127.0.0.1:34000+(uid-1000)`; the `edy_rdp_guacd` table gated only 4822, so any local uid could attach to another
-user's Wayland desktop. Code-derived, not observed. Fix: the guacd table's output chain accepts
-`127.0.0.1:34000-34999` only from `skuid 0` and drops the rest. Why uid 0 only: guacd runs in a rootful podman
-container on the host network, so its connections carry skuid 0 (the same reason 0 is in the 4822 set); the relay only
-hands guacd the target. The owning uid is not allowed (nft has no per-port uid arithmetic, and the owner has no reason
-to dial its own wayvnc). wayvnc auth was NOT added: it needs per-session credentials and guacd support for wayvnc's
-auth types, neither verified, and the kernel gate already closes the hole. Known cost: any other local process that
-listens on a port in 34000-34999 becomes unreachable for non-root clients; `ip_local_reserved_ports` now reserves the
-range so new listeners avoid it, but a listener already bound there (e.g. a CLI that picked an ephemeral port) stays
-affected until it rebinds. Tests: `tests/headless_nft_test.sh` (static + netns kernel check, with a mutation).
+user's Wayland desktop. Code-derived, not observed. Fix: a set `wayvnc_ports` in that table; `ip daddr 127.0.0.1 tcp
+dport @wayvnc_ports` is accepted only for `skuid 0` and dropped otherwise. Only ports with a session are in the set,
+so unrelated listeners inside 34000-34999 (edt1 has two ephemeral `claude` listeners there) are unaffected. The set is
+maintained by `edy-rdp-wlvnc-gate` (add before wayvnc listens, del on stop) and rebuilt from the session directories
+under `/run/edy-rdp/waylandvnc/` in the same nft transaction whenever `edy-rdp-firewall.service` starts or reloads.
+Why uid 0 only: guacd runs in a rootful podman container on the host network, so its connections carry skuid 0 (the
+same reason 0 is in the 4822 set); the relay only hands guacd the target. The owning uid is not allowed (no per-port
+uid arithmetic in nft, no need). IPv6: wayvnc is configured `address=127.0.0.1`, so nothing listens on ::1 and no
+v6 rule exists (a `::ffff:127.0.0.1` connect is IPv4 on the wire and matched). wayvnc auth was NOT added: it needs
+per-session credentials and guacd support for wayvnc's auth types, neither verified. The range is also reserved in
+`ip_local_reserved_ports`. Tests: `tests/headless_nft_test.sh` (static, plus a netns kernel check through the real
+helper with a mutation); a systemd container showed reload and restart re-add the ports atomically.
 
 ### I66 · The guacd owner gate was fail-open at the unit level · Sev M · FIXED (1.11.2.20261127)
 `edy-rdp-guacd.service` was only ordered After the firewall unit, and the firewall unit's ExecStop deletes both

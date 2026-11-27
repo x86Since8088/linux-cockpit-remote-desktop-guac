@@ -31,7 +31,6 @@ do. Memory only points here.
   hold in a real browser: Chromium passes user activation to a window opened by `window.open()` from a click, and may start a
   context on the next audio source once activation exists. Reproduce in a pop-out first; the likely fix is to resume on the
   first pointer/key event in the document.
-- **After deploying 1.11.2 (I65): check for local listeners in 34000-34999.** The new owner gate drops non-root loopback connections to that range. On edt1 two `claude` processes listen on 127.0.0.1:34129 and :34809 today (ephemeral ports); after the firewall reload their non-root clients cannot reach them until they rebind (the range is now reserved, so new ones avoid it). Confirm nothing important breaks.
 - **I44 (+ D-10)**: `~/.config/pipewire/pipewire-pulse.conf.d/20-edy-tcp.conf` (dated Sep 13) is still present and
   `127.0.0.1:4713` (anonymous) is listening, so the I54 self-test "No anonymous PulseAudio TCP (4713)" fails on edt1 today.
   Confirm nothing relies on the TCP listener (audio capture binds the sink-monitor over the unix socket, see I42/I59), then

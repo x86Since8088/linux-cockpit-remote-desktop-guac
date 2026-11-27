@@ -5,9 +5,14 @@ first; none was reproduced live (no Wayland session or loginctl failure was avai
 
 - **Fix (I65): the per-user wayvnc listener is no longer open to every local uid.** wayvnc runs with
   `enable_auth=false` on `127.0.0.1:34000+(uid-1000)` and no firewall rule covered it. `hardening/edy-rdp-guacd.nft`
-  now accepts connections to 127.0.0.1:34000-34999 only from `skuid 0` (guacd's rootful container; the relay never
-  dials it) and drops the rest, and the sysctl drop-in reserves 34000-34999 from the ephemeral allocator so an
-  unrelated local listener is not handed a port the rule would make unreachable. wayvnc's own auth was not enabled.
+  now has a set `wayvnc_ports`: loopback connections to a port IN THE SET are accepted only from `skuid 0` (guacd's
+  rootful container; the relay never dials wayvnc) and dropped otherwise. Only ports where a session exists are gated,
+  so existing listeners elsewhere (including inside 34000-34999) are unaffected. New helper
+  `edy-rdp-wlvnc-gate` (the one copy of the uid -> port formula): the start script adds the port BEFORE wayvnc listens
+  (and refuses to start wayvnc if it cannot), the stop script removes it, and `edy-rdp-firewall.service` (now
+  rendered from a `.in`) loads the guacd table through `edy-rdp-wlvnc-gate load` on start and reload, which re-adds
+  every existing session's port in the SAME nft transaction (no window). IPv4 only: wayvnc is bound to 127.0.0.1.
+  The sysctl drop-in also reserves 34000-34999 from the ephemeral allocator. wayvnc's own auth was not enabled.
 - **Fix (I66): guacd can no longer run without the firewall unit.** `edy-rdp-guacd.service` now has
   `Requires=` + `After=edy-rdp-firewall.service` (and `edy-rdp-waylandvnc@.service` likewise). A stopped or failed
   firewall unit stops/refuses guacd; a firewall restart stops guacd first, deletes and re-adds the tables, then
@@ -20,7 +25,6 @@ first; none was reproduced live (no Wayland session or loginctl failure was avai
 - **Fix (I68): Remote VNC now asks for administrator proof** when the Cockpit session is elevated, like Remote RDP,
   so it works under `EDY_RDP_REMOTE_ADMIN_ONLY=1`.
 - Deploying: a plain `deploy.sh` is enough (it re-renders the units, daemon-reloads and reloads the firewall unit).
-  See I65 for one side effect on existing local listeners in 34000-34999.
 
 ## 1.11.1.20261016 - 2026-10-16
 

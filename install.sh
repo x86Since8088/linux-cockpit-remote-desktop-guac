@@ -58,6 +58,7 @@ LIBEXEC=(relay/edy_rdp_relay.py:edy_rdp_relay.py
          headless/edy-rdp-headless-stop.sh:edy-rdp-headless-stop
          waylandvnc/edy-rdp-waylandvnc-start.sh:edy-rdp-waylandvnc-start
          waylandvnc/edy-rdp-waylandvnc-stop.sh:edy-rdp-waylandvnc-stop
+         waylandvnc/edy-rdp-wlvnc-gate.sh:edy-rdp-wlvnc-gate
          unlock/edy-rdp-unlock.sh:edy-rdp-unlock
          deskui/edy-rdp-deskui.sh:edy-rdp-deskui
          rotate/edy-rdp-rotate-rdplogin.sh:edy-rdp-rotate-rdplogin
