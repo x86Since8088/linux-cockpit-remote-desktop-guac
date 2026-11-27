@@ -399,7 +399,7 @@ client still sends `rdpcred`, verify with a hand-built connect, then delete the 
 `bridge/edy-rdp-bridge-start.sh`: `umask 077` after `set -uo pipefail` (covers `.env`,
 `.rdplog`, `.krblog`, `.krb5.conf`); delete the `chgrp`+`chmod 0640` at :187 and the `chgrp` at
 :146 (`mktemp` is already 0600; the relay is the file owner and sole reader, `bridge.py` :151);
-`Xvfb … -nolisten tcp -nolisten local` (kills the abstract socket; x11vnc/xfreerdp3 keep the
+`Xvfb … -nolisten tcp -nolisten local` (**done in 1.11.5, I81, plus a per-session `-auth` cookie**; kills the abstract socket; x11vnc/xfreerdp3 keep the
 filesystem socket inside the unit's `PrivateTmp`). `headless/edy-rdp-headless-start.sh`:
 `install -o edy-relay -m 0600` for `<uid>.env/.desktop/.err`. `bridge.py stop_bridge` and the
 script's cleanup trap unlink `*.krblog`. wayvnc: a per-connection password like the bridge, or

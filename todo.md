@@ -25,8 +25,8 @@ do. Memory only points here.
   "live verification pending". An audible end-to-end check by the owner has never been recorded. See the pop-out autoplay item.
 
 ## Open code follow-ups
-- **Clipboard page fixes (I70-I78, 1.11.4.20261127) are not deployed or live-verified in a real Cockpit session.** Owed: confirm the
-  relay forwards `clipboard-encoding` to guacd (relay-side PR), tick/untick the Clipboard box per scenario and check it is
+- **Clipboard page fixes (I70-I78, 1.11.6.20261127) are not deployed or live-verified in a real Cockpit session.** Owed: confirm
+  `clipboard-encoding=UTF-8` reaches guacd for wayland-vnc through the relay allow-list (I82), tick/untick the Clipboard box per scenario and check it is
   remembered, and measure the live x11vnc keysym pool (17 assumed; 14 in the Alpine harness). Caps Lock compensation (I78) is
   deliberately not built.
 - **Sound may stay silent in a pop-out (hypothesis from code, not reproduced).** In this plugin's code, `applySoundGate()` is the
@@ -65,11 +65,18 @@ do. Memory only points here.
   unless `E2E_DIR` has `node_modules`.
 
 ## Unbuilt directives and upstream bugs
+- **guacd/libvncclient aborts on a guest clipboard over 1 MiB (I84)**: patch or upgrade libvncclient in the guacd image (Janua pin in
+  requires.txt) so an oversize cut text is dropped instead of ending the session; repro is 1,048,577 bytes on the guest clipboard.
+- **Bridge X authority follow-ups (I81)**: wayvnc (I66) still has no auth of its own; add `xauth` to requires.txt if a distro's
+  xvfb package does not pull it in.
 - **Defence layer**: designed (`docs/DEFENSE-LAYER.md`, "DESIGN, not deployed", written against v1.3.2), not built. KNOWN_ISSUES
   I1/I2 read `OPEN→(design closes)`; I5, I6, I7 and I13 are plain OPEN (I3 and I4 are closed in their addenda; I26 was
   re-attributed and I29 resolved the isolated path). Its section 4 lists 13 defects D-1..D-13 present at v1.3.2, and only D-10
   (I44) is tracked in KNOWN_ISSUES: triage the rest.
-- **Client-to-server clipboard drops are an upstream guacd/x11vnc bug** (root-caused 2026-09-28; I58 records it as upstream in
+- **Client-to-server clipboard drops happen inside x11vnc (I83, corrected 2026-11-27)**: the clipboard DOES reach the relay and guacd
+  (`up={blob,clipboard,end}` in the 1.11.x journal); x11vnc takes the text but never becomes selection owner. The paragraph below
+  predates that correction. Open: find the x11vnc cause or replace it (I83).
+  Originally: (root-caused 2026-09-28; I58 records it as upstream in
   guacd/x11vnc's VNC clipboard handling). The shipped workaround is "Type Clipboard" (I58). A 2026-09-30 session drop after a
   large copy from the remote logged `guacd[612]: ERROR: Error handling message from VNC server.`; that the large copy caused it
   is an untested hypothesis, and guac status 515 "Aborted" is also the routine client-teardown status (DEFENSE-LAYER.md), so it

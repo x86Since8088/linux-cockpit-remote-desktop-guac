@@ -1,4 +1,4 @@
-## 1.11.4.20261127 - 2026-11-27
+## 1.11.6.20261127 - 2026-11-27
 
 Clipboard page-code fixes (KNOWN_ISSUES I70-I78). Unit tests in `tests/js/clipboard_typing.test.js` and
 `clipboard_policy.test.js`; I70-I73 also reproduced in a rootless sandbox (guacd 1.6.0, Xvfb/x11vnc, sway/wayvnc).
@@ -14,6 +14,21 @@ Clipboard page-code fixes (KNOWN_ISSUES I70-I78). Unit tests in `tests/js/clipbo
 - **Change (I76):** Clipboard auto-sync defaults on only for managed scenarios, off for remote and vnc; remembered per scenario.
 - **Fix (I77):** `lastRemoteClip` is cleared on teardown/reconnect.
 - **Not done (I78):** Caps Lock compensation (the lock model is unreliable).
+
+## 1.11.5.20261127 - 2026-11-27
+
+Relay and bridge hardening from a clipboard review (KNOWN_ISSUES I80-I84).
+
+- **Fix (I80):** the relay decodes each direction with an incremental UTF-8 decoder, so a multibyte character split across
+  socket reads is no longer corrupted and cannot misframe the Guacamole stream.
+- **Fix (I81):** the bridge's Xvfb runs with `-nolisten local` and a per-session `-auth` cookie file (0600, passed to
+  xfreerdp3 and x11vnc via `XAUTHORITY`); another local uid can no longer read the clipboard or inject keys.
+- **Fix (I82):** the relay allow-lists the guacd parameters the browser may set, per scenario; the rest are forced to
+  guacd's defaults, and rejected names are logged once per connection (names only).
+- **Docs (I83, I84):** the "send clip" failure is inside x11vnc (it never becomes selection owner), not before the relay; a
+  guest clipboard over 1 MiB aborts the guacd session (open).
+- Deploying: install the new relay and bridge script (`deploy.sh`); no unit changes. Restart `edy-rdp-relay` to pick up the
+  relay change; new bridge sessions use the new script immediately.
 
 ## 1.11.3.20261127 - 2026-11-27
 

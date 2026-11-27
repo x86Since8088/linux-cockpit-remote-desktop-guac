@@ -68,18 +68,37 @@ vncpass="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
 pwfile="$STATE/.$KEY.vncpw"
 ( umask 077; printf '%s\n' "$vncpass" > "$pwfile" )
 
+# Per-session X authority (I81). The Xvfb below requires this MIT-MAGIC-COOKIE, so
+# another uid on the host cannot read the CLIPBOARD or inject keys into the session.
+# The file is 0600 and owned by the bridge's own uid; every X client started here
+# (xfreerdp3, x11vnc) gets it via XAUTHORITY. Fail closed if it cannot be made.
+xauthfile="$STATE/.$KEY.xauth"
+command -v xauth >/dev/null 2>&1 || { echo "[bridge $KEY] ERROR: xauth not installed (needed to protect the bridge X display)" >&2; exit 1; }
+xcookie="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+[ "${#xcookie}" -eq 32 ] || { echo "[bridge $KEY] ERROR: could not generate an X cookie" >&2; exit 1; }
+( umask 077; rm -f "$xauthfile"; : > "$xauthfile" )
+# the cookie goes to xauth on stdin, never argv (/proc/PID/cmdline is world-readable)
+printf 'add :%s MIT-MAGIC-COOKIE-1 %s\n' "$disp" "$xcookie" | xauth -q -f "$xauthfile" source - 2>/dev/null \
+  || { echo "[bridge $KEY] ERROR: could not write the X authority file" >&2; rm -f "$xauthfile"; exit 1; }
+unset xcookie
+chmod 0600 "$xauthfile"
+export XAUTHORITY="$xauthfile"
+
 xvfb_pid=""; rdp_pid=""; vnc_pid=""; argsfile=""
 cleanup() {
   [ -n "$vnc_pid" ]  && kill "$vnc_pid"  2>/dev/null
   [ -n "$rdp_pid" ]  && kill "$rdp_pid"  2>/dev/null
   [ -n "$xvfb_pid" ] && kill "$xvfb_pid" 2>/dev/null
   [ -n "$argsfile" ] && rm -f "$argsfile" 2>/dev/null
-  rm -f "$pwfile" "$STATE/$KEY.env" "$STATE/$KEY.krb5.conf" 2>/dev/null
+  rm -f "$pwfile" "$xauthfile" "$STATE/$KEY.env" "$STATE/$KEY.krb5.conf" 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
 echo "[bridge $KEY] Xvfb :$disp ($GEOM) -> xfreerdp3 $HOST:$PORT ($SECURITY) -> x11vnc 127.0.0.1:$vncport"
-Xvfb ":$disp" -screen 0 "${GEOM}x24" -nolisten tcp >/dev/null 2>&1 &
+# -nolisten local drops the ABSTRACT socket (@/tmp/.X11-unix/X<n>), which lives in the
+# network namespace and so ignores PrivateTmp; only the filesystem socket remains.
+# -auth makes the server demand the per-session cookie on that socket.
+Xvfb ":$disp" -screen 0 "${GEOM}x24" -nolisten tcp -nolisten local -auth "$xauthfile" >/dev/null 2>&1 &
 xvfb_pid=$!
 for i in $(seq 1 25); do [ -e "/tmp/.X11-unix/X$disp" ] && break; sleep 0.2; done
 
