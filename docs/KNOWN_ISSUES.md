@@ -2112,6 +2112,64 @@ The page's `needAdmin` covered `remote` but not `vnc`, while the relay requires 
 `EDY_RDP_REMOTE_ADMIN_ONLY=1`; VNC was refused for everyone on such a host. Now `connectNeedsAdminProof()` covers
 both. Test: `tests/js/security_decisions.test.js`.
 
+
+## Clipboard page-code fixes (2026-11-27, 1.11.6.20261127)
+Found by an independent clipboard review; each verified against the code first. I70-I72 (Type Clipboard) were reproduced in
+a rootless sandbox (Alpine guacd 1.6.0 + Xvfb + x11vnc `-nomodtweak`, sway + wayvnc) by replaying the page's own key events;
+I73 was reproduced at the guacd protocol level. Relay/bridge-side clipboard fixes live in I80+ (a separate PR).
+
+### I70 · Type Clipboard turned control characters into Num_Lock, Pause, Escape and keypad keys · Sev M · FIXED (1.11.6.20261127)
+`keysymForCodePoint` mapped every C0/C1 control and DEL as `cp | 0xFF00` (parity with the vendored Guacamole.Keyboard):
+DEL -> Num_Lock, 0x13/0x14 -> Pause/Scroll_Lock, 0x1B -> Escape, 0x95-0x9F -> keypad navigation, 0x08 -> BackSpace. Clipboard
+text with such bytes toggled lock keys and hit Escape in the guest (reproduced: `A DEL B ...` typed Escape, KP_7, BackSpace).
+Now only Tab and LF/CR (Return) are typed; every other control and DEL is dropped and counted in the final status. The two
+tests that pinned the vendored parity were rewritten (comment explains why). Tests: `tests/js/clipboard_typing.test.js`.
+
+### I71 · Type Clipboard silently dropped characters the session cannot type, and reported "Typed N characters" · Sev M · FIXED (1.11.6.20261127)
+x11vnc adds an unmapped keysym through a small pool of spare keycodes (17 distinct, per the earlier review; the Alpine Xvfb
+in my harness gave 14, so the pool size is build dependent) that is reset only when the bridge restarts; past the pool the key is ignored. wayvnc has no such mechanism:
+all non-ASCII is ignored (reproduced: `a e-acute CJK b !` reached wayvnc as `a b !` while the page said "Typed 5 characters").
+`analyzeTypeText` pre-scans the text per scenario (wayland-vnc: non-ASCII blocked; others: distinct non-ASCII beyond the pool,
+tracked per session in `clipTypeUsed`; lone surrogates always). If anything is blocked the page asks (OK = type the rest and
+skip those, Cancel = type nothing) naming the count and the first five offenders, and the final status reports typed and
+skipped counts. Caveat: the pool constant is 17; where the live Xvfb build has fewer spare keycodes (14 in the harness) the
+last few characters may still be lost after the warning.
+
+### I72 · Type Clipboard continued into a NEW session after a reconnect, and crawled in a background tab · Sev L · FIXED (1.11.6.20261127)
+The chunk loop only checked `client && keyboard`, so a reconnect mid-run typed the remainder into the new session. A session
+generation (`clipSessionGen`, bumped at every connect and teardown) is captured at start and checked every chunk; a stale run
+stops without touching the new session's status. While `document.hidden` the run pauses with a status message and resumes on
+`visibilitychange` instead of crawling at the browser's throttled timer rate.
+
+### I73 · wayland-vnc clipboard was mojibake (ISO-8859-1 vs UTF-8) · Sev M · FIXED (1.11.6.20261127)
+guacd's VNC `clipboard-encoding` defaults to ISO-8859-1; wayvnc speaks UTF-8. Reproduced at the guacd protocol level: e-acute
+arrived in the guest as U+FFFD, CJK/emoji as `?`, and guest -> browser text came back as `cafÃ©`. `guacdValues(scenario)` now sends
+`clipboard-encoding=UTF-8` for wayland-vnc only (the x11vnc bridge and a direct `vnc` host keep the Latin-1 default; no UI
+option added). With it, both directions round-trip e-acute, CJK and emoji. The relay's guacd parameter allow-list (I82) permits `clipboard-encoding` in every scenario, so it reaches guacd.
+
+### I74 · "Send clip" claimed success it cannot know · Sev L · FIXED (1.11.6.20261127)
+Status now reads "Sent N characters (the session may not accept it ...)" and warns when the text exceeds 256 KiB (guacd
+truncates; measured in UTF-8 bytes) or has characters outside Latin-1 on Latin-1 scenarios.
+
+### I75 · A guest copy over ~1 MiB aborts the session with error 515 and a bare message · Sev L · MITIGATED (1.11.6.20261127)
+guacd/libvncclient abort the session (upstream error 515) on a very large guest clipboard; not fixable in page code. The error
+handler now appends the likely cause and what to do (clear the remote clipboard, reconnect) when a 515 follows clipboard
+activity within 60 s or hits an already-open session; a connect-time 515 with no clipboard activity gets no guess. There is no
+auto-reconnect on errors (the greeter follow refuses errored drops), so no loop is possible.
+
+### I76 · Clipboard auto-sync was on for arbitrary remote/VNC hosts · Sev M · FIXED (1.11.6.20261127)
+The checkbox was `checked` in HTML; the focus handler pushes the local clipboard and `onclipboard` overwrites the OS clipboard
+for every scenario, including `remote` and `vnc`. Default is now on only for console/greeter/isolated/virtual/headless/wayland-vnc
+and off for remote and vnc; ticking it is remembered per scenario in localStorage (`edy-rdp-clip-prefs`) and wins over the default.
+
+### I77 · `lastRemoteClip` survived teardown and reconnect · Sev L · FIXED (1.11.6.20261127)
+Cleared in `dispose()` and when a new client is created, so "Receive clip" can never hand over the previous session's text.
+
+### I78 · Caps Lock is not compensated in Type Clipboard · Sev L · NOT FIXED (deliberate)
+`remoteLocks.CapsLock` is only aligned after the first physical keydown, assumes an all-off baseline, and cannot see a Caps
+Lock change made inside the guest or by the guest's own sync, so inverting `letterShift` from it would be wrong as often as
+right (and `-nomodtweak` Shift/Caps interplay was not provable). Left as documented in the `letterShift` comment.
+
 ### I80 · A multibyte character split across two socket reads was corrupted, and could misframe the Guacamole stream · Sev M · FIXED (1.11.5.20261127)
 `handle()` decoded every `recv()` chunk on its own (`data.decode("utf-8", "replace")`). When a read boundary fell inside a
 multibyte UTF-8 character (CJK, emoji, accented text in a clipboard blob or a connect parameter) each half became U+FFFD.
