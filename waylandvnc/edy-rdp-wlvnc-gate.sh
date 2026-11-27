@@ -1,5 +1,5 @@
 #!/bin/bash
-# edy-rdp-wlvnc-gate - owner-gate the per-user wayvnc listener ports (I65).
+# edy-rdp-wlvnc-gate - owner-gate the per-user wayvnc listener ports (I66).
 #
 # wayvnc runs with enable_auth=false on 127.0.0.1:34000+(uid-1000). The
 # edy_rdp_guacd nftables table drops non-root connections to the ports in its set

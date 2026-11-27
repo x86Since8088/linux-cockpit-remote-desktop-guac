@@ -2047,7 +2047,34 @@ transactions under its own lock. Closing the gap would mean holding dnf's lock a
 dnf does not expose. Rollback stays manual, admin-gated and typed-hostname-confirmed, which keeps the
 window to an operator racing their own host.
 
-### I65 · wayvnc (Wayland VNC scenario) has no authentication and no firewall rule · Sev M · FIXED (1.11.2.20261127)
+### I65 · "Type Clipboard" typed every letter in lower case ("Hello World" -> "hello world") · Sev M · FIXED (1.11.2.20261127)
+Follow-on to I58/I45. `x11vnc -nomodtweak` maps a keysym to the lowest-shift-level Xvfb keycode and presses
+it with whatever modifiers the client holds. Real typing gets its case from the physical Shift key, which
+is why I45's `SHIFT_LEVEL` deliberately exempts letters. Text injected by Type Clipboard has no physical
+Shift, so the keysym `A` pressed the plain `a` key and arrived as "a". Worse, if the user happened to be
+holding Shift, every injected lower-case letter arrived upper case. The comment in `guac-rdp.js` claiming
+typed characters "get the same corrections" was true for punctuation only.
+- **Fix:** `typeOneCodePoint` computes the wanted Shift state with `letterShift(cp)` (true for A-Z and
+  U+00C0-DE except U+00D7, false for a-z and U+00DF-FF except U+00F7, otherwise undefined) and passes it as a
+  new optional third argument of `sendGuestKeyEvent`, which uses it in place of the `SHIFT_LEVEL` lookup,
+  so the existing add/remove-Shift and restore bookkeeping (`shiftAdjust`, real-Shift recheck on release)
+  applies unchanged. Injection still bypasses `keyboard.pressed`.
+- **Other injection paths:** none type text. `sendKeysymTap` (Win/Super button) and `sendLockKeysym`
+  (Num/Caps/Scroll Lock) send single non-letter keysyms; the pop-out/other files contain no key injection.
+  Unchanged.
+- **Caps Lock on the guest** inverts the result (Shift+letter gives lower case under Caps Lock). Not
+  compensated; the guest's lock state is not observable here. Turn Caps Lock off in the guest first.
+- **Letters above Latin-1** (Greek, Cyrillic, ...) use the `0x01000000|cp` keysym, for which
+  `-add_keysyms` creates a keycode whose columns all carry that exact keysym. Verified under Xvfb +
+  `x11vnc -nomodtweak`: case already survives with or without Shift, so they are left untouched.
+- **Verification:** `tests/js/type_clipboard.test.js` gained letterShift, forced-Shift argument and
+  wire-level tests (real `sendGuestKeyEvent` + injected block: capitals, lower-case with real Shift held,
+  upper-case with real Shift held, punctuation unchanged, Latin-1, no leaked state); they fail on 1.11.1.
+  Live-like check: Xvfb + `x11vnc -nomodtweak` driven by an RFB client with the exact wire events; typed
+  text read back from X key events: before "hello world" (and "HELLO" for "hello" with Shift held), after
+  "Hello World" in all cases. Not exercised: the full guacd -> xfreerdp3 -> RDP guest chain.
+
+### I66 · wayvnc (Wayland VNC scenario) has no authentication and no firewall rule · Sev M · FIXED (1.11.3.20261127)
 `waylandvnc/edy-rdp-waylandvnc-start.sh` starts wayvnc with `enable_auth=false` on
 `127.0.0.1:34000+(uid-1000)`; the `edy_rdp_guacd` table gated only 4822, so any local uid could attach to another
 user's Wayland desktop. Code-derived, not observed. Fix: a set `wayvnc_ports` in that table; `ip daddr 127.0.0.1 tcp
@@ -2063,7 +2090,7 @@ per-session credentials and guacd support for wayvnc's auth types, neither verif
 `ip_local_reserved_ports`. Tests: `tests/headless_nft_test.sh` (static, plus a netns kernel check through the real
 helper with a mutation); a systemd container showed reload and restart re-add the ports atomically.
 
-### I66 · The guacd owner gate was fail-open at the unit level · Sev M · FIXED (1.11.2.20261127)
+### I67 · The guacd owner gate was fail-open at the unit level · Sev M · FIXED (1.11.3.20261127)
 `edy-rdp-guacd.service` was only ordered After the firewall unit, and the firewall unit's ExecStop deletes both
 tables, so guacd could run with no owner-match. Fix: `Requires=` + `After=edy-rdp-firewall.service`. Verified in a
 systemd container with stub nft/podman (stub log order): start guacd alone pulls the firewall in first; reload does
@@ -2071,7 +2098,7 @@ not touch guacd; restart stops guacd before the tables are deleted and starts it
 guacd; a failing nft load leaves guacd unstarted. The unmodified unit left guacd active with the firewall stopped.
 Not covered: `nftables.service` flushing the whole ruleset behind the units' back.
 
-### I67 · The relay reported "no desktop sessions" when loginctl failed; door sessions were not counted · Sev M · FIXED (1.11.2.20261127)
+### I68 · The relay reported "no desktop sessions" when loginctl failed; door sessions were not counted · Sev M · FIXED (1.11.3.20261127)
 `_active_graphical_sessions()` returned 0 when `loginctl list-sessions` failed, skipped a failing `show-session`, and
 required `Seat=`; the I48 greeter failover redirects exactly when the count is 0, so a loginctl hiccup, or a user
 signed in through the RDP door (no `Seat=`, 1.10.5), sent a console connect to the greeter. Now: unknown is `None`,
@@ -2079,7 +2106,7 @@ the page redirects only on a number equal to 0, and the count no longer needs a 
 the `seated_uids()` docstring is corrected. Counting seatless sessions also counts a Remote=yes graphical session; that
 errs on the side of not redirecting and of warning before a Stop.
 
-### I68 · Remote VNC never asked for administrator proof · Sev M · FIXED (1.11.2.20261127)
+### I69 · Remote VNC never asked for administrator proof · Sev M · FIXED (1.11.3.20261127)
 The page's `needAdmin` covered `remote` but not `vnc`, while the relay requires proof for both under
 `EDY_RDP_REMOTE_ADMIN_ONLY=1`; VNC was refused for everyone on such a host. Now `connectNeedsAdminProof()` covers
 both. Test: `tests/js/security_decisions.test.js`.

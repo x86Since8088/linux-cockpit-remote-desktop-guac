@@ -12,7 +12,7 @@ RemainAfterExit=yes
 ExecStartPre=-/usr/sbin/nft delete table inet edy_rdp_guacd
 ExecStartPre=-/usr/sbin/nft delete table inet edy_rdp_headless
 # The guacd table is loaded through the gate helper: same file, plus the wayvnc
-# ports of the sessions that exist, in ONE nft transaction (I65).
+# ports of the sessions that exist, in ONE nft transaction (I66).
 ExecStart=@LIBEXEC@/edy-rdp-wlvnc-gate load
 ExecStart=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-headless.nft
 # Take the headless session ports out of the ephemeral allocator NOW, not only
