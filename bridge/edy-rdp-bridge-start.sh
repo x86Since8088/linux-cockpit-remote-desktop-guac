@@ -15,7 +15,7 @@
 # the bridge while the backing desktop (headless GNOME / physical seat) lives on.
 #
 # .req  (KEY=VALUE):  HOST PORT SECURITY USERNAME PASSWORD GEOM
-# .env  (written here, 0640 root:edy-rdp):  VNCHOST VNCPORT VNCPASS
+# .env  (written here, 0640 root:edy-rdp):  VNCHOST VNCPORT VNCPASS [CLIPSOCK]
 #
 # SECURITY TODO (hardening pass): pass the RDP credential to xfreerdp3 without argv
 # exposure (/args-from file), and gate the loopback VNC port (VNC password + nft
@@ -84,13 +84,15 @@ unset xcookie
 chmod 0600 "$xauthfile"
 export XAUTHORITY="$xauthfile"
 
-xvfb_pid=""; rdp_pid=""; vnc_pid=""; argsfile=""
+xvfb_pid=""; rdp_pid=""; vnc_pid=""; clip_pid=""; argsfile=""
+clipsock="$STATE/.$KEY.clip.sock"; cliplog="$STATE/.$KEY.cliplog"
 cleanup() {
+  [ -n "$clip_pid" ] && kill "$clip_pid" 2>/dev/null
   [ -n "$vnc_pid" ]  && kill "$vnc_pid"  2>/dev/null
   [ -n "$rdp_pid" ]  && kill "$rdp_pid"  2>/dev/null
   [ -n "$xvfb_pid" ] && kill "$xvfb_pid" 2>/dev/null
   [ -n "$argsfile" ] && rm -f "$argsfile" 2>/dev/null
-  rm -f "$pwfile" "$xauthfile" "$STATE/$KEY.env" "$STATE/$KEY.krb5.conf" 2>/dev/null
+  rm -f "$pwfile" "$xauthfile" "$clipsock" "$cliplog" "$STATE/$KEY.env" "$STATE/$KEY.krb5.conf" 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -195,14 +197,44 @@ done
 # the plugin sends the plain 9/0 keysym, and the held Shift that -nomodtweak
 # preserves makes keycode 18/19 produce "(" / ")" (see remapKeysym in guac-rdp.js).
 # All verified with x11vnc -debug_keyboard.
-x11vnc -display ":$disp" -localhost -rfbport "$vncport" -rfbportv6 "$vncport" \
+# X11VNC_AVOID_WINDOWS=never (x11vnc's documented knob, help text "-avoid"): without it x11vnc
+# creates its selection window only 45 s after a VNC client connects when no window manager
+# runs, and while it has no such window it can neither own CLIPBOARD for text sent by the
+# browser nor request the guest's CLIPBOARD (I83 root cause, found in xevents.c
+# guess_dm_gone/initialize_xevents). Set, the window exists from the start.
+X11VNC_AVOID_WINDOWS=never x11vnc -display ":$disp" -localhost -rfbport "$vncport" -rfbportv6 "$vncport" \
   -nomodtweak \
   -passwdfile "$pwfile" -forever -shared -noxdamage -o /dev/null >/dev/null 2>&1 &
 vnc_pid=$!
 for i in $(seq 1 25); do ss -tlnH 2>/dev/null | grep -q "127.0.0.1:$vncport " && break; sleep 0.2; done
 
+# Clipboard helper (I85/I86). x11vnc cannot deliver browser text to the guest (it never
+# owns the selection, I83) and hands guest text to guacd through xfreerdp3's escaped STRING
+# target ("\u00c9" for E-acute). The helper owns/reads the CLIPBOARD of THIS Xvfb itself as
+# UTF-8 (same uid, same XAUTHORITY, I81) and serves the relay over a 0600 unix socket named
+# by KEY. Optional: without python-xlib the bridge runs as before and no CLIPSOCK is published.
+_clip="$(dirname -- "$0")/edy-rdp-clip-helper.py"
+[ -r "$_clip" ] || _clip="$(command -v edy-rdp-clip-helper.py 2>/dev/null || true)"
+_py="${EDY_RDP_PYTHON:-python3}"
+CLIPLINE=""
+if [ -n "${_clip:-}" ] && [ -r "$_clip" ] && "$_py" -c 'import Xlib' 2>/dev/null; then
+  ( umask 077; : > "$cliplog" )
+  DISPLAY=":$disp" "$_py" "$_clip" "$clipsock" >/dev/null 2>>"$cliplog" &
+  clip_pid=$!
+  for i in $(seq 1 25); do [ -S "$clipsock" ] && break; kill -0 "$clip_pid" 2>/dev/null || break; sleep 0.2; done
+  if [ -S "$clipsock" ]; then
+    CLIPLINE="CLIPSOCK=$clipsock"
+  else
+    echo "[bridge $KEY] note: clipboard helper did not start; clipboard stays on the x11vnc path" >&2
+    [ -n "$clip_pid" ] && kill "$clip_pid" 2>/dev/null; clip_pid=""
+  fi
+else
+  echo "[bridge $KEY] note: python-xlib or the clipboard helper is missing; clipboard stays on the x11vnc path" >&2
+fi
+
 tmp=$(mktemp "$STATE/.env.$KEY.XXXXXX")
 printf 'VNCHOST=127.0.0.1\nVNCPORT=%s\nVNCPASS=%s\n' "$vncport" "$vncpass" > "$tmp"
+[ -n "$CLIPLINE" ] && printf '%s\n' "$CLIPLINE" >> "$tmp"
 chgrp edy-rdp "$tmp" 2>/dev/null || true; chmod 0640 "$tmp"; mv "$tmp" "$STATE/$KEY.env"
 
 if ss -tlnH 2>/dev/null | grep -q "127.0.0.1:$vncport "; then

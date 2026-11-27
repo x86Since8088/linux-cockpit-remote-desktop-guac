@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Unit tests for the relay's security-critical pure logic.
-import os, sys, time, unittest
+import base64, os, sys, time, unittest
 sys.path.insert(0, os.path.dirname(__file__))
 import edy_rdp_relay as R
 import session_registry as SR
@@ -909,6 +909,166 @@ class Utf8SplitAcrossRecv(unittest.TestCase):
         self.assertEqual(c.decode_chunk("client", b[:1]), "")
         self.assertEqual(c.decode_chunk("guacd", "x".encode()), "x")   # must not eat the client's pending byte
         self.assertEqual(c.decode_chunk("client", b[1:]), "日")
+
+
+class FakeClip(object):
+    """Stands in for bridge.ClipChannel: records what the relay hands the helper."""
+    def __init__(self, ok=True):
+        self.alive = True
+        self.sent = []
+        self.ok = ok
+    def send_text(self, data):
+        self.sent.append(data)
+        if not self.ok:
+            self.alive = False
+        return self.ok
+
+
+class BridgeClipboardChannel(unittest.TestCase):
+    """I85/I86: browser<->guest clipboard through the per-session helper, not x11vnc."""
+    def _conn(self, clip="fake"):
+        import socket
+        a, self.browser = socket.socketpair()
+        g, self.guacd = socket.socketpair()
+        c = R.Connection(client=a, uid=1000, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        c.guacd = g
+        c.clip = FakeClip() if clip == "fake" else clip
+        return c
+
+    def _drain(self, sock):
+        sock.settimeout(0.2)
+        try:
+            return sock.recv(1 << 20).decode("utf-8")
+        except Exception:
+            return ""
+
+    def _stream(self, c, text, sid="3", cut=None):
+        raw = text.encode("utf-8")
+        cut = len(raw) // 2 if cut is None else cut
+        out = [c._guard_upstream(["clipboard", sid, "text/plain"])]
+        for part in (raw[:cut], raw[cut:]):
+            out.append(c._guard_upstream(["blob", sid, base64.b64encode(part).decode()]))
+        out.append(c._guard_upstream(["end", sid]))
+        return out
+
+    def test_text_goes_to_helper_not_guacd_and_is_acked(self):
+        c = self._conn()
+        text = "Hello World! \u00c9\u00e9 \u65e5\u672c \U0001F600"
+        # cut inside the 4-byte emoji: the BYTES must be rejoined before decoding
+        out = self._stream(c, text, cut=len(text.encode()) - 2)
+        self.assertEqual(out, [None, None, None, None])      # nothing for guacd to mangle
+        self.assertEqual(c.clip.sent, [text.encode("utf-8")])
+        self.assertEqual(self._drain(self.guacd), "")
+        acks = self._drain(self.browser)
+        self.assertEqual(acks, R.encode("ack", "3", "OK", 0) * 3)   # clipboard + 2 blobs
+
+    def test_no_helper_forwards_to_guacd_unchanged(self):
+        c = self._conn(clip=None)
+        els = [["clipboard", "3", "text/plain"], ["blob", "3", "SGk="], ["end", "3"]]
+        self.assertEqual([c._guard_upstream(list(e)) for e in els], els)
+
+    def test_dead_helper_forwards_to_guacd(self):
+        c = self._conn()
+        c.clip.alive = False
+        self.assertEqual(c._guard_upstream(["clipboard", "3", "text/plain"]),
+                         ["clipboard", "3", "text/plain"])
+
+    def test_helper_dying_at_the_last_moment_loses_nothing(self):
+        c = self._conn(clip=FakeClip(ok=False))
+        self._stream(c, "caf\u00e9")
+        got = self._drain(self.guacd)
+        self.assertIn(R.encode("clipboard", "3", "text/plain"), got)
+        self.assertIn(R.encode("blob", "3", base64.b64encode("caf\u00e9".encode()).decode()), got)
+        self.assertIn(R.encode("end", "3"), got)
+
+    def test_non_text_stream_is_not_taken(self):
+        c = self._conn()
+        el = ["clipboard", "4", "image/png"]
+        self.assertEqual(c._guard_upstream(list(el)), el)
+        self.assertEqual(c._guard_upstream(["blob", "4", "AAAA"]), ["blob", "4", "AAAA"])
+        self.assertEqual(c.clip.sent, [])
+
+    def test_size_cap_matches_guacd_and_keeps_utf8_valid(self):
+        c = self._conn()
+        text = "\u65e5" * 200000                                # 600000 bytes
+        raw = text.encode()
+        c._guard_upstream(["clipboard", "5", "text/plain"])
+        for i in range(0, len(raw), 4096):
+            c._guard_upstream(["blob", "5", base64.b64encode(raw[i:i + 4096]).decode()])
+        c._guard_upstream(["end", "5"])
+        sent = c.clip.sent[0]
+        self.assertLessEqual(len(sent), 262144)
+        self.assertGreater(len(sent), 262144 - 4)
+        sent.decode("utf-8")                                   # no split character
+
+    def test_one_session_cannot_reach_another(self):
+        # the channel is the connection's own object, created from its own bridge key
+        a, b = self._conn(), self._conn()
+        self._stream(a, "only-for-a")
+        self.assertEqual(b.clip.sent, [])
+        import bridge
+        self.assertNotEqual(bridge.clip_path("console-1000-aaaa"), bridge.clip_path("console-1000-bbbb"))
+        self.assertTrue(bridge.clip_path("k").startswith(bridge.BRIDGE_STATE + "/"))
+
+    def test_synthetic_ack_is_swallowed_others_pass(self):
+        c = self._conn()
+        self.assertIsNone(c._guard_upstream(["ack", "20001", "OK", "0"]))
+        ack = ["ack", "7", "OK", "0"]
+        self.assertEqual(c._guard_upstream(list(ack)), ack)
+
+    def test_guacd_clipboard_dropped_while_helper_attached(self):
+        c = self._conn()
+        self.assertTrue(c.drop_guacd_clipboard(["clipboard", "0", "text/plain"]))
+        self.assertTrue(c.drop_guacd_clipboard(["blob", "0", "SGVsbG8="]))
+        self.assertTrue(c.drop_guacd_clipboard(["end", "0"]))
+        # an image stream with the same id later, and other instructions, are untouched
+        self.assertFalse(c.drop_guacd_clipboard(["blob", "0", "AAAA"]))
+        self.assertFalse(c.drop_guacd_clipboard(["img", "1", "14", "0", "image/png", "0", "0"]))
+        self.assertFalse(c.drop_guacd_clipboard(["blob", "1", "AAAA"]))
+
+    def test_guacd_clipboard_forwarded_without_helper(self):
+        c = self._conn(clip=None)
+        self.assertFalse(c.drop_guacd_clipboard(["clipboard", "0", "text/plain"]))
+        self.assertFalse(c.drop_guacd_clipboard(["blob", "0", "SGk="]))
+
+    def test_guest_text_reaches_browser_as_utf8_stream(self):
+        c = self._conn()
+        text = ("Hello \u00c9\u00e9 \u65e5\u672c " * 700).encode("utf-8")   # spans several blobs
+        c.clip_to_client(text)
+        wire = self._drain(self.browser)
+        got = []
+        R.drain(wire, got.append)
+        self.assertEqual(got[0][0:3:2], ["clipboard", "text/plain"])
+        sid = got[0][1]
+        self.assertTrue(20000 <= int(sid) < 30000)
+        self.assertEqual(got[-1], ["end", sid])
+        body = b"".join(base64.b64decode(e[2]) for e in got if e[0] == "blob")
+        self.assertEqual(body, text)
+        self.assertNotIn("\\u00c9", body.decode("utf-8"))
+
+    def test_channel_frames_and_bad_input(self):
+        import socket, bridge
+        a, b = socket.socketpair()
+        ch = bridge.ClipChannel(a)
+        payload = "\u00c9\u00e9 \u65e5".encode()
+        frame = b"G %d\n" % len(payload) + payload
+        b.sendall(frame[:3]); self.assertEqual(ch.read(), [])
+        b.sendall(frame[3:] + frame); self.assertEqual(ch.read(), [payload, payload])
+        b.sendall(b"X 1\nz"); ch.read()
+        self.assertFalse(ch.alive)
+
+    def test_channel_sends_capped_frame(self):
+        import socket, bridge
+        a, b = socket.socketpair()
+        ch = bridge.ClipChannel(a)
+        self.assertTrue(ch.send_text("\u00e9".encode()))
+        b.settimeout(1)
+        self.assertEqual(b.recv(100), b"S 2\n\xc3\xa9")
+
+    def test_connect_clip_none_when_no_socket(self):
+        import bridge
+        self.assertIsNone(bridge.connect_clip("no-such-key-%d" % os.getpid()))
 
 
 class BrowserParamAllowList(unittest.TestCase):

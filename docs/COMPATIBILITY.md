@@ -37,6 +37,7 @@ found, the fix command names the packages to install by hand and stops.
 | FreeRDP 3 client | `xfreerdp3` / `xfreerdp` | the per-connection bridge that speaks NLA/RDSTLS to gnome-remote-desktop |
 | Xvfb | `Xvfb` | headless X server the bridge draws into |
 | x11vnc | `x11vnc` | exposes the bridge's Xvfb as a loopback VNC endpoint for guacd |
+| python-xlib | `import Xlib` | the bridge's clipboard helper owns/reads the session's X CLIPBOARD as UTF-8 (I85) |
 | nftables | `nft` | owner-match gate so only the relay uid can reach guacd on 127.0.0.1:4822 |
 | gnome-remote-desktop | `grdctl` | the RDP backend (console mirror, virtual monitor, per-user headless desktop) |
 | D-Bus tools | `dbus-send` | reload the handover policy drop-in; talk to the session bus |
@@ -62,6 +63,7 @@ The minimum versions and the guacd image ref + digest are recorded in
 | FreeRDP 3 client | `freerdp3-x11` | `freerdp` | `freerdp` | `freerdp` |
 | Xvfb | `xvfb` | `xorg-x11-server-Xvfb` | `xorg-server-xvfb` | `xorg-x11-server-Xvfb` |
 | x11vnc | `x11vnc` | `x11vnc` | `x11vnc` | `x11vnc` |
+| python-xlib | `python3-xlib` | `python3-xlib` | `python-xlib` | `python3-python-xlib` |
 | nftables | `nftables` | `nftables` | `nftables` | `nftables` |
 | gnome-remote-desktop | `gnome-remote-desktop` | `gnome-remote-desktop` | `gnome-remote-desktop` | `gnome-remote-desktop` |
 | D-Bus tools | `dbus-bin` | `dbus-tools` | `dbus` | `dbus-1-tools` |

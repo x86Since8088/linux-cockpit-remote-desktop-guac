@@ -111,6 +111,8 @@ req_have() {
       nftables) command -v nft >/dev/null 2>&1 ;;
       gnome-remote-desktop) command -v grdctl >/dev/null 2>&1 ;;
       dbus)     command -v dbus-send >/dev/null 2>&1 ;;
+      # a python module, not a binary: the bridge's clipboard helper imports Xlib (I85)
+      python3-xlib) python3 -c 'import Xlib' >/dev/null 2>&1 ;;
       *)        command -v "$1" >/dev/null 2>&1 ;;
     esac
 }
@@ -136,6 +138,7 @@ req_version() {
                 v="$(/usr/libexec/gnome-remote-desktop-daemon --version 2>/dev/null | grep -o '[0-9][0-9.]*' | sed -n 1p || true)"
                 [[ -n "$v" ]] || v="$(dpkg-query -W -f='${Version}' gnome-remote-desktop 2>/dev/null \
                                       || rpm -q --qf '%{VERSION}' gnome-remote-desktop 2>/dev/null || true)" ;;
+      python3-xlib) v="$(python3 -c "import Xlib; print('.'.join(map(str, Xlib.__version__)))" 2>/dev/null || true)" ;;
       dbus)     v="$(dbus-daemon --version 2>/dev/null | grep -o '[0-9][0-9.]*' | sed -n 1p || true)" ;;
       *)        v="$("$1" --version 2>/dev/null | grep -o '[0-9][0-9.]*' | sed -n 1p || true)" ;;
     esac
@@ -190,14 +193,15 @@ req_pkg_for() { case "$2:$1" in
     dnf:freerdp|yum:freerdp) echo "freerdp" ;;
     dnf:xvfb|yum:xvfb)       echo "xorg-x11-server-Xvfb" ;;
     dnf:dbus|yum:dbus)       echo "dbus-tools" ;;
+    dnf:python3-xlib|yum:python3-xlib) echo "python3-xlib" ;;
     dnf:*|yum:*)             echo "$1" ;;
     pacman:cockpit)  echo "cockpit" ;;   pacman:freerdp) echo "freerdp" ;;
     pacman:xvfb)     echo "xorg-server-xvfb" ;;  pacman:python3) echo "python" ;;
-    pacman:dbus)     echo "dbus" ;;
+    pacman:dbus)     echo "dbus" ;;   pacman:python3-xlib) echo "python-xlib" ;;
     pacman:*)        echo "$1" ;;
     zypper:cockpit)  echo "cockpit cockpit-bridge" ;;  zypper:freerdp) echo "freerdp" ;;
     zypper:xvfb)     echo "xorg-x11-server-Xvfb" ;;
-    zypper:dbus)     echo "dbus-1-tools" ;;
+    zypper:dbus)     echo "dbus-1-tools" ;;   zypper:python3-xlib) echo "python3-python-xlib" ;;
     zypper:*)        echo "$1" ;;
     *) echo "$1" ;;
   esac; }

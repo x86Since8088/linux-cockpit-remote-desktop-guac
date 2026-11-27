@@ -1,3 +1,20 @@
+## 1.11.7.20261127 - 2026-11-27
+
+Bridge clipboard, both directions (KNOWN_ISSUES I85, I86; I83's open cause is found). Owner-reported live on 1.11.6 (console):
+copying "Hello World! Éé" in the session arrived in the browser as literal `\u00c9\u00e9`, and "Send clip" never reached the guest.
+
+- **Fix (I85):** guest -> browser text is no longer `\uXXXX`-escaped. Root cause: x11vnc polls the selection with a hard-coded STRING
+  request and xfreerdp3 (FreeRDP 3.32, winpr) answers STRING with an ASCII `\uXXXX` form; its UTF8_STRING answer is correct. A new
+  per-session helper (`bridge/edy-rdp-clip-helper.py`, python-xlib) reads the CLIPBOARD as UTF8_STRING and the relay hands it to the
+  browser as a Guacamole clipboard stream; guacd's x11vnc-sourced copy is dropped while the helper is attached.
+- **Fix (I86):** "Send clip" works on the bridge scenarios (console, greeter, isolated, virtual, headless, remote): the same helper owns the
+  session's X CLIPBOARD with the browser's text (UTF-8, capped at guacd's 256 KiB, CJK/emoji intact) and xfreerdp3 forwards it to the guest.
+- **Fix (I83 cause):** x11vnc creates its selection window only 45 s after a client connects when no window manager runs, and cannot own or
+  poll a selection before; the bridge now starts x11vnc with `X11VNC_AVOID_WINDOWS=never`. This alone fixes Latin-1 text on the old path.
+- **New dependency:** `python3-xlib` (requires.txt). If absent the bridge runs as before (x11vnc path) and says so in its log.
+- Tests: `BridgeClipboardChannel` (relay unit suite, 14) and `tests/bridge_clip_test.py` (real bridge script + Xvfb + helper, 5).
+- Deploying: `deploy.sh` (adds `edy-rdp-clip-helper.py` to libexec) then restart `edy-rdp-relay`; open sessions keep the old path until reconnect.
+
 ## 1.11.6.20261127 - 2026-11-27
 
 Clipboard page-code fixes (KNOWN_ISSUES I70-I78). Unit tests in `tests/js/clipboard_typing.test.js` and
