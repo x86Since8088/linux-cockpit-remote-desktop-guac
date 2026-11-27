@@ -2047,3 +2047,29 @@ transactions under its own lock. Closing the gap would mean holding dnf's lock a
 dnf does not expose. Rollback stays manual, admin-gated and typed-hostname-confirmed, which keeps the
 window to an operator racing their own host.
 
+### I65 · "Type Clipboard" typed every letter in lower case ("Hello World" -> "hello world") · Sev M · FIXED (1.11.2.20261127)
+Follow-on to I58/I45. `x11vnc -nomodtweak` maps a keysym to the lowest-shift-level Xvfb keycode and presses
+it with whatever modifiers the client holds. Real typing gets its case from the physical Shift key, which
+is why I45's `SHIFT_LEVEL` deliberately exempts letters. Text injected by Type Clipboard has no physical
+Shift, so the keysym `A` pressed the plain `a` key and arrived as "a". Worse, if the user happened to be
+holding Shift, every injected lower-case letter arrived upper case. The comment in `guac-rdp.js` claiming
+typed characters "get the same corrections" was true for punctuation only.
+- **Fix:** `typeOneCodePoint` computes the wanted Shift state with `letterShift(cp)` (true for A-Z and
+  U+00C0-DE except U+00D7, false for a-z and U+00DF-FF except U+00F7, otherwise undefined) and passes it as a
+  new optional third argument of `sendGuestKeyEvent`, which uses it in place of the `SHIFT_LEVEL` lookup,
+  so the existing add/remove-Shift and restore bookkeeping (`shiftAdjust`, real-Shift recheck on release)
+  applies unchanged. Injection still bypasses `keyboard.pressed`.
+- **Other injection paths:** none type text. `sendKeysymTap` (Win/Super button) and `sendLockKeysym`
+  (Num/Caps/Scroll Lock) send single non-letter keysyms; the pop-out/other files contain no key injection.
+  Unchanged.
+- **Caps Lock on the guest** inverts the result (Shift+letter gives lower case under Caps Lock). Not
+  compensated; the guest's lock state is not observable here. Turn Caps Lock off in the guest first.
+- **Letters above Latin-1** (Greek, Cyrillic, ...) use the `0x01000000|cp` keysym, for which
+  `-add_keysyms` creates a keycode whose columns all carry that exact keysym. Verified under Xvfb +
+  `x11vnc -nomodtweak`: case already survives with or without Shift, so they are left untouched.
+- **Verification:** `tests/js/type_clipboard.test.js` gained letterShift, forced-Shift argument and
+  wire-level tests (real `sendGuestKeyEvent` + injected block: capitals, lower-case with real Shift held,
+  upper-case with real Shift held, punctuation unchanged, Latin-1, no leaked state); they fail on 1.11.1.
+  Live-like check: Xvfb + `x11vnc -nomodtweak` driven by an RFB client with the exact wire events; typed
+  text read back from X key events: before "hello world" (and "HELLO" for "hello" with Shift held), after
+  "Hello World" in all cases. Not exercised: the full guacd -> xfreerdp3 -> RDP guest chain.
