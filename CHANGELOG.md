@@ -1,3 +1,27 @@
+## 1.11.2.20261127 - 2026-11-27
+
+Four code-derived security/correctness fixes (KNOWN_ISSUES I65-I68). Each was verified against the code
+first; none was reproduced live (no Wayland session or loginctl failure was available).
+
+- **Fix (I65): the per-user wayvnc listener is no longer open to every local uid.** wayvnc runs with
+  `enable_auth=false` on `127.0.0.1:34000+(uid-1000)` and no firewall rule covered it. `hardening/edy-rdp-guacd.nft`
+  now accepts connections to 127.0.0.1:34000-34999 only from `skuid 0` (guacd's rootful container; the relay never
+  dials it) and drops the rest, and the sysctl drop-in reserves 34000-34999 from the ephemeral allocator so an
+  unrelated local listener is not handed a port the rule would make unreachable. wayvnc's own auth was not enabled.
+- **Fix (I66): guacd can no longer run without the firewall unit.** `edy-rdp-guacd.service` now has
+  `Requires=` + `After=edy-rdp-firewall.service` (and `edy-rdp-waylandvnc@.service` likewise). A stopped or failed
+  firewall unit stops/refuses guacd; a firewall restart stops guacd first, deletes and re-adds the tables, then
+  restarts guacd; a reload (what deploy.sh does) is not propagated. Exercised in a systemd container.
+- **Fix (I67): the relay no longer reports "nobody signed in" when loginctl fails.**
+  `DesktopUI._active_graphical_sessions()` returns `None` (unknown) on a failed `list-sessions`, a timeout/exception
+  or a failed `show-session`; the page redirects a console connect to the greeter only on a count of exactly 0, and
+  the Desktop-UI panel shows "unknown" and warns. It also counts a graphical (wayland/x11), active, non-greeter
+  session without a `Seat=` (a door-handed-off session has none, 1.10.5), which removes the false greeter redirect.
+- **Fix (I68): Remote VNC now asks for administrator proof** when the Cockpit session is elevated, like Remote RDP,
+  so it works under `EDY_RDP_REMOTE_ADMIN_ONLY=1`.
+- Deploying: a plain `deploy.sh` is enough (it re-renders the units, daemon-reloads and reloads the firewall unit).
+  See I65 for one side effect on existing local listeners in 34000-34999.
+
 ## 1.11.1.20261016 - 2026-10-16
 
 Patch release for the deploy script only; nothing a session uses changes.

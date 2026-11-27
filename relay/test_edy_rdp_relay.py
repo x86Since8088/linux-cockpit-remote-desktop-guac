@@ -698,6 +698,71 @@ class SeatedUidsSubprocessHandling(unittest.TestCase):
         self.assertEqual(self._run_with(lambda *a, **k: self._Result(returncode=0, stdout="")), set())
 
 
+class ActiveGraphicalSessionsCount(unittest.TestCase):
+    """DesktopUI._active_graphical_sessions() feeds deskui-status, which the I48
+    greeter failover reads: the page redirects a console connect to the sign-in
+    screen exactly when the count is 0. A loginctl failure must therefore be
+    UNKNOWN (None), never 0, and a door-handed-off session (no Seat=) counts."""
+
+    def _count(self, fake_run):
+        orig = R.subprocess.run
+        R.subprocess.run = fake_run
+        try:
+            return R.DesktopUI()._active_graphical_sessions()
+        finally:
+            R.subprocess.run = orig
+
+    class _P:
+        def __init__(self, returncode=0, stdout=b""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def _sessions(self, listing, props):
+        def fake_run(argv, **k):
+            if argv[1] == "list-sessions":
+                return self._P(0, listing.encode())
+            sid = argv[2]
+            if props[sid] is None:
+                return self._P(1, b"")
+            return self._P(0, props[sid].encode())
+        return fake_run
+
+    def test_list_sessions_nonzero_is_unknown_not_zero(self):
+        self.assertIsNone(self._count(lambda *a, **k: self._P(1, b"")))
+
+    def test_list_sessions_raises_is_unknown_not_zero(self):
+        def boom(*a, **k):
+            raise OSError("no loginctl")
+        self.assertIsNone(self._count(boom))
+
+    def test_list_sessions_timeout_is_unknown_not_zero(self):
+        def slow(*a, **k):
+            raise R.subprocess.TimeoutExpired("loginctl", 8)
+        self.assertIsNone(self._count(slow))
+
+    def test_show_session_failure_is_unknown_not_skipped(self):
+        fake = self._sessions("1 1000 u seat0\n2 1001 v -\n",
+                              {"1": "Type=wayland\nActive=yes\nClass=user\n", "2": None})
+        self.assertIsNone(self._count(fake))
+
+    def test_genuinely_empty_listing_is_zero(self):
+        self.assertEqual(self._count(lambda *a, **k: self._P(0, b"")), 0)
+
+    def test_seatless_door_session_is_counted(self):
+        fake = self._sessions("5 1000 eddie -\n",
+                              {"5": "Type=wayland\nActive=yes\nClass=user\n"})
+        self.assertEqual(self._count(fake), 1)
+
+    def test_greeter_tty_and_inactive_are_not_counted(self):
+        fake = self._sessions(
+            "1 120 gdm seat0\n2 1000 a seat0\n3 1000 b seat0\n4 1001 c -\n",
+            {"1": "Type=wayland\nActive=yes\nClass=greeter\n",
+             "2": "Type=tty\nActive=yes\nClass=user\n",
+             "3": "Type=x11\nActive=no\nClass=user\n",
+             "4": "Type=x11\nActive=yes\nClass=user\n"})
+        self.assertEqual(self._count(fake), 1)
+
+
 class NonAdminAccess(unittest.TestCase):
     """Proves an existing property, for docs/GROUP-ACCESS-MODEL.md: isolated, virtual
     monitor, wayland-vnc and greeter have never had an admin_required path

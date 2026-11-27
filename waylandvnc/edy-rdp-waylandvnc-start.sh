@@ -96,8 +96,11 @@ ss -tlnH "sport = :$port" 2>/dev/null | grep -q . || {
     echo "[wlvnc] wayvnc never listened on 127.0.0.1:$port" >&2; exit 1; }
 
 # Publish for the relay. No credential: wayvnc runs without auth because the
-# port is loopback-only and the SO_PEERCRED relay is the sole ingress -- the
-# same posture the FreeRDP3 bridge's loopback VNC endpoint already relies on.
+# port is loopback-only and the edy_rdp_guacd nftables table
+# (hardening/edy-rdp-guacd.nft) lets only uid 0 -- guacd, in its rootful
+# container -- connect to 127.0.0.1:34000-34999. Without that rule any local uid
+# could attach to this user's desktop; edy-rdp-waylandvnc@.service Requires=
+# the firewall unit so it cannot start without it.
 tmp=$(mktemp "$STATE/.$uid.XXXXXX")
 printf 'PORT=%s\nUSER=%s\nHOST=127.0.0.1\n' "$port" "$user" > "$tmp"
 chgrp edy-rdp "$tmp"; chmod 0640 "$tmp"; mv "$tmp" "$STATE/$uid.env"

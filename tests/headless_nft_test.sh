@@ -40,6 +40,7 @@ set -uo pipefail
 SRC="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)"
 SELF="$SRC/tests/headless_nft_test.sh"
 RULE="$SRC/hardening/edy-rdp-headless.nft"
+GUACD_RULE="$SRC/hardening/edy-rdp-guacd.nft"
 SYSCTL_SRC="$SRC/hardening/edy-rdp-headless-sysctl.conf"
 SYSCTL_DST=/etc/sysctl.d/90-edy-rdp-headless.conf
 NFT_DST=/etc/nftables.d/edy-rdp-headless.nft
@@ -63,10 +64,10 @@ table inet edy_rdp_headless {
 # nothing but lo. A peer namespace (nested, also ours) is joined by a veth.
 # ---------------------------------------------------------------------------
 if [[ "${1:-}" == --in-netns ]]; then
-    exec python3 - "$RULE" "$SYSCTL_SRC" "$OLD_RULE" <<'PY'
+    exec python3 - "$RULE" "$SYSCTL_SRC" "$OLD_RULE" "$GUACD_RULE" <<'PY'
 import os, socket, subprocess, sys, time
 
-rule, sysctl_conf, old_rule = sys.argv[1], sys.argv[2], sys.argv[3]
+rule, sysctl_conf, old_rule, guacd_rule = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 HOST, PEER = "10.231.61.1", "10.231.61.2"
 fails = []
 
@@ -173,28 +174,69 @@ try:
     load(open(rule).read())
 
     # 6. the reservation: with the shipped drop-in applied and the ephemeral
-    #    range narrowed to straddle 33000-33999, no unbound connect() may be
+    #    range narrowed to straddle 33000-34999, no unbound connect() may be
     #    handed a session port. Without the drop-in ~98% of them would be.
     with open("/proc/sys/net/ipv4/ip_local_port_range", "w") as f:
-        f.write("32990 34010\n")
+        f.write("32980 35010\n")
     r = sh("sysctl", "-q", "-p", sysctl_conf, check=False)
     if r.returncode:
         fails.append("sysctl -p %s failed: %s" % (sysctl_conf, r.stdout.decode().strip()))
     else:
         got = open("/proc/sys/net/ipv4/ip_local_reserved_ports").read().strip()
-        if got != "33000-33999":
-            fails.append("after sysctl -p the reserved list is '%s', want 33000-33999" % got)
+        # the kernel prints the two adjacent ranges merged
+        if got not in ("33000-33999,34000-34999", "33000-34999"):
+            fails.append("after sysctl -p the reserved list is '%s', want 33000-33999 and 34000-34999" % got)
         held, bad = [], []
         for _ in range(15):
             s = socket.socket(); s.settimeout(1.5); s.connect((PEER, 8080))
             held.append(s)
             lp = s.getsockname()[1]
-            if 33000 <= lp <= 33999:
+            if 33000 <= lp <= 33999 or 34000 <= lp <= 34999:
                 bad.append(lp)
         for s in held:
             s.close()
         if bad:
             fails.append("with the reservation applied, connect() still got session ports %s" % bad)
+
+    # 7. the wayvnc gate (guacd table, output chain). A listener on 127.0.0.1:34006
+    #    stands in for wayvnc. uid 0 is mapped here and is the only uid that may
+    #    connect, so the shipped rule must accept us; the SAME rule with the uid
+    #    swapped for another proves the drop is live (mutation), and a port
+    #    outside the range stays reachable either way. (The non-root-uid case on a
+    #    real kernel is exercised through sbx; see the PR.)
+    wl = socket.socket(); wl.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    wl.bind(("127.0.0.1", 34006)); wl.listen(8)
+    other = socket.socket(); other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    other.bind(("127.0.0.1", 35006)); other.listen(8)
+    def lo_connect(port, timeout=1.0):
+        c = socket.socket(); c.settimeout(timeout)
+        try:
+            c.connect(("127.0.0.1", port)); return "connected"
+        except socket.timeout:
+            return "timeout"
+        except OSError as e:
+            return "error %s" % e.errno
+        finally:
+            c.close()
+    gtext = open(guacd_rule).read().replace("@RELAY_UID@", "4242")
+    rc, out = load(gtext)
+    if rc:
+        fails.append("the shipped guacd rule does not load: %s" % out)
+    else:
+        if lo_connect(34006) != "connected":
+            fails.append("uid 0 -> 127.0.0.1:34006 was refused by the shipped guacd rule (guacd could not reach wayvnc)")
+        if lo_connect(35006) != "connected":
+            fails.append("127.0.0.1:35006 (outside the range) was affected by the guacd rule")
+        mutated = gtext.replace("tcp dport 34000-34999 meta skuid 0 accept",
+                                "tcp dport 34000-34999 meta skuid 4242 accept")
+        assert mutated != gtext, "mutation did not apply"
+        rc, out = load(mutated)
+        if rc:
+            fails.append("the mutated guacd rule did not load: %s" % out)
+        elif lo_connect(34006) != "timeout":
+            fails.append("MUTATION NOT CAUGHT: with another uid allowed, uid 0 still reached 127.0.0.1:34006")
+        elif lo_connect(35006) != "connected":
+            fails.append("the mutated rule affected a port outside 34000-34999")
 finally:
     # Both children, or the caller's $(...) never sees EOF: the peer server
     # holds an inherited copy of its stdout/stderr.
@@ -249,7 +291,7 @@ static_rule_is_stateful() {
 static_ranges_agree() {
     local bad=0 nft_range sys_range base wl_base reap_base
     nft_range="$(rules_of "$RULE" | sed -n 's/^ct state new tcp dport \([0-9]*-[0-9]*\) drop$/\1/p')"
-    sys_range="$(sed -n 's/^net\.ipv4\.ip_local_reserved_ports *= *//p' "$SYSCTL_SRC")"
+    sys_range="$(sed -n 's/^net\.ipv4\.ip_local_reserved_ports *= *//p' "$SYSCTL_SRC" | cut -d, -f1)"
     base="$(sed -n 's/^HEADLESS_PORT_BASE=\${HEADLESS_PORT_BASE:-\([0-9]*\)}$/\1/p' "$SRC/headless/edy-rdp-headless-start.sh")"
     reap_base="$(sed -n 's/^HEADLESS_PORT_BASE = \([0-9]*\)$/\1/p' "$SRC/relay/edy_rdp_reaper.py")"
     [[ -n "$nft_range" && "$nft_range" == "$sys_range" ]] \
@@ -258,6 +300,45 @@ static_ranges_agree() {
         || { echo "session ports are $base + (uid-1000), 1000 uids, but the rule covers '$nft_range'"; bad=1; }
     [[ "$reap_base" == "$base" ]] \
         || { echo "reaper HEADLESS_PORT_BASE=$reap_base, start script $base"; bad=1; }
+    # I-wayvnc: the Wayland VNC range 34000+(uid-1000) is gated by the guacd table
+    # and reserved alongside the headless range.
+    local wl_nft wl_sys
+    wl_base="$(sed -n 's/^WLVNC_PORT_BASE=\${WLVNC_PORT_BASE:-\([0-9]*\)}$/\1/p' "$SRC/waylandvnc/edy-rdp-waylandvnc-start.sh")"
+    wl_nft="$(rules_of_chain "$GUACD_RULE" | sed -n 's/^ip daddr 127\.0\.0\.1 tcp dport \([0-9]*-[0-9]*\) drop$/\1/p' | grep -v '^4822$' | head -1)"
+    wl_sys="$(sed -n 's/^net\.ipv4\.ip_local_reserved_ports *= *//p' "$SYSCTL_SRC" | cut -d, -f2)"
+    [[ -n "$wl_base" && "$wl_nft" == "$wl_base-$((wl_base + 999))" ]] \
+        || { echo "wayvnc ports are $wl_base + (uid-1000) but $GUACD_RULE drops '$wl_nft' (the port is ungated)"; bad=1; }
+    [[ "$wl_sys" == "$wl_nft" ]] \
+        || { echo "the sysctl reserves '$wl_sys' for wayvnc but the guacd table gates '$wl_nft'"; bad=1; }
+    return $bad
+}
+
+# The output-chain rules of the guacd table, comments stripped.
+rules_of_chain() { sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$1" \
+                   | awk '/^chain output/{c=1; next} c && /^}/{exit} c && NF && !/^type /'; }
+
+# wayvnc runs without auth: only root (guacd's rootful container) may reach it, the
+# accept must come BEFORE the drop, and 4822 keeps its own gate.
+static_wayvnc_owner_gate() {
+    local bad=0 r acc drp
+    mapfile -t r < <(rules_of_chain "$GUACD_RULE")
+    acc="$(printf '%s\n' "${r[@]}" | grep -n -x 'ip daddr 127\.0\.0\.1 tcp dport 34000-34999 meta skuid 0 accept' | cut -d: -f1)"
+    drp="$(printf '%s\n' "${r[@]}" | grep -n -x 'ip daddr 127\.0\.0\.1 tcp dport 34000-34999 drop' | cut -d: -f1)"
+    [[ -n "$acc" ]] || { echo "no 'skuid 0 accept' for 127.0.0.1:34000-34999 in $GUACD_RULE"; bad=1; }
+    [[ -n "$drp" ]] || { echo "no drop for 127.0.0.1:34000-34999 in $GUACD_RULE: wayvnc (enable_auth=false) is open to every local uid"; bad=1; }
+    [[ -n "$acc" && -n "$drp" && "$acc" -lt "$drp" ]] || { echo "the 34000-34999 accept must precede its drop"; bad=1; }
+    printf '%s\n' "${r[@]}" | grep -q 'tcp dport 4822 drop' || { echo "the 4822 drop is gone"; bad=1; }
+    return $bad
+}
+
+# guacd cannot run without the firewall unit (the owner gate is its only access
+# control); wayvnc's unit likewise.
+static_units_require_firewall() {
+    local bad=0 u
+    for u in "$SRC/systemd/edy-rdp-guacd.service.in" "$SRC/systemd/edy-rdp-waylandvnc@.service.in"; do
+        grep -qxF 'Requires=edy-rdp-firewall.service' "$u" || { echo "$u lacks Requires=edy-rdp-firewall.service"; bad=1; }
+        grep -qxF 'After=edy-rdp-firewall.service' "$u" || { echo "$u lacks After=edy-rdp-firewall.service"; bad=1; }
+    done
     return $bad
 }
 
@@ -355,6 +436,8 @@ kernel_netns_behaviour() {
 
 for t in static_rule_is_stateful \
          static_ranges_agree \
+         static_wayvnc_owner_gate \
+         static_units_require_firewall \
          static_installer_and_unit_wiring \
          checker_accepts_new_rejects_old \
          staged_install_upgrade_uninstall \

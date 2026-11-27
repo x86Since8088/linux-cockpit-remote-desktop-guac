@@ -1,6 +1,10 @@
 [Unit]
 Description=edy-rdp per-user headless Wayland session served over VNC (uid %i)
 After=edy-rdp-guacd.service
+# wayvnc runs with enable_auth=false; the edy_rdp_guacd table's 34000-34999
+# owner-match is its only access control, so refuse to start without it.
+Requires=edy-rdp-firewall.service
+After=edy-rdp-firewall.service
 # %i is the numeric uid of the target user.
 
 [Service]

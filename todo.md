@@ -31,14 +31,7 @@ do. Memory only points here.
   hold in a real browser: Chromium passes user activation to a window opened by `window.open()` from a click, and may start a
   context on the next audio source once activation exists. Reproduce in a pop-out first; the likely fix is to resume on the
   first pointer/key event in the document.
-- **Relay fails open when `loginctl` errors.** `_active_graphical_sessions()` (`relay/edy_rdp_relay.py`) returns 0 ("nobody is
-  signed in") when `loginctl list-sessions` fails or prints nothing, `_run()` turns an exception or timeout into `(1, "")`, and a
-  failed `show-session` is skipped. The I48 greeter failover (`resolveConsoleFallback` in `guac-rdp.js`, fed by the control
-  op `deskui-status`) switches to the greeter exactly when the count is 0. Return unknown on error instead of 0. The
-  `seated_uids()` docstring still calls this failure mode "cosmetic", which is stale now that it drives routing.
-- **I48 false greeter redirect after a door sign-in (inferred from code, not reproduced).** The same function counts only
-  sessions with a non-empty `Seat=`, but CHANGELOG 1.10.5 records that a session handed off through this project's RDP door
-  never carries a `Seat=`. With a user signed in that way the count is 0, and a console connect is sent to the greeter.
+- **After deploying 1.11.2 (I65): check for local listeners in 34000-34999.** The new owner gate drops non-root loopback connections to that range. On edt1 two `claude` processes listen on 127.0.0.1:34129 and :34809 today (ephemeral ports); after the firewall reload their non-root clients cannot reach them until they rebind (the range is now reserved, so new ones avoid it). Confirm nothing important breaks.
 - **I44 (+ D-10)**: `~/.config/pipewire/pipewire-pulse.conf.d/20-edy-tcp.conf` (dated Sep 13) is still present and
   `127.0.0.1:4713` (anonymous) is listening, so the I54 self-test "No anonymous PulseAudio TCP (4713)" fails on edt1 today.
   Confirm nothing relies on the TCP listener (audio capture binds the sink-monitor over the unix socket, see I42/I59), then
@@ -46,17 +39,6 @@ do. Memory only points here.
 - **I6**: edt1's RDP :3390 gate credential is stored recoverably. `gnome-remote-desktop` (uid 980) is in no group but its own, `tss`
   is gid 987, and `/dev/tpmrm0` is `tss`-only. Untried fix: add it to `tss`. (Group membership re-checked 2026-10-15; the
   credentials file is root-only and was not re-read.)
-- **Remote VNC is probably refused for everyone while `EDY_RDP_REMOTE_ADMIN_ONLY=1` (inferred from code, not tested).** The page's
-  `needAdmin = !!t.admin || (key === "remote" && isAdmin)` never asks for administrator proof for `vnc`, but the relay requires
-  it for `remote` and `vnc` when `REMOTE_ADMIN_ONLY` is set. edt1's `.env` sets it to 1, and the relay journal has no
-  `scenario=vnc` line since 2026-09-01, so the path has never run here. Fix: include `vnc` in the page condition, with a test.
-- **wayvnc has no password and no firewall rule on its port.** `waylandvnc/edy-rdp-waylandvnc-start.sh` writes `enable_auth=false`
-  on `127.0.0.1:34000+(uid-1000)`, and the live ruleset has no rule for 34000-34999 (only guacd's 4822 and 33000-33999), so any
-  local user can attach to another user's Wayland desktop. Code-derived; no Wayland session was running to observe the listener.
-  Idea: extend the loopback/owner rule to 34000-34999 and/or enable wayvnc auth.
-- **The guacd owner gate is fail-open at the unit level.** `edy-rdp-firewall.service` is ordered before guacd, but
-  `edy-rdp-guacd.service` does not `Require=` it, and the firewall unit's ExecStop deletes both tables, so guacd can run
-  with no owner-match if the firewall unit is stopped or fails.
 - **Why the FreeRDP 3 (Janua) guacd is pinned.** `requires.txt` justifies it by the 3390 RDSTLS greeter, yet on every path the
   Architecture tab draws the relay rewrites guacd's connect to VNC against x11vnc and never uses guacd's RDP client. Either the
   pin is unnecessary for those paths or another reason is unrecorded.
