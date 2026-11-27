@@ -2,13 +2,32 @@
 # Only the relay's uid (and root) may reach guacd on 127.0.0.1:4822. Every other
 # local uid is dropped, so the ONLY way to guacd is through the authenticated
 # relay -- closing the no-auth / join-by-UUID hijack without network isolation.
+#
+# The same table also gates the per-user Wayland VNC sessions: wayvnc
+# (waylandvnc/edy-rdp-waylandvnc-start.sh) listens on 127.0.0.1:34000+(uid-1000)
+# with enable_auth=false, so without a rule any local uid could attach to another
+# user's desktop. Only the ports in the set `wayvnc_ports` are gated, so another
+# local listener that happens to sit in 34000-34999 is NOT affected. The set is
+# filled by waylandvnc/edy-rdp-wlvnc-gate (start script: add before wayvnc listens;
+# stop script: del) and refilled in the SAME transaction as this file by
+# `edy-rdp-wlvnc-gate load`, which edy-rdp-firewall.service runs on start and
+# reload. Only uid 0 may connect: guacd runs in a ROOTFUL podman container on the
+# host network, so its connections carry skuid 0 (why 0 is in the 4822 set too),
+# and the relay hands guacd the target without ever dialling it. The owning uid is
+# deliberately not allowed (nft has no per-port uid arithmetic; the owner has no
+# reason to dial its own wayvnc). IPv4 only: wayvnc is configured with
+# address=127.0.0.1, so nothing listens on ::1 (a ::ffff:127.0.0.1 connect is IPv4
+# on the wire and is matched).
 # @RELAY_UID@ is substituted by install.sh with edy-relay's uid.
 table inet edy_rdp_guacd
 delete table inet edy_rdp_guacd
 table inet edy_rdp_guacd {
+    set wayvnc_ports { type inet_service; }
     chain output {
         type filter hook output priority filter; policy accept;
         ip daddr 127.0.0.1 tcp dport 4822 meta skuid { 0, @RELAY_UID@ } accept
         ip daddr 127.0.0.1 tcp dport 4822 drop
+        ip daddr 127.0.0.1 tcp dport @wayvnc_ports meta skuid 0 accept
+        ip daddr 127.0.0.1 tcp dport @wayvnc_ports drop
     }
 }

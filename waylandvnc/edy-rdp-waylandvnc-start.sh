@@ -22,7 +22,6 @@
 #   than mirroring the physical one -- for that, use Console.
 set -uo pipefail
 
-WLVNC_PORT_BASE=${WLVNC_PORT_BASE:-34000}
 UID_BASE=${UID_BASE:-1000}
 STATE=/run/edy-rdp/waylandvnc
 GEOM=${WLVNC_GEOM:-1600x1000}
@@ -30,12 +29,23 @@ GEOM=${WLVNC_GEOM:-1600x1000}
 uid="${1:?usage: edy-rdp-waylandvnc-start <uid>}"
 user=$(id -un "$uid" 2>/dev/null) || { echo "no such uid $uid" >&2; exit 2; }
 [ "$uid" -ge "$UID_BASE" ] && [ "$uid" -lt "$((UID_BASE+1000))" ] || { echo "uid $uid out of range" >&2; exit 2; }
-port=$((WLVNC_PORT_BASE + uid - UID_BASE))
+# The uid -> port formula lives in ONE place: the gate helper (installed beside
+# this script; the .sh name is the source-tree layout).
+d=$(dirname -- "$0"); GATE=""
+for g in "$d/edy-rdp-wlvnc-gate" "$d/edy-rdp-wlvnc-gate.sh"; do [ -x "$g" ] && { GATE=$g; break; }; done
+[ -n "$GATE" ] || { echo "edy-rdp-wlvnc-gate not found beside $0" >&2; exit 1; }
+port=$("$GATE" port "$uid") || exit 2
 rt="$STATE/$uid/rt"                 # dedicated runtime dir: never /run/user/$uid
 unit="edy-rdp-wlvnc-$uid"
 
 install -d -o root -g edy-rdp -m 0750 "$STATE"
 install -d -o "$user" -g "$user" -m 0700 "$STATE/$uid" "$rt"
+
+# Owner-gate the port BEFORE anything can listen on it (and again on every call:
+# idempotent, and it heals a table that was re-created). The directory just made
+# above is also what a firewall reload re-reads, so there is no unguarded window.
+# Fail closed: no gate, no wayvnc (it runs without auth).
+"$GATE" add "$uid" || { echo "[wlvnc] could not gate port $port in the edy_rdp_guacd table" >&2; exit 1; }
 
 # Already up? Report and exit 0 -- the relay calls this on every connect.
 if systemctl is-active --quiet "$unit.service" && ss -tlnH "sport = :$port" 2>/dev/null | grep -q .; then
@@ -96,8 +106,11 @@ ss -tlnH "sport = :$port" 2>/dev/null | grep -q . || {
     echo "[wlvnc] wayvnc never listened on 127.0.0.1:$port" >&2; exit 1; }
 
 # Publish for the relay. No credential: wayvnc runs without auth because the
-# port is loopback-only and the SO_PEERCRED relay is the sole ingress -- the
-# same posture the FreeRDP3 bridge's loopback VNC endpoint already relies on.
+# port is loopback-only and the edy_rdp_guacd nftables table
+# (hardening/edy-rdp-guacd.nft) lets only uid 0 -- guacd, in its rootful
+# container -- connect to this port (it is in the set wayvnc_ports). Without that rule any local uid
+# could attach to this user's desktop; edy-rdp-waylandvnc@.service Requires=
+# the firewall unit so it cannot start without it.
 tmp=$(mktemp "$STATE/.$uid.XXXXXX")
 printf 'PORT=%s\nUSER=%s\nHOST=127.0.0.1\n' "$port" "$user" > "$tmp"
 chgrp edy-rdp "$tmp"; chmod 0640 "$tmp"; mv "$tmp" "$STATE/$uid.env"

@@ -1523,6 +1523,22 @@
         return scenario === "greeter" && !errored && !!armed && follows < 1;
     }
     // TESTHOOK:GREETERFOLLOW:END
+    // TESTHOOK:SECDECIDE:BEGIN
+    // Redirect a console connect to the greeter only on a POSITIVE "nobody is
+    // signed in": a number that is exactly 0. null/undefined/missing (the relay's
+    // "could not determine", a failed probe) must keep the console.
+    function consoleShouldFallBackToGreeter(r) {
+        return !!r && !!r.ok && typeof r.active_graphical_sessions === "number"
+            && r.active_graphical_sessions === 0;
+    }
+    // Administrator proof is requested for every admin-only target and, when the
+    // Cockpit session is already elevated, for the two operator-gated ones
+    // (remote RDP and remote VNC): the relay requires it for both when
+    // EDY_RDP_REMOTE_ADMIN_ONLY=1.
+    function connectNeedsAdminProof(t, key, isAdmin) {
+        return !!t.admin || ((key === "remote" || key === "vnc") && !!isAdmin);
+    }
+    // TESTHOOK:SECDECIDE:END
     var greeterFollowArmed = false;
     var greeterFollows = 0;
     var greeterStableTimer = null;
@@ -1532,7 +1548,7 @@
         var timeout = new Promise(function (resolve) { setTimeout(function () { resolve(null); }, CONSOLE_PROBE_MS); });
         return Promise.race([controlRequest({ op: "deskui-status" }), timeout])
             .then(function (r) {
-                if (!r || !r.ok || r.active_graphical_sessions !== 0) return key;
+                if (!consoleShouldFallBackToGreeter(r)) return key;
                 $("target").value = "greeter";
                 refreshUi();
                 showToast("No one is signed in on the physical console — opening the sign-in screen instead.");
@@ -1551,7 +1567,7 @@
         // Remote is admin-gated only if the server sets EDY_RDP_REMOTE_ADMIN_ONLY;
         // prove admin when the Cockpit session is already elevated (no polkit prompt
         // for non-admins), otherwise register a plain token and let the relay decide.
-        var needAdmin = !!t.admin || (key === "remote" && isAdmin);
+        var needAdmin = connectNeedsAdminProof(t, key, isAdmin);
         setStatus(needAdmin ? "Proving administrator mode…" : "Registering session…");
         registerSession(needAdmin).then(function (reg) {
             if (t.admin && !reg.admin) {
@@ -2065,7 +2081,8 @@
                 return;
             }
             $("deskui-hostname").textContent = r.hostname || "";
-            var live = r.active_graphical_sessions || 0;
+            var liveKnown = typeof r.active_graphical_sessions === "number";
+            var live = liveKnown ? r.active_graphical_sessions : 0;
             body.innerHTML = "";
             body.appendChild(deskuiRow("Boots to",
                 r.boot_to_desktop ? "graphical desktop" : "console (" + (r.default_target || "multi-user.target") + ")"));
@@ -2076,7 +2093,7 @@
                 body.appendChild(deskuiRow("Enabled at boot",
                     (r.dm_enabled === null || r.dm_enabled === undefined) ? "unknown" : String(r.dm_enabled)));
             }
-            body.appendChild(deskuiRow("Desktop sessions in use", String(live), live > 0));
+            body.appendChild(deskuiRow("Desktop sessions in use", liveKnown ? String(live) : "unknown", live > 0 || !liveKnown));
             body.appendChild(deskuiRow("Control on this host",
                 r.write_enabled ? (r.admin ? "enabled (you are an administrator)" : "enabled (needs administrative access)")
                                 : "read-only (not opted in on this host)"));
@@ -2084,7 +2101,10 @@
                 ? "Stop and Disable ask you to type the host name to confirm."
                 : "Set EDY_RDP_DESKUI_ENABLE=1 in this host's .env to allow changes.";
             var s = $("deskui-status");
-            if (live > 0) {
+            if (!liveKnown) {
+                s.textContent = "Could not determine whether desktop sessions are in use. Stopping the desktop may end them.";
+                s.className = "status err";
+            } else if (live > 0) {
                 s.textContent = live + " desktop session(s) are in use. Stopping the desktop now will end them.";
                 s.className = "status err";
             } else {

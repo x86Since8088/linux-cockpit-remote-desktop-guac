@@ -382,25 +382,22 @@ def seated_uids():
     """UIDs of everyone with an active, graphical, seated, non-greeter session
     right now, or None if that could not be determined AT ALL.
 
-    This feeds an authorization decision (the shadow-group gate), not a
-    cosmetic error relabeling like physical_session_locked() above — so unlike
-    that function it FAILS CLOSED: None means "cannot rule out someone else
-    being seated", never "nobody is seated".
+    This feeds an authorization decision (the shadow-group gate), so it FAILS
+    CLOSED: None means "cannot rule out someone else being seated", never
+    "nobody is seated". (DeskUI._active_graphical_sessions() follows the same
+    rule -- None = unknown -- because it too drives routing: the I48 greeter
+    failover.)
 
-    Deliberately does NOT reuse _active_graphical_sessions()'s "skip a session
-    whose own show-session lookup fails" precedent: that function's failure
-    mode is cosmetic (a miscounted desktop-in-use tally), so treating a lookup
-    error the same as "this session doesn't exist" is harmless there. Here it
-    is not — `loginctl show-session` gives no reliable way to tell "the
-    session ended between list and show" (benign) apart from "logind/D-Bus
-    hiccuped on this one query" (not benign, and NOT something a request
-    should be waved through on) — found by review: the earlier version of
-    this function skipped both alike, which silently turned an authorization
-    gate fail-open exactly when it mattered most. So ANY show-session failure
-    (exception, non-zero exit, or a seated session with an unparseable User=)
-    fails the WHOLE call closed (None) rather than just dropping that one
-    session — trading a narrow, rare false "someone might be seated" against
-    ever silently reporting an empty seat that isn't."""
+    A session whose own show-session lookup fails is not skipped:
+    `loginctl show-session` gives no reliable way to tell "the session ended
+    between list and show" (benign) apart from "logind/D-Bus hiccuped on this one
+    query" (not benign, and NOT something a request should be waved through on) --
+    found by review: an earlier version skipped both alike, which silently turned
+    an authorization gate fail-open exactly when it mattered most. So ANY
+    show-session failure (exception, non-zero exit, or a seated session with an
+    unparseable User=) fails the WHOLE call closed (None) rather than just
+    dropping that one session -- trading a narrow, rare false "someone might be
+    seated" against ever silently reporting an empty seat that isn't."""
     try:
         listed = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
                                 capture_output=True, text=True, timeout=3)
@@ -544,12 +541,23 @@ class DesktopUI:
         return None
 
     def _active_graphical_sessions(self):
-        """How many active, graphical, SEATED user sessions exist right now — the
-        desktops that a Stop would cut off. Greeters and seatless sessions do not
-        count."""
+        """How many active, graphical user sessions exist right now -- the
+        desktops that a Stop would cut off -- or None when that could not be
+        determined.
+
+        None means UNKNOWN and is never the same as 0: the I48 greeter failover
+        redirects a console connect to the sign-in screen exactly when this is 0,
+        so a loginctl failure (missing binary, timeout, logind hiccup, a
+        show-session that errors) must not read as "nobody is signed in".
+
+        A session counts when it is Active=yes, Type wayland/x11 and not a
+        greeter, WITH OR WITHOUT a Seat=: a session handed off through this
+        project's RDP door never carries one (CHANGELOG 1.10.5), and requiring it
+        made a signed-in user invisible. Counting it is the conservative side for
+        both consumers (no false greeter redirect; the Stop warning names it)."""
         rc, out = self._run(["loginctl", "list-sessions", "--no-legend"])
-        if rc != 0 or not out:
-            return 0
+        if rc != 0:
+            return None
         n = 0
         for line in out.splitlines():
             parts = line.split()
@@ -557,17 +565,14 @@ class DesktopUI:
                 continue
             sid = parts[0]
             rc2, props = self._run(["loginctl", "show-session", sid,
-                                    "-p", "Type", "-p", "Active", "-p", "Seat",
-                                    "-p", "Class"])
+                                    "-p", "Type", "-p", "Active", "-p", "Class"])
             if rc2 != 0:
-                continue
+                return None
             d = {}
             for pline in props.splitlines():
                 if "=" in pline:
                     k, v = pline.split("=", 1)
                     d[k] = v
-            if not d.get("Seat"):
-                continue
             if d.get("Active") != "yes":
                 continue
             if d.get("Class") == "greeter":

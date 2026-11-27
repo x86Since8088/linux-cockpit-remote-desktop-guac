@@ -2073,3 +2073,41 @@ typed characters "get the same corrections" was true for punctuation only.
   Live-like check: Xvfb + `x11vnc -nomodtweak` driven by an RFB client with the exact wire events; typed
   text read back from X key events: before "hello world" (and "HELLO" for "hello" with Shift held), after
   "Hello World" in all cases. Not exercised: the full guacd -> xfreerdp3 -> RDP guest chain.
+
+### I66 · wayvnc (Wayland VNC scenario) has no authentication and no firewall rule · Sev M · FIXED (1.11.3.20261127)
+`waylandvnc/edy-rdp-waylandvnc-start.sh` starts wayvnc with `enable_auth=false` on
+`127.0.0.1:34000+(uid-1000)`; the `edy_rdp_guacd` table gated only 4822, so any local uid could attach to another
+user's Wayland desktop. Code-derived, not observed. Fix: a set `wayvnc_ports` in that table; `ip daddr 127.0.0.1 tcp
+dport @wayvnc_ports` is accepted only for `skuid 0` and dropped otherwise. Only ports with a session are in the set,
+so unrelated listeners inside 34000-34999 (edt1 has two ephemeral `claude` listeners there) are unaffected. The set is
+maintained by `edy-rdp-wlvnc-gate` (add before wayvnc listens, del on stop) and rebuilt from the session directories
+under `/run/edy-rdp/waylandvnc/` in the same nft transaction whenever `edy-rdp-firewall.service` starts or reloads.
+Why uid 0 only: guacd runs in a rootful podman container on the host network, so its connections carry skuid 0 (the
+same reason 0 is in the 4822 set); the relay only hands guacd the target. The owning uid is not allowed (no per-port
+uid arithmetic in nft, no need). IPv6: wayvnc is configured `address=127.0.0.1`, so nothing listens on ::1 and no
+v6 rule exists (a `::ffff:127.0.0.1` connect is IPv4 on the wire and matched). wayvnc auth was NOT added: it needs
+per-session credentials and guacd support for wayvnc's auth types, neither verified. The range is also reserved in
+`ip_local_reserved_ports`. Tests: `tests/headless_nft_test.sh` (static, plus a netns kernel check through the real
+helper with a mutation); a systemd container showed reload and restart re-add the ports atomically.
+
+### I67 · The guacd owner gate was fail-open at the unit level · Sev M · FIXED (1.11.3.20261127)
+`edy-rdp-guacd.service` was only ordered After the firewall unit, and the firewall unit's ExecStop deletes both
+tables, so guacd could run with no owner-match. Fix: `Requires=` + `After=edy-rdp-firewall.service`. Verified in a
+systemd container with stub nft/podman (stub log order): start guacd alone pulls the firewall in first; reload does
+not touch guacd; restart stops guacd before the tables are deleted and starts it after they are re-added; stop stops
+guacd; a failing nft load leaves guacd unstarted. The unmodified unit left guacd active with the firewall stopped.
+Not covered: `nftables.service` flushing the whole ruleset behind the units' back.
+
+### I68 · The relay reported "no desktop sessions" when loginctl failed; door sessions were not counted · Sev M · FIXED (1.11.3.20261127)
+`_active_graphical_sessions()` returned 0 when `loginctl list-sessions` failed, skipped a failing `show-session`, and
+required `Seat=`; the I48 greeter failover redirects exactly when the count is 0, so a loginctl hiccup, or a user
+signed in through the RDP door (no `Seat=`, 1.10.5), sent a console connect to the greeter. Now: unknown is `None`,
+the page redirects only on a number equal to 0, and the count no longer needs a Seat. The stale "cosmetic" wording in
+the `seated_uids()` docstring is corrected. Counting seatless sessions also counts a Remote=yes graphical session; that
+errs on the side of not redirecting and of warning before a Stop.
+
+### I69 · Remote VNC never asked for administrator proof · Sev M · FIXED (1.11.3.20261127)
+The page's `needAdmin` covered `remote` but not `vnc`, while the relay requires proof for both under
+`EDY_RDP_REMOTE_ADMIN_ONLY=1`; VNC was refused for everyone on such a host. Now `connectNeedsAdminProof()` covers
+both. Test: `tests/js/security_decisions.test.js`.
+

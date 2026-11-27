@@ -8,6 +8,8 @@ unit="edy-rdp-wlvnc-$uid"
 # on a dead socket instead of exiting.
 systemctl stop "$unit-vnc.service" 2>/dev/null || true
 systemctl stop "$unit.service" 2>/dev/null || true
+d=$(dirname -- "$0")
+for g in "$d/edy-rdp-wlvnc-gate" "$d/edy-rdp-wlvnc-gate.sh"; do [ -x "$g" ] && { "$g" del "$uid" || true; break; }; done
 rm -f "$STATE/$uid.env"
 rm -rf "$STATE/$uid"
 echo "[wlvnc] stopped session for uid $uid"

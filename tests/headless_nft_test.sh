@@ -40,10 +40,12 @@ set -uo pipefail
 SRC="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)"
 SELF="$SRC/tests/headless_nft_test.sh"
 RULE="$SRC/hardening/edy-rdp-headless.nft"
+GUACD_RULE="$SRC/hardening/edy-rdp-guacd.nft"
 SYSCTL_SRC="$SRC/hardening/edy-rdp-headless-sysctl.conf"
 SYSCTL_DST=/etc/sysctl.d/90-edy-rdp-headless.conf
 NFT_DST=/etc/nftables.d/edy-rdp-headless.nft
-UNIT="$SRC/systemd/edy-rdp-firewall.service"
+UNIT="$SRC/systemd/edy-rdp-firewall.service.in"
+GATE="$SRC/waylandvnc/edy-rdp-wlvnc-gate.sh"
 export JOURNAL_STREAM="${JOURNAL_STREAM:-headless_nft_test}"
 
 # The 1.10.6 rule, verbatim: the mutation the kernel test must catch.
@@ -63,10 +65,10 @@ table inet edy_rdp_headless {
 # nothing but lo. A peer namespace (nested, also ours) is joined by a veth.
 # ---------------------------------------------------------------------------
 if [[ "${1:-}" == --in-netns ]]; then
-    exec python3 - "$RULE" "$SYSCTL_SRC" "$OLD_RULE" <<'PY'
+    exec python3 - "$RULE" "$SYSCTL_SRC" "$OLD_RULE" "$GUACD_RULE" "$GATE" <<'PY'
 import os, socket, subprocess, sys, time
 
-rule, sysctl_conf, old_rule = sys.argv[1], sys.argv[2], sys.argv[3]
+rule, sysctl_conf, old_rule, guacd_rule, gate = sys.argv[1:6]
 HOST, PEER = "10.231.61.1", "10.231.61.2"
 fails = []
 
@@ -173,28 +175,99 @@ try:
     load(open(rule).read())
 
     # 6. the reservation: with the shipped drop-in applied and the ephemeral
-    #    range narrowed to straddle 33000-33999, no unbound connect() may be
+    #    range narrowed to straddle 33000-34999, no unbound connect() may be
     #    handed a session port. Without the drop-in ~98% of them would be.
     with open("/proc/sys/net/ipv4/ip_local_port_range", "w") as f:
-        f.write("32990 34010\n")
+        f.write("32980 35010\n")
     r = sh("sysctl", "-q", "-p", sysctl_conf, check=False)
     if r.returncode:
         fails.append("sysctl -p %s failed: %s" % (sysctl_conf, r.stdout.decode().strip()))
     else:
         got = open("/proc/sys/net/ipv4/ip_local_reserved_ports").read().strip()
-        if got != "33000-33999":
-            fails.append("after sysctl -p the reserved list is '%s', want 33000-33999" % got)
+        # the kernel prints the two adjacent ranges merged
+        if got not in ("33000-33999,34000-34999", "33000-34999"):
+            fails.append("after sysctl -p the reserved list is '%s', want 33000-33999 and 34000-34999" % got)
         held, bad = [], []
         for _ in range(15):
             s = socket.socket(); s.settimeout(1.5); s.connect((PEER, 8080))
             held.append(s)
             lp = s.getsockname()[1]
-            if 33000 <= lp <= 33999:
+            if 33000 <= lp <= 33999 or 34000 <= lp <= 34999:
                 bad.append(lp)
         for s in held:
             s.close()
         if bad:
             fails.append("with the reservation applied, connect() still got session ports %s" % bad)
+
+    # 7. the wayvnc gate (guacd table, output chain, set wayvnc_ports), driven
+    #    through the REAL helper (edy-rdp-wlvnc-gate load/add/del). Listeners on
+    #    127.0.0.1:34006 (a session's port, in the set) and 34007 / 35006 (NOT in
+    #    the set: an unrelated listener inside and outside the range). Only uid 0
+    #    is mapped in this netns, so a non-root uid is simulated by the mutation
+    #    that allows another uid: the set port then MUST time out and the others
+    #    MUST stay open. (A real non-root uid on a kernel is not covered here.)
+    import tempfile, shutil
+    tmp = tempfile.mkdtemp()
+    state = os.path.join(tmp, "state"); os.makedirs(os.path.join(state, "1006"))
+    base = open(guacd_rule).read().replace("@RELAY_UID@", "4242")
+    rules_path = os.path.join(tmp, "guacd.nft")
+    genv = dict(os.environ, EDY_RDP_GUACD_NFT=rules_path, WLVNC_STATE_DIR=state)
+    def helper(*a):
+        return subprocess.run(["bash", gate] + list(a), env=genv,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    def listener(port):
+        l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        l.bind(("127.0.0.1", port)); l.listen(8); return l
+    keep = [listener(p) for p in (34006, 34007, 35006)]
+    def lo_connect(port, timeout=1.0):
+        c = socket.socket(); c.settimeout(timeout)
+        try:
+            c.connect(("127.0.0.1", port)); return "connected"
+        except socket.timeout:
+            return "timeout"
+        except OSError as e:
+            return "error %s" % e.errno
+        finally:
+            c.close()
+    def check(label, want):
+        for port, w in want.items():
+            got = lo_connect(port)
+            if got != w:
+                fails.append("%s: 127.0.0.1:%d was '%s', want '%s'" % (label, port, got, w))
+    if helper("port", "1006").stdout.strip() != b"34006":
+        fails.append("helper port 1006 is not 34006")
+    # shipped rule (uid 0 allowed): the gated port is reachable for root
+    open(rules_path, "w").write(base)
+    r = helper("load")
+    if r.returncode:
+        fails.append("helper load of the shipped rule failed: %s" % r.stdout.decode().strip())
+    else:
+        out = subprocess.run(["nft", "list", "set", "inet", "edy_rdp_guacd", "wayvnc_ports"],
+                             stdout=subprocess.PIPE).stdout.decode()
+        if "34006" not in out:
+            fails.append("load did not put the existing session's port 34006 in the set: %s" % out.strip())
+        check("shipped rule, uid 0", {34006: "connected", 34007: "connected", 35006: "connected"})
+    # mutation: another uid allowed => the set port is dropped, the rest stay open
+    mutated = base.replace("tcp dport @wayvnc_ports meta skuid 0 accept",
+                           "tcp dport @wayvnc_ports meta skuid 4242 accept")
+    assert mutated != base, "mutation did not apply"
+    open(rules_path, "w").write(mutated)
+    r = helper("load")
+    if r.returncode:
+        fails.append("helper load of the mutated rule failed: %s" % r.stdout.decode().strip())
+    else:
+        check("non-allowed uid, port in set", {34006: "timeout", 34007: "connected", 35006: "connected"})
+        # a session that starts later: add gates its port at once
+        helper("add", "1007")
+        check("after add 1007", {34006: "timeout", 34007: "timeout", 35006: "connected"})
+        # a firewall RELOAD (table deleted + re-created) re-adds the live sessions'
+        # elements in the same transaction; 1007 has no state dir here so it is
+        # dropped from the set, 1006 stays gated
+        helper("load")
+        check("after reload", {34006: "timeout", 34007: "connected", 35006: "connected"})
+        helper("del", "1006")
+        check("after del 1006", {34006: "connected", 34007: "connected", 35006: "connected"})
+    shutil.rmtree(tmp, ignore_errors=True)
 finally:
     # Both children, or the caller's $(...) never sees EOF: the peer server
     # holds an inherited copy of its stdout/stderr.
@@ -249,7 +322,7 @@ static_rule_is_stateful() {
 static_ranges_agree() {
     local bad=0 nft_range sys_range base wl_base reap_base
     nft_range="$(rules_of "$RULE" | sed -n 's/^ct state new tcp dport \([0-9]*-[0-9]*\) drop$/\1/p')"
-    sys_range="$(sed -n 's/^net\.ipv4\.ip_local_reserved_ports *= *//p' "$SYSCTL_SRC")"
+    sys_range="$(sed -n 's/^net\.ipv4\.ip_local_reserved_ports *= *//p' "$SYSCTL_SRC" | cut -d, -f1)"
     base="$(sed -n 's/^HEADLESS_PORT_BASE=\${HEADLESS_PORT_BASE:-\([0-9]*\)}$/\1/p' "$SRC/headless/edy-rdp-headless-start.sh")"
     reap_base="$(sed -n 's/^HEADLESS_PORT_BASE = \([0-9]*\)$/\1/p' "$SRC/relay/edy_rdp_reaper.py")"
     [[ -n "$nft_range" && "$nft_range" == "$sys_range" ]] \
@@ -258,6 +331,64 @@ static_ranges_agree() {
         || { echo "session ports are $base + (uid-1000), 1000 uids, but the rule covers '$nft_range'"; bad=1; }
     [[ "$reap_base" == "$base" ]] \
         || { echo "reaper HEADLESS_PORT_BASE=$reap_base, start script $base"; bad=1; }
+    # I-wayvnc: the Wayland VNC range 34000+(uid-1000) is gated by the guacd table
+    # and reserved alongside the headless range.
+    local wl_sys gate_base
+    wl_base="$(sed -n 's/^WLVNC_PORT_BASE=\${WLVNC_PORT_BASE:-\([0-9]*\)}$/\1/p' "$GATE")"
+    gate_base="$wl_base"
+    [[ -n "$wl_base" ]] || { echo "the gate helper has no WLVNC_PORT_BASE"; bad=1; }
+    # ONE copy of the formula: the start script must not carry its own
+    grep -q 'WLVNC_PORT_BASE' "$SRC/waylandvnc/edy-rdp-waylandvnc-start.sh" \
+        && { echo "the start script still carries its own WLVNC_PORT_BASE (formula must live in the gate helper only)"; bad=1; }
+    [[ "$(sed -n 's/^WLVNC_PORT_BASE = \([0-9]*\)$/\1/p' "$SRC/relay/edy_rdp_reaper.py")" == "$wl_base" ]] \
+        || { echo "reaper WLVNC_PORT_BASE differs from the gate helper's $wl_base"; bad=1; }
+    wl_sys="$(sed -n 's/^net\.ipv4\.ip_local_reserved_ports *= *//p' "$SYSCTL_SRC" | cut -d, -f2)"
+    [[ -n "$wl_base" && "$wl_sys" == "$wl_base-$((wl_base + 999))" ]] \
+        || { echo "the sysctl reserves '$wl_sys' for wayvnc but the session ports are $wl_base + (uid-1000)"; bad=1; }
+    return $bad
+}
+
+# The output-chain rules of the guacd table, comments stripped.
+rules_of_chain() { sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$1" \
+                   | awk '/^chain output/{c=1; next} c && /^}/{exit} c && NF && !/^type /'; }
+
+# wayvnc runs without auth: only root (guacd's rootful container) may reach it, the
+# accept must come BEFORE the drop, and 4822 keeps its own gate.
+static_wayvnc_owner_gate() {
+    eval "$(sed -n '/^# BEGIN-MANIFEST/,/^# END-MANIFEST/p' "$SRC/install.sh")"
+    local LIBEXEC_LIST=("${LIBEXEC[@]}")
+    local bad=0 r acc drp
+    mapfile -t r < <(rules_of_chain "$GUACD_RULE")
+    grep -qE '^[[:space:]]*set wayvnc_ports \{ type inet_service; \}' <(sed 's/#.*//' "$GUACD_RULE") \
+        || { echo "no set wayvnc_ports in $GUACD_RULE"; bad=1; }
+    acc="$(printf '%s\n' "${r[@]}" | grep -n -x 'ip daddr 127\.0\.0\.1 tcp dport @wayvnc_ports meta skuid 0 accept' | cut -d: -f1)"
+    drp="$(printf '%s\n' "${r[@]}" | grep -n -x 'ip daddr 127\.0\.0\.1 tcp dport @wayvnc_ports drop' | cut -d: -f1)"
+    [[ -n "$acc" ]] || { echo "no 'skuid 0 accept' for @wayvnc_ports in $GUACD_RULE"; bad=1; }
+    [[ -n "$drp" ]] || { echo "no drop for @wayvnc_ports in $GUACD_RULE: wayvnc (enable_auth=false) is open to every local uid"; bad=1; }
+    [[ -n "$acc" && -n "$drp" && "$acc" -lt "$drp" ]] || { echo "the @wayvnc_ports accept must precede its drop"; bad=1; }
+    printf '%s\n' "${r[@]}" | grep -qE 'dport 34000-34999' && { echo "a blanket 34000-34999 rule is back (it cuts off unrelated local listeners)"; bad=1; }
+    printf '%s\n' "${r[@]}" | grep -q 'tcp dport 4822 drop' || { echo "the 4822 drop is gone"; bad=1; }
+    # the helper: ships, start adds before wayvnc, stop deletes, firewall unit loads through it
+    printf '%s\n' "${LIBEXEC_LIST[@]}" | grep -qx 'waylandvnc/edy-rdp-wlvnc-gate.sh:edy-rdp-wlvnc-gate' \
+        || { echo "install.sh does not ship the gate helper"; bad=1; }
+    local ln_a ln_w
+    ln_a="$(grep -n '"\$GATE" add' "$SRC/waylandvnc/edy-rdp-waylandvnc-start.sh" | head -1 | cut -d: -f1)"
+    ln_w="$(grep -n '/usr/bin/wayvnc' "$SRC/waylandvnc/edy-rdp-waylandvnc-start.sh" | head -1 | cut -d: -f1)"
+    [[ -n "$ln_a" && -n "$ln_w" && "$ln_a" -lt "$ln_w" ]] || { echo "the start script must gate the port BEFORE starting wayvnc"; bad=1; }
+    grep -q 'del "\$uid"' "$SRC/waylandvnc/edy-rdp-waylandvnc-stop.sh" || { echo "the stop script never removes the port from the set"; bad=1; }
+    grep -qxF 'ExecStart=@LIBEXEC@/edy-rdp-wlvnc-gate load' "$UNIT" && grep -qxF 'ExecReload=@LIBEXEC@/edy-rdp-wlvnc-gate load' "$UNIT" \
+        || { echo "the firewall unit does not load the guacd table through the gate helper on start AND reload"; bad=1; }
+    return $bad
+}
+
+# guacd cannot run without the firewall unit (the owner gate is its only access
+# control); wayvnc's unit likewise.
+static_units_require_firewall() {
+    local bad=0 u
+    for u in "$SRC/systemd/edy-rdp-guacd.service.in" "$SRC/systemd/edy-rdp-waylandvnc@.service.in"; do
+        grep -qxF 'Requires=edy-rdp-firewall.service' "$u" || { echo "$u lacks Requires=edy-rdp-firewall.service"; bad=1; }
+        grep -qxF 'After=edy-rdp-firewall.service' "$u" || { echo "$u lacks After=edy-rdp-firewall.service"; bad=1; }
+    done
     return $bad
 }
 
@@ -272,7 +403,7 @@ static_installer_and_unit_wiring() {
     for want in "ExecStart=/usr/sbin/nft -f $NFT_DST" "ExecReload=/usr/sbin/nft -f $NFT_DST" \
                 "ExecStart=-/usr/sbin/sysctl -q -p $SYSCTL_DST" \
                 "ExecReload=-/usr/sbin/sysctl -q -p $SYSCTL_DST" \
-                "ExecReload=/usr/sbin/nft -f /etc/nftables.d/edy-rdp-guacd.nft"; do
+                "ExecReload=@LIBEXEC@/edy-rdp-wlvnc-gate load"; do
         grep -qxF -- "$want" "$UNIT" || { echo "$UNIT lacks: $want"; bad=1; }
     done
     # The sysctl must come AFTER both nft loads: a failed sysctl ('-') must never
@@ -355,6 +486,8 @@ kernel_netns_behaviour() {
 
 for t in static_rule_is_stateful \
          static_ranges_agree \
+         static_wayvnc_owner_gate \
+         static_units_require_firewall \
          static_installer_and_unit_wiring \
          checker_accepts_new_rejects_old \
          staged_install_upgrade_uninstall \

@@ -6,6 +6,15 @@
 Description=edy-rdp guacd (host loopback 127.0.0.1:4822, nftables uid-gated)
 Wants=network-online.target
 After=network-online.target
+# The owner-match gate on 4822 is the ONLY thing that keeps another local uid
+# off guacd, so guacd must never run without it: Requires= makes a missing or
+# failed firewall unit refuse guacd's start, and propagates a firewall
+# stop/restart to guacd (guacd stops FIRST, because of After=, and is started
+# again after the rules are back -- there is no moment with guacd up and the
+# table gone). A reload (what deploy.sh uses) is not propagated and replaces
+# the tables atomically, so it costs nothing.
+Requires=edy-rdp-firewall.service
+After=edy-rdp-firewall.service
 
 [Service]
 # guacd runs in the HOST network namespace so it can complete outbound RDP
