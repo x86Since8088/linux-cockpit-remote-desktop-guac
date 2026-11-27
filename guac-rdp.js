@@ -74,8 +74,13 @@
     //     the deployment has no audio source, so always offering it is harmless.
     // We deliberately do NOT set disable-copy/disable-paste here: those are fixed
     // at connect and would defeat a live toggle. The gate lives in the browser.
-    function guacdValues() {
+    function guacdValues(scenario) {
         var v = {};
+        // I73: wayvnc speaks UTF-8 clipboard text but guacd's VNC default is ISO-8859-1,
+        // which turned CJK/emoji (and any non-Latin-1) into mojibake in both directions.
+        // Only the wayland-vnc scenario: the x11vnc bridge and a direct `vnc` host speak Latin-1.
+        var enc = clipboardEncodingParam(scenario);
+        if (enc) v["clipboard-encoding"] = enc;
         // Negotiate the audio channel ONLY when Sound is on at connect. Forcing it
         // on unconditionally made guacd attempt (and log a failed) PulseAudio
         // connection on every session and was implicated in a login-screen
@@ -91,6 +96,22 @@
     var clipboardOn = true, soundOn = false, traceOn = false, clipReadHandler = null;
     var keyboardBlurHandler = null;   // releases stuck keys on focus loss -- see its own setup below
     var lastRemoteClip = null;   // newest text the session put on its clipboard (for the "Receive clipboard" button)
+    // I76: per-scenario Clipboard auto-sync choice, remembered in localStorage.
+    var CLIP_PREFS_LS_KEY = "edy-rdp-clip-prefs";
+    function loadClipPrefs() {
+        try { return JSON.parse(localStorage.getItem(CLIP_PREFS_LS_KEY) || "{}") || {}; } catch (e) { return {}; }
+    }
+    function saveClipPref(scenario, on) {
+        if (!scenario) return;
+        var p = loadClipPrefs(); p[scenario] = !!on;
+        try { localStorage.setItem(CLIP_PREFS_LS_KEY, JSON.stringify(p)); } catch (e) { /* ignore */ }
+    }
+    function applyClipboardDefault(scenario) {
+        var cb = $("opt-clipboard");
+        if (!cb || !scenario) return;
+        cb.checked = clipboardAutoDefault(scenario, loadClipPrefs());
+        syncPassthroughFlags();
+    }
     function syncPassthroughFlags() {
         clipboardOn = !$("opt-clipboard") || $("opt-clipboard").checked;
         soundOn = !!($("opt-audio") && $("opt-audio").checked);
@@ -153,6 +174,61 @@
     // activation (the checkbox's gesture-less auto-sync is often blocked). "Send"
     // pushes the local clipboard into the session; "Receive" pulls the session's
     // last clipboard into the browser.
+    // TESTHOOK:CLIPPOLICY:BEGIN -- tests/js/clipboard_policy.test.js extracts this
+    // block verbatim and runs it standalone (no outer-scope dependencies).
+    // I73: wayvnc is UTF-8; guacd's VNC default (ISO-8859-1) is right for the
+    // x11vnc bridge and for a plain `vnc` host, so only wayland-vnc overrides it.
+    function clipboardEncodingParam(scenario) { return scenario === "wayland-vnc" ? "UTF-8" : null; }
+    // I76: scenarios whose remote end this project manages; clipboard auto-sync is
+    // on for them by default. `remote` and `vnc` point at arbitrary hosts, where a
+    // focus-triggered push of the local clipboard and a remote->local overwrite
+    // are a leak and a clobber: off by default, the user can tick it.
+    var CLIP_AUTO_SCENARIOS = { console: 1, greeter: 1, isolated: 1, virtual: 1, headless: 1, "wayland-vnc": 1 };
+    function clipboardAutoDefault(scenario, prefs) {
+        if (prefs && typeof prefs[scenario] === "boolean") return prefs[scenario];
+        return CLIP_AUTO_SCENARIOS.hasOwnProperty(scenario);
+    }
+    // I74: guacd truncates VNC clipboard text at 256 KiB; Latin-1 scenarios (the
+    // x11vnc bridge, direct vnc) cannot carry characters above U+00FF.
+    var CLIP_SEND_MAX_BYTES = 262144;
+    function utf8Length(text) {
+        var n = 0;
+        for (var i = 0; i < text.length; i++) {
+            var c = text.charCodeAt(i);
+            if (c < 0x80) n += 1; else if (c < 0x800) n += 2;
+            else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < text.length) { n += 4; i++; }
+            else n += 3;
+        }
+        return n;
+    }
+    function analyzeSendClipboard(text, scenario) {
+        var r = { chars: text.length, bytes: utf8Length(text), tooBig: false, nonLatin1: 0, warnings: [] };
+        r.tooBig = r.bytes > CLIP_SEND_MAX_BYTES;
+        if (r.tooBig) r.warnings.push("it is over 256 KiB, which guacd truncates");
+        if (clipboardEncodingParam(scenario) === null) {
+            for (var i = 0; i < text.length; i++) if (text.charCodeAt(i) > 0xFF) r.nonLatin1++;
+            if (r.nonLatin1) r.warnings.push(r.nonLatin1 + " character" + (r.nonLatin1 === 1 ? "" : "s")
+                + " outside Latin-1 will be garbled or lost (this session's clipboard is Latin-1)");
+        }
+        return r;
+    }
+    function sendClipboardMessage(r) {
+        var m = "Sent " + r.chars + " characters (the session may not accept it \u2014 if paste does not work, use Type Clipboard)";
+        if (r.warnings.length) m += ". Warning: " + r.warnings.join("; and ");
+        return m + ".";
+    }
+    // I75: guacd/libvncclient abort the whole session with upstream error 515 when
+    // the guest clipboard exceeds ~1 MiB. Page code cannot prevent it; explain it.
+    var UPSTREAM_ERROR = 515;
+    function upstream515Hint(code, hadClipboardActivity, wasConnected) {
+        if (code !== UPSTREAM_ERROR) return "";
+        if (!hadClipboardActivity && !wasConnected) return "";   // a connect-time 515 is something else
+        return "  Likely cause: a very large clipboard on the remote side (over about 1 MiB) makes the VNC library abort"
+            + " the session. Clear the clipboard in the remote session, then reconnect.";
+    }
+    // TESTHOOK:CLIPPOLICY:END
+    var lastClipActivity = 0;   // ms timestamp of the newest clipboard traffic (for the 515 explanation)
+    var sessionWasOpen = false;
     function sendClipboardToSession() {
         if (!client || !currentUuid) {
             trace("clipboard", "send: refused, no live session");
@@ -168,8 +244,10 @@
             try {
                 var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
                 w.sendText(text); w.sendEnd();
-                trace("clipboard", "send: wrote " + text.length + " chars to the session clipboard stream");
-                setStatus("Sent " + text.length + " characters to the session clipboard — paste inside the session.");
+                lastClipActivity = Date.now();
+                var rep_ = analyzeSendClipboard(text, activeKey);
+                trace("clipboard", "send: wrote " + text.length + " chars to the session clipboard stream (" + rep_.bytes + " bytes, " + rep_.warnings.length + " warnings)");
+                setStatus(sendClipboardMessage(rep_), rep_.warnings.length ? "err" : "");
             } catch (e) { trace("clipboard", "send: stream write threw " + e); setStatus("Could not reach the session clipboard.", "err"); }
         }).catch(function (e) {
             trace("clipboard", "send: readText() rejected " + e);
@@ -211,7 +289,7 @@
     // explicitly (sendGuestKeyEvent's third argument).
     //
     // Character -> keysym mirrors the vendored Guacamole.Keyboard's own (unused
-    // here) codepoint-to-keysym function EXACTLY -- extracted from
+    // here) codepoint-to-keysym function (EXCEPT controls, see I70 below) EXACTLY -- extracted from
     // guacamole-common-js/all.min.js and diffed against this implementation
     // over code points 0-0x400 before shipping, after an adversarial review
     // caught an earlier draft treating 0x7F-0x9F (DEL + the C1 control range --
@@ -229,17 +307,28 @@
     // ones below -- Xvfb's static "us" keymap doesn't already have one for.
     //
     // Note for anyone pasting TSV/spreadsheet data or indented code: an
-    // embedded Tab/Backspace/Escape/etc. in the clipboard text becomes a REAL
-    // guest keypress here (focus-next, delete-previous-char, ...), same as if
-    // you had typed it yourself -- this button types the text, it doesn't
-    // paste it as inert data. Not a bug, just a consequence of the approach.
+    // embedded Tab becomes a REAL guest keypress (focus-next, indent, ...) --
+    // this button types the text, it doesn't paste it as inert data. Every
+    // other control character is dropped and reported (I70, see below).
     //
     // TESTHOOK:TYPECLIP:BEGIN -- tests/js/type_clipboard.test.js extracts this
     // exact block (verbatim) and exercises it standalone; keep it self-contained
     // (only `sendGuestKeyEvent` from the outer scope, stubbed in the test).
+    // I70: control characters are DROPPED, not typed. The vendored function's
+    // "|0xFF00" convention (kept as parity before I70) turns DEL (0x7F) into
+    // Num_Lock, 0x13/0x14 into Pause/Scroll_Lock, 0x1B into Escape and the C1
+    // block (0x80-0x9F) into keypad/navigation keys -- so a stray control byte in
+    // clipboard text toggled lock keys or hit Escape in the guest. Only Tab and
+    // LF/CR (Return) are real keys here; every other C0/C1 control and DEL is
+    // skipped and counted (keysymForCodePoint returns 0 for them).
+    function isDroppedControl(cp) {
+        if (cp === 0x09 || cp === 0x0A || cp === 0x0D) return false;
+        return cp <= 0x1F || (cp >= 0x7F && cp <= 0x9F);
+    }
     function keysymForCodePoint(cp) {
         if (cp === 0x0A || cp === 0x0D) return 0xFF0D;                 // LF or CR -> Return
-        if (cp <= 0x1F || (cp >= 0x7F && cp <= 0x9F)) return cp | 0xFF00;  // C0 + C1 controls
+        if (cp === 0x09) return 0xFF09;                                // Tab
+        if (isDroppedControl(cp)) return 0;                            // I70: never a keysym
         if (cp <= 0xFF) return cp;                                     // Latin-1: direct
         return 0x01000000 | cp;                                        // Unicode keysym plane
     }
@@ -294,45 +383,130 @@
         sendGuestKeyEvent(true, ks, sh);
         sendGuestKeyEvent(false, ks, sh);
     }
-    function typeTextIntoSession(text) {
+    // Types `text`; returns the number of keystrokes typed (CRLF = one Return).
+    // stats (optional) is filled with { typed, controls, unsupported }: control
+    // characters dropped by I70 and characters in `blocked` (a {codepoint:true}
+    // map from analyzeTypeText -- things this session cannot type, I71).
+    function typeTextIntoSession(text, stats, blocked) {
         var i = 0, n = 0;
+        if (stats) { stats.typed = 0; stats.controls = 0; stats.unsupported = 0; }
         while (i < text.length) {
             var cp = text.codePointAt(i);
             i += (cp > 0xFFFF) ? 2 : 1;                        // advance past a surrogate pair too
             if (cp === 0x0D && text.charCodeAt(i) === 0x0A) i += 1;   // CRLF: one Return, not two
+            if (isDroppedControl(cp)) { if (stats) stats.controls++; continue; }
+            if (blocked && blocked[cp]) { if (stats) stats.unsupported++; continue; }
             typeOneCodePoint(cp);
             n++;
+            if (stats) stats.typed++;
         }
         return n;
     }
-    // TESTHOOK:TYPECLIP:END
-    var clipTypeBusy = false;
+
+    // ---- I71: what can this session actually type? ----------------------------
+    // x11vnc (the FreeRDP3 bridge, and a direct `vnc` host that is x11vnc) gets a
+    // keysym its keymap lacks via -add_keysyms: a POOL of spare keycodes (17
+    // distinct keysyms), never reset until the bridge restarts. Past the pool the
+    // key press is silently ignored. wayvnc has no such mechanism: every non-ASCII
+    // keysym is ignored. analyzeTypeText pre-scans so the user is told BEFORE text
+    // is silently lost. `used` = {codepoint:true} already added to the bridge's
+    // pool this session (page-side bookkeeping; reset at connect/teardown).
+    var CLIP_TYPE_POOL = 17;
+    function analyzeTypeText(chars, key, used) {
+        var a = { total: chars.length, controls: 0, blocked: {}, blockedList: [], blockedCount: 0, newPool: [] };
+        var pool = {}, poolN = 0, k;
+        for (k in (used || {})) { pool[k] = true; poolN++; }
+        var asciiOnly = (key === "wayland-vnc");
+        for (var i = 0; i < chars.length; i++) {
+            var cp = chars[i].codePointAt(0);
+            if (cp === 0x0D && chars[i + 1] === "\n") { continue; }         // CRLF: the CR types the one Return
+            if (isDroppedControl(cp)) { a.controls++; continue; }
+            if (cp <= 0x7E) continue;                                       // ASCII: always on the keymap
+            var bad;
+            if (cp >= 0xD800 && cp <= 0xDFFF) bad = true;                   // lone surrogate: not a character
+            else if (asciiOnly) bad = true;
+            else if (pool[cp]) bad = false;
+            else if (poolN < CLIP_TYPE_POOL) { pool[cp] = true; poolN++; a.newPool.push(cp); bad = false; }
+            else bad = true;
+            if (bad) {
+                a.blockedCount++;
+                if (!a.blocked[cp]) { a.blocked[cp] = true; a.blockedList.push(cp); }
+            }
+        }
+        return a;
+    }
+    function cpLabel(cp) {
+        var h = cp.toString(16).toUpperCase(); while (h.length < 4) h = "0" + h;
+        var shown = (cp >= 0xD800 && cp <= 0xDFFF) ? "?" : String.fromCodePoint(cp);
+        return "'" + shown + "' (U+" + h + ")";
+    }
+    function typeWarnMessage(a, key) {
+        var first = a.blockedList.slice(0, 5).map(cpLabel).join(", ");
+        var why = (key === "wayland-vnc")
+            ? "This Wayland (wayvnc) session accepts ASCII keystrokes only."
+            : "This session's VNC server can add only " + CLIP_TYPE_POOL + " distinct non-keyboard characters, and that room is used up.";
+        return a.blockedCount + " character" + (a.blockedCount === 1 ? "" : "s") + " in the clipboard cannot be typed reliably into this session"
+            + " (" + a.blockedList.length + " distinct, e.g. " + first + (a.blockedList.length > 5 ? ", …" : "") + "). " + why
+            + "\n\nOK = type the rest and skip those characters.  Cancel = type nothing.";
+    }
+    function typeResultMessage(st, completed) {
+        var skipped = st.controls + st.unsupported;
+        var parts = [];
+        if (st.controls) parts.push(st.controls + " control character" + (st.controls === 1 ? "" : "s"));
+        if (st.unsupported) parts.push(st.unsupported + " the session cannot type");
+        var tail = skipped ? "; skipped " + skipped + " (" + parts.join(", ") + ")" : "";
+        if (!completed) return "Typing stopped before the end (" + st.typed + " characters typed" + tail + ").";
+        return "Typed " + st.typed + " character" + (st.typed === 1 ? "" : "s") + tail + ".";
+    }
+
+    // Session generation (I72): bumped at every connect and teardown. A paste-by-
+    // typing run captures it at start and aborts when it changes, so a reconnect
+    // mid-run never continues into the NEW session.
+    var clipSessionGen = 0;
+    function bumpClipSession() { clipSessionGen++; }
     var CLIP_TYPE_CHUNK = 200;   // characters per synchronous burst
     // Types `chars` (an ARRAY of code-point strings -- from Array.from(text), so
     // each element is already surrogate-pair-safe) CLIP_TYPE_CHUNK at a time,
     // yielding to the browser between chunks via setTimeout so a large
-    // paste-by-typing (this feature's whole reason to exist is moving text the
-    // broken native clipboard channel won't carry, which skews toward LARGER
-    // payloads) cannot freeze the tab for the whole operation or block a
-    // mid-paste disconnect from taking effect. If the chunk boundary would
-    // split a CRLF pair, it is pushed one character later to keep the pair
-    // together (typeTextIntoSession's own CRLF collapsing only looks within a
-    // single call's text).
-    function typeClipboardChunked(chars, doneCb) {
-        var pos = 0, total = 0;
+    // paste-by-typing cannot freeze the tab or block a mid-paste disconnect. If
+    // the chunk boundary would split a CRLF pair, it is pushed one character
+    // later. When the tab is hidden the run PAUSES (browsers throttle timers in
+    // background tabs to ~1/s or worse, which made 200 chars/s crawl) and resumes
+    // on visibilitychange. doneCb(stats, state): state is "done", "ended" (session
+    // gone) or "replaced" (a different session is now live: touch nothing).
+    function typeClipboardChunked(chars, blocked, doneCb) {
+        var pos = 0, gen = clipSessionGen;
+        var st = { typed: 0, controls: 0, unsupported: 0 };
+        function hidden() { return typeof document !== "undefined" && !!document.hidden; }
         function step() {
-            if (!client || !keyboard) { doneCb(total, false); return; }
+            if (gen !== clipSessionGen) { doneCb(st, "replaced"); return; }
+            if (!client || !keyboard) { doneCb(st, "ended"); return; }
+            if (hidden()) {
+                setStatus("Paused at " + pos + " of " + chars.length + " characters — return to this tab to continue typing.");
+                var onVis = function () {
+                    if (hidden()) return;
+                    document.removeEventListener("visibilitychange", onVis);
+                    step();
+                };
+                document.addEventListener("visibilitychange", onVis);
+                return;
+            }
             var end = Math.min(pos + CLIP_TYPE_CHUNK, chars.length);
             if (end < chars.length && chars[end - 1] === "\r" && chars[end] === "\n") end += 1;
-            total += typeTextIntoSession(chars.slice(pos, end).join(""));
+            var part = {};
+            typeTextIntoSession(chars.slice(pos, end).join(""), part, blocked);
+            st.typed += part.typed; st.controls += part.controls; st.unsupported += part.unsupported;
             pos = end;
             if (pos < chars.length) {
                 setStatus("Typing… " + pos + " of " + chars.length + " characters.");
                 setTimeout(step, 0);
-            } else { doneCb(total, true); }
+            } else { doneCb(st, "done"); }
         }
         step();
     }
+    // TESTHOOK:TYPECLIP:END
+    var clipTypeBusy = false;
+    var clipTypeUsed = {};   // I71: non-ASCII code points already added to x11vnc's keysym pool this session
     function typeClipboardIntoSession() {
         if (clipTypeBusy) {
             trace("clipboard", "type: refused, a previous Type Clipboard run is still in progress");
@@ -347,19 +521,34 @@
             setStatus("This browser will not let the page read the clipboard.", "err"); return;
         }
         clipTypeBusy = true;
+        var gen0 = clipSessionGen;
         navigator.clipboard.readText().then(function (text) {
-            if (!client || !keyboard) { clipTypeBusy = false; return; }
+            if (gen0 !== clipSessionGen || !client || !keyboard) { clipTypeBusy = false; return; }
             if (!text) {
                 trace("clipboard", "type: local clipboard is empty"); setStatus("Your clipboard is empty.");
                 clipTypeBusy = false; return;
             }
             try {
-                typeClipboardChunked(Array.from(text), function (n, completed) {
+                var chars = Array.from(text);
+                var plan = analyzeTypeText(chars, activeKey, clipTypeUsed);
+                if (plan.blockedCount) {
+                    trace("clipboard", "type: pre-scan found " + plan.blockedCount + " untypeable characters (" + plan.blockedList.length + " distinct)");
+                    if (!window.confirm(typeWarnMessage(plan, activeKey))) {
+                        clipTypeBusy = false;
+                        setStatus("Type clipboard cancelled — nothing was typed.");
+                        return;
+                    }
+                }
+                plan.newPool.forEach(function (cp) { clipTypeUsed[cp] = true; });
+                typeClipboardChunked(chars, plan.blocked, function (st, state) {
+                    if (state === "replaced") {
+                        trace("clipboard", "type: aborted, the session changed mid-run (" + st.typed + " typed)");
+                        return;   // the new session owns clipTypeBusy and the status line
+                    }
                     clipTypeBusy = false;
-                    trace("clipboard", "type: injected " + n + " keystrokes for " + text.length + " chars"
-                        + (completed ? "" : " (stopped early -- session ended)"));
-                    if (completed) setStatus("Typed " + text.length + " characters into the session.");
-                    else setStatus("Session ended before typing finished (" + n + " characters typed).", "err");
+                    trace("clipboard", "type: injected " + st.typed + " keystrokes for " + chars.length + " chars, skipped "
+                        + st.controls + " control + " + st.unsupported + " unsupported (" + state + ")");
+                    setStatus(typeResultMessage(st, state === "done"), (state === "done" && !st.unsupported) ? "" : "err");
                 });
             } catch (e) {
                 clipTypeBusy = false;
@@ -385,7 +574,7 @@
         };
         mk("clip-send", "Send clip", "Send YOUR clipboard to the session (then paste inside the session).", sendClipboardToSession);
         mk("clip-recv", "Receive clip", "Copy the SESSION's clipboard into your browser (then paste locally).", receiveClipboardFromSession);
-        mk("clip-type", "Type Clipboard", "Type YOUR clipboard into the session as keystrokes -- a workaround for when the session's own clipboard paste doesn't take. Embedded Tab/Backspace/etc. act as real keys, not literal text.", typeClipboardIntoSession);
+        mk("clip-type", "Type Clipboard", "Type YOUR clipboard into the session as keystrokes -- a workaround for when the session's own clipboard paste doesn't take. An embedded Tab acts as a real key; other control characters are skipped; characters the session cannot type are reported before typing.", typeClipboardIntoSession);
     }
 
     // ---- "Add Monitor": a virtual monitor in its own chromeless window --------
@@ -1461,6 +1650,8 @@
         function dispose() {
             try { if (tunnel) tunnel.disconnect(); } catch (e) { /* ignore */ }
             client = null; tunnel = null; disposing = false; currentUuid = null;
+            lastRemoteClip = null;   // I77: never hand the NEXT session the previous one's clipboard
+            bumpClipSession(); clipTypeUsed = {}; clipTypeBusy = false; sessionWasOpen = false;
             // Reload the guac web element: tear the old canvas out so a fresh
             // connect starts clean (the display is re-created on next connect).
             var box = $("display"); if (box) box.innerHTML = "";
@@ -1643,6 +1834,7 @@
 
     function start(key, cred, sessiontoken, geomOverride) {
         activeKey = key;
+        applyClipboardDefault(key);
         // Arm only for the sign-in door. Sound/resolution reconnects and the
         // Disconnect button clear this before they tear the tunnel down, so
         // those do not also schedule a follow.
@@ -1687,9 +1879,10 @@
             // guacd's own VNC parameters. The tunnel fills the connect args from
             // this map by name, so a toggle here reaches guacd directly and the
             // relay needs no say in it -- it only rewrites hostname/port/password.
-            values: guacdValues()
+            values: guacdValues(key)
         });
         client = new Guacamole.Client(tunnel);
+        lastRemoteClip = null; bumpClipSession(); clipTypeUsed = {}; clipTypeBusy = false; sessionWasOpen = false; lastClipActivity = 0;
         var display = client.getDisplay();
         box.innerHTML = ""; box.appendChild(display.getElement());
         // Re-fit whenever the guest framebuffer size becomes known or changes. With
@@ -1710,6 +1903,7 @@
             var reader = new Guacamole.StringReader(stream), text = "";
             reader.ontext = function (t) { text += t; };
             reader.onend = function () {
+                lastClipActivity = Date.now();
                 lastRemoteClip = text;   // always captured, so "Receive clipboard" can hand it over
                 trace("clipboard", "remote->browser: captured " + text.length + " chars (clipboardOn=" + clipboardOn + " focused=" + document.hasFocus() + ")");
                 // Auto-sync to the OS clipboard only while the toggle is on AND this
@@ -1764,6 +1958,7 @@
                      + "left, or use Wayland VNC or Isolated session for a separate "
                      + "desktop the lock does not affect.";
             }
+            msg += upstream515Hint(e && e.code, (Date.now() - lastClipActivity) < 60000, sessionWasOpen);
             setStatus(prefix + ": " + msg, "err");
             // Offer the one action that actually resumes THIS session.
             if (lockedSeat) offerUnlock(key);
@@ -1777,6 +1972,7 @@
         client.onstatechange = function (s) {
             if (s === 3) { currentUuid = (tunnel && tunnel.uuid ? String(tunnel.uuid) : "").replace(/^\$/, ""); }
             if (s === 3) applyScale();
+            if (s === 3) sessionWasOpen = true;
             if (s === 3) {
                 if (key === "greeter") {
                     greeterFollowArmed = true;
@@ -1862,6 +2058,7 @@
                         try {
                             var w = new Guacamole.StringWriter(client.createClipboardStream("text/plain"));
                             w.sendText(text); w.sendEnd();
+                            lastClipActivity = Date.now();
                             trace("clipboard", "browser->remote: pushed " + text.length + " chars on focus");
                         } catch (e) { trace("clipboard", "browser->remote: stream unavailable: " + e); }
                     }).catch(function (e) { trace("clipboard", "browser->remote: readText() blocked: " + e); });
@@ -3246,13 +3443,16 @@
         perm.addEventListener("changed", function () { isAdmin = !!perm.allowed; refreshUi(); updateSyncButtons(); });
         isAdmin = !!perm.allowed;
         loadControls();   // restore persisted toggles/selectors BEFORE any auto-connect
+        applyClipboardDefault($("target").value);   // per-scenario Clipboard default beats the generic restored value (I76)
         $("target").addEventListener("change", refreshUi);
+        $("target").addEventListener("change", function () { if (!client) applyClipboardDefault($("target").value); });
         $("authmode").addEventListener("change", refreshUi);
         $("go").addEventListener("click", function () { connect(); });
         $("numlock").addEventListener("click", function () { toggleSessionLock("NumLock"); });
         // Sound / Clipboard passthrough toggles gate LIVE, during a session.
         $("opt-clipboard").addEventListener("change", function () {
             clipboardOn = $("opt-clipboard").checked;
+            saveClipPref(client && activeKey ? activeKey : $("target").value, clipboardOn);
             trace("clipboard", "toggle -> " + (clipboardOn ? "on" : "off"));
             if (client) setStatus(clipboardOn ? "Clipboard passthrough on." : "Clipboard passthrough off.");
         });

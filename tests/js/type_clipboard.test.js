@@ -69,27 +69,37 @@ test('keysymForCodePoint: LF and CR both force the real Return keysym, not Linef
     assert.strictEqual(s.ctx.keysymForCodePoint(0x0D), 0xFF0D);
 });
 
-test('keysymForCodePoint: C0 controls map via the |0xFF00 convention (e.g. Tab), including the 0x1F boundary', () => {
+// I70: these two tests used to pin PARITY with the vendored Guacamole.Keyboard
+// ("|0xFF00" for every C0/C1 control and DEL). That parity was the defect: DEL
+// became Num_Lock, 0x13/0x14 Pause/Scroll_Lock, 0x1B Escape, 0x95-0x9F keypad
+// navigation -- a stray control byte in clipboard text toggled lock keys or hit
+// Escape in the guest. Only Tab and LF/CR (Return) are typed now; everything else
+// maps to 0 (= dropped and counted by typeTextIntoSession).
+test('keysymForCodePoint: Tab is the only typed control besides Return; every other C0 control is dropped (0)', () => {
     const s = makeSandbox();
     assert.strictEqual(s.ctx.keysymForCodePoint(0x09), 0xFF09);   // Tab
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x08), 0xFF08);   // Backspace
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x1b), 0xFF1b);   // Escape
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x1F), 0xFF1F);   // Unit Separator: exact C0 upper boundary
+    for (let cp = 0; cp <= 0x1F; cp++) {
+        if (cp === 0x09 || cp === 0x0A || cp === 0x0D) continue;
+        assert.strictEqual(s.ctx.keysymForCodePoint(cp), 0, 'C0 0x' + cp.toString(16));
+    }
 });
 
-test('keysymForCodePoint: the C1 control range (0x7F-0x9F) ALSO maps via |0xFF00, not as a direct keysym', () => {
-    // An earlier draft of this function treated 0x7F-0x9F (DEL plus the C1
-    // block -- plausible from a Windows-1252-as-Latin-1 mis-decode, or a
-    // terminal copy) as direct-value keysyms. The vendored Guacamole.Keyboard's
-    // own codepoint-to-keysym function does NOT: it explicitly carves this
-    // range out into the same "function key" convention as the C0 controls.
-    // Caught by adversarial review; verified against the real vendored
-    // function in guacamole-common-js/all.min.js.
+test('keysymForCodePoint: DEL and the whole C1 range (0x7F-0x9F) are dropped (0), never Num_Lock/keypad keys', () => {
     const s = makeSandbox();
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x7F), 0xFF7F, 'DEL');
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x80), 0xFF80, 'first C1 control');
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x85), 0xFF85, 'NEL');
-    assert.strictEqual(s.ctx.keysymForCodePoint(0x9F), 0xFF9F, 'last C1 control: exact upper boundary');
+    for (let cp = 0x7F; cp <= 0x9F; cp++) {
+        assert.strictEqual(s.ctx.keysymForCodePoint(cp), 0, 'cp 0x' + cp.toString(16));
+    }
+    assert.notStrictEqual(s.ctx.keysymForCodePoint(0x7F), 0xFF7F, 'DEL must not be Num_Lock');
+});
+
+test('typeTextIntoSession: control characters send NO key events and are counted as skipped', () => {
+    const s = makeSandbox();
+    const st = {};
+    const n = s.ctx.typeTextIntoSession('a\x13\x14\x1b\x7f\x08\x95b\t', st);
+    assert.strictEqual(n, 3);
+    assert.deepStrictEqual(s.calls, [...tap(0x61), ...tap(0x62), ...tap(0xFF09)]);
+    assert.strictEqual(st.typed, 3);
+    assert.strictEqual(st.controls, 6);
 });
 
 test('keysymForCodePoint: anything above Latin-1 is the Unicode keysym plane, including the 0x100 boundary', () => {

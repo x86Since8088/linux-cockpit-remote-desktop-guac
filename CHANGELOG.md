@@ -1,3 +1,20 @@
+## 1.11.4.20261127 - 2026-11-27
+
+Clipboard page-code fixes (KNOWN_ISSUES I70-I78). Unit tests in `tests/js/clipboard_typing.test.js` and
+`clipboard_policy.test.js`; I70-I73 also reproduced in a rootless sandbox (guacd 1.6.0, Xvfb/x11vnc, sway/wayvnc).
+
+- **Fix (I70):** Type Clipboard drops every control character except Tab and Return (DEL was Num_Lock, 0x13/0x14 Pause/Scroll_Lock,
+  0x1B Escape, C1 keypad keys) and counts them.
+- **Fix (I71):** a pre-scan warns (count + first offenders, OK/Cancel) before typing characters the session cannot type
+  (wayvnc: all non-ASCII; x11vnc: beyond its keysym pool); the final status reports typed vs skipped.
+- **Fix (I72):** a typing run is bound to the session that started it, and pauses while the tab is hidden.
+- **Fix (I73):** wayland-vnc negotiates `clipboard-encoding=UTF-8` (CJK/emoji no longer mojibake). Other scenarios unchanged.
+- **Fix (I74):** "Send clip" no longer claims success; warns over 256 KiB or non-Latin-1 on Latin-1 scenarios.
+- **Fix (I75):** error 515 explains the likely cause (very large remote clipboard).
+- **Change (I76):** Clipboard auto-sync defaults on only for managed scenarios, off for remote and vnc; remembered per scenario.
+- **Fix (I77):** `lastRemoteClip` is cleared on teardown/reconnect.
+- **Not done (I78):** Caps Lock compensation (the lock model is unreliable).
+
 ## 1.11.3.20261127 - 2026-11-27
 
 Four code-derived security/correctness fixes (KNOWN_ISSUES I66-I69). Each was verified against the code

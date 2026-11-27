@@ -25,6 +25,10 @@ do. Memory only points here.
   "live verification pending". An audible end-to-end check by the owner has never been recorded. See the pop-out autoplay item.
 
 ## Open code follow-ups
+- **Clipboard page fixes (I70-I78, 1.11.4.20261127) are not deployed or live-verified in a real Cockpit session.** Owed: confirm the
+  relay forwards `clipboard-encoding` to guacd (relay-side PR), tick/untick the Clipboard box per scenario and check it is
+  remembered, and measure the live x11vnc keysym pool (17 assumed; 14 in the Alpine harness). Caps Lock compensation (I78) is
+  deliberately not built.
 - **Sound may stay silent in a pop-out (hypothesis from code, not reproduced).** In this plugin's code, `applySoundGate()` is the
   only place that resumes the shared AudioContext. It runs at connect (after the async connect flow; a pop-out auto-connects
   from `location.hash` with no click in its own document) and from the Sound toggle's change handler. The hypothesis may not
