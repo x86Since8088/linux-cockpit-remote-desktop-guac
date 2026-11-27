@@ -21,6 +21,9 @@ echo "== relay unit tests (isolation, console gate, session tokens, allow-list, 
 ( cd "$SRC/relay" && python3 -m unittest test_edy_rdp_relay test_session_registry test_control test_depcheck test_selfupdate ) \
   || { echo "  FAIL"; fail=1; }
 
+echo "== bridge X authority + abstract-socket test (I81; skipped if Xvfb/x11vnc/xauth absent) =="
+python3 -W ignore "$SRC/tests/bridge_xauth_test.py" || { echo "  FAIL"; fail=1; }
+
 echo "== JS syntax (gjs if present) =="
 if command -v gjs >/dev/null 2>&1; then
   for f in "$SRC"/*.js; do
