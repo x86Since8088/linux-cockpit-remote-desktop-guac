@@ -2215,6 +2215,12 @@ Variants tried against the bridge's flags (x11vnc 0.9.17, Ubuntu 26.04; none cha
 `-seldir CLIPBOARD` makes x11vnc refuse the text ("NOT recv-ing it"); `-sel`, `-nosel` and `-nocutbuffer` made x11vnc fail to start or serve nothing in the harness.
 So no bridge flag change is made. The cause inside x11vnc is not found; the options left are a different x11vnc build, a patch, or
 an own helper that owns the selection. "Type Clipboard" (I58) remains the workaround.
+**Cause found (2026-11-27, see I85/I86):** x11vnc 0.9.17 owns a selection and polls the guest's only through a window it creates
+late: `initialize_xevents()` creates `selwin` only when `guess_dm_gone(8, 45)` says so, i.e. 45 s after the last VNC client connected
+when no window manager runs (8 s with one), and `xcut_receive` skips `XSetSelectionOwner` while `selwin` is None (it still logs
+"Set CLIPBOARD" and stores the text, never retried). The 12 flag variants above could not change that; the environment variable
+`X11VNC_AVOID_WINDOWS=never` (documented in x11vnc's help) does. Verified: ClientCutText 3 s after connect leaves CLIPBOARD unowned by default,
+owned after 50 s, owned at once with the variable. The Receive direction had the same 45 s blind period, plus a 15 s `sel_waittime`.
 
 ### I84 · A guest clipboard over 1 MiB aborts the guacd VNC session (status 515) · Sev L · OPEN
 guacd's VNC client (libvncclient) refuses a server cut-text message larger than 1 MiB and treats it as a protocol error, so
@@ -2223,3 +2229,52 @@ guacd has no parameter or environment setting for this limit (it is a compile-ti
 clipboard buffer is a separate cap); the pinned Janua image's units and requires.txt show no setting for it (the image itself was not
 pulled or run for this check). Not fixable from this repo without a patched or newer libvncclient in the guacd image;
 tracked in todo.md. Not fixed here (no guacd build in this change). Workaround: clear or shrink the guest clipboard, then reconnect.
+
+
+## Bridge clipboard (2026-11-27, 1.11.7.20261127)
+Owner-reported live on 1.11.6 (console scenario, FreeRDP3 bridge): guest text "Hello World! Éé" reached the browser as the
+literal characters `\u00c9\u00e9`, and Send clip never changed the guest clipboard.
+
+### I85 · Guest text containing non-ASCII reached the browser as literal `\uXXXX` on the bridge scenarios · Sev M · FIXED (1.11.7.20261127)
+**Root cause: xfreerdp3's STRING target, which is the only one x11vnc ever asks for.** Bisect, each step reproduced in a rootless container
+(Ubuntu 26.04, x11vnc 0.9.17, FreeRDP 3.32.2, guacd 1.6.0):
+- Page (d): `client.onclipboard` appends the `StringReader` text unchanged; no escaping, no JSON. Ruled out by reading.
+- guacd (c): ruled out below, it is handed the escaped text.
+- x11vnc (b): a raw RFB client against x11vnc on a display whose CLIPBOARD owner answers like xfreerdp3 received the ServerCutText
+  `Hello World! \u00c9\u00e9` (25 bytes) byte for byte, so the escape exists before x11vnc. x11vnc's source asks for exactly one target,
+  `XConvertSelection(dpy, atom, XA_STRING, XA_STRING, selwin, CurrentTime)` (xevents.c), and forwards the bytes raw
+  (`rfbSendServerCutText`, selection.c).
+- xfreerdp3 (a): `client/X11/xf_cliprdr.c` registers the X target XA_STRING as local format "text/plain" and UTF8_STRING as
+  "text/plain;charset=utf-8". winpr's converter (`winpr/libwinpr/clipboard/synthetic.c`, `clipboard_synthesize_string`) produces
+  `text/plain`/CF_TEXT through `winpr_utf8ToUtfEscapedString()` (`winpr/libwinpr/crt/unicode.c`), which writes every non-ASCII
+  UTF-16 unit as `\u%04x`. Driving the real libwinpr3 (`ClipboardSetData(CF_UNICODETEXT)` then `ClipboardGetData`):
+  `text/plain` -> `Hello World! \u00c9\u00e9 \u65e5\u672c`; `UTF8_STRING` and `text/plain;charset=utf-8` -> correct UTF-8.
+`clipboard-encoding` cannot help: the text is already ASCII when it leaves x11vnc. A page-side unescape was rejected: winpr leaves a
+real backslash alone, so a guest text that literally contains `\u00c9` is indistinguishable.
+**Fix.** `bridge/edy-rdp-clip-helper.py` (one per bridge, same uid, same `XAUTHORITY` as I81) selects XFixes selection-owner
+notifications on CLIPBOARD; when another client (xfreerdp3) takes it, it requests UTF8_STRING and sends the text to the relay over
+a 0600 unix socket (`.KEY.clip.sock` in the bridge state dir, SO_PEERCRED-checked both ways). The relay emits a Guacamole
+`clipboard`/`blob`/`end` stream (ids 20000+, acks from the browser swallowed) and drops guacd's own clipboard stream for that session
+while the helper is attached; if the helper is absent or dies, guacd's stream is forwarded again (escaped, as before). Cap 256 KiB
+(truncated on a character boundary). Contents are never logged, only byte counts.
+Not covered: a guest text over 256 KiB is truncated; an INCR (chunked) selection from xfreerdp3 is skipped with a log line.
+
+### I86 · "Send clip" now reaches the guest on the bridge scenarios · Sev M · FIXED (1.11.7.20261127)
+I83's open question is answered: x11vnc cannot own a selection until its `selwin` exists (45 s after connect with no window manager),
+and it never retries the text it already got. Two changes:
+1. The bridge starts x11vnc with `X11VNC_AVOID_WINDOWS=never` so `selwin` exists at once (verified: owner at 3 s with it, none without).
+   This alone makes Latin-1 text work, but x11vnc serves only the STRING target, so anything outside Latin-1 becomes `?`.
+2. The same helper as I85 owns the session's CLIPBOARD with the browser's text and serves TARGETS, UTF8_STRING,
+   text/plain;charset=utf-8, STRING/TEXT/text/plain (Latin-1, `?` for the rest) and TIMESTAMP. xfreerdp3 sees the owner change through
+   XFixes and forwards it to the RDP guest. The relay collects the browser's clipboard stream (text/plain only, 256 KiB cap, per
+   connection), hands it to THIS connection's helper, acks the browser the way guacd would, and does not also give it to guacd:
+   x11vnc would otherwise take the selection over with a Latin-1 copy. PRIMARY is not set: xfreerdp3 forwards CLIPBOARD only.
+   If the helper dies at the very end of a stream the text is replayed to guacd, so nothing is lost.
+Per session: the helper listens on `.KEY.clip.sock`, KEY is unique to the connection, the relay connects to its own bridge key, and the helper
+refuses any peer whose uid differs from its own; the X display needs the per-session cookie (I81 is unchanged: still no abstract socket).
+Runs as the bridge's uid (the relay's), never root; the bridge's teardown kills it and removes the socket.
+**Verified:** unit (`BridgeClipboardChannel`), real Xvfb + bridge script + helper (`tests/bridge_clip_test.py`: exact UTF-8 incl. CJK and emoji
+at the X selection, Latin-1 STRING, owner like xfreerdp3 -> relay as UTF-8, teardown), and a container run of the whole chain with xfreerdp3
+connected to a FreeRDP shadow server. **Not verified:** the last hop into a real RDP guest (FreeRDP's shadow server has no clipboard
+channel and I did not open sessions on the live host): that xfreerdp3 forwards a UTF8_STRING owner to the guest follows from
+`xf_cliprdr.c` (XFixes owner notify, UTF8_STRING in its client formats) and from the Xvfb leg being identical to what x11vnc's owner did.

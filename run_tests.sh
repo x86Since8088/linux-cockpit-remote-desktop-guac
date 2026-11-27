@@ -24,6 +24,9 @@ echo "== relay unit tests (isolation, console gate, session tokens, allow-list, 
 echo "== bridge X authority + abstract-socket test (I81; skipped if Xvfb/x11vnc/xauth absent) =="
 python3 -W ignore "$SRC/tests/bridge_xauth_test.py" || { echo "  FAIL"; fail=1; }
 
+echo "== bridge clipboard helper test (I85/I86; skipped if Xvfb/x11vnc/xauth/python-xlib absent) =="
+python3 -W ignore "$SRC/tests/bridge_clip_test.py" || { echo "  FAIL"; fail=1; }
+
 echo "== JS syntax (gjs if present) =="
 if command -v gjs >/dev/null 2>&1; then
   for f in "$SRC"/*.js; do

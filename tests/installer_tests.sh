@@ -250,7 +250,7 @@ requires_lib_parses_and_compares() {
     # req_load fills arrays in THIS shell, so it must not run inside $( ).
     req_load "$SRC/requires.txt" > "$TMP/req_load.out" \
         || { echo "req_load failed: $(cat "$TMP/req_load.out")"; return 1; }
-    (( ${#REQ_NAMES[@]} == 9 )) || { echo "REQ_NAMES has ${#REQ_NAMES[@]} entries, want 9"; bad=1; }
+    (( ${#REQ_NAMES[@]} == 10 )) || { echo "REQ_NAMES has ${#REQ_NAMES[@]} entries, want 10"; bad=1; }
     [[ "${REQ_MIN[freerdp]:-}" == "3.0" ]] || { echo "REQ_MIN[freerdp] is '${REQ_MIN[freerdp]:-}', want 3.0"; bad=1; }
     [[ "$(req_image_ref)" == ghcr.io/skylark-software/janua@sha256:* ]] \
         || { echo "req_image_ref is '$(req_image_ref)', want the Janua digest ref (SPEC 4.8)"; bad=1; }

@@ -24,6 +24,7 @@ x11vnc                   >=0.9.16     0.9.17           # loopback VNC for guacd'
 nftables                 >=1.0        1.1.6            # owner-match gate on 127.0.0.1:4822
 gnome-remote-desktop     >=46         50.2             # the RDP backend (console/virtual/headless)
 dbus                     >=1.14       1.16.2           # handover policy reload + session bus
+python3-xlib             >=0.30       0.33             # bridge clipboard helper (I85): owns/reads the session's X CLIPBOARD as UTF-8
 
 # Container image, pinned by DIGEST (the ref and the digest are the same hash so a
 # tag cannot drift under the pin). Janua is guacd built against FreeRDP 3; the

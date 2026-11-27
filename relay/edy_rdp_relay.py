@@ -48,6 +48,7 @@ def _env_file_hint():
     return "this host's cockpit-guac-rdp .env (see /etc/cockpit-guac-rdp/install.conf)"
 
 import argparse
+import base64
 import codecs
 import grp
 import ipaddress
@@ -926,6 +927,11 @@ class Connection:
         # its loopback VNC. Torn down on disconnect; the backing desktop persists.
         self.bridge_key = None
         self.bridge_proc = None
+        # clipboard channel to this session's helper (I85/I86); None = x11vnc path only
+        self.clip = None
+        self._clip_up = bridge.UpstreamClip()
+        self._clip_down = set()       # guacd clipboard stream ids whose blob/end we drop
+        self._clip_next = 0
         self._bridge_counted = False  # holds a per-uid bridge slot (released on close)
         self.desktop_id = None       # PRIMARY KEY of the virtual desktop (also the slot)
         self.desktop_created = None  # that desktop's creation time
@@ -997,7 +1003,80 @@ class Connection:
                 self.req_w, self.req_h = int(elements[1]), int(elements[2])
             except ValueError:
                 pass
+        if op == "ack" and len(elements) >= 2 and self._is_clip_stream(elements[1]):
+            return None            # the browser acking OUR guest->browser stream; guacd never opened it
+        if self.clip is not None and self.clip.alive:
+            # While the helper is attached the browser's text goes to the session's X
+            # CLIPBOARD through it, as UTF-8, and is NOT also given to guacd: x11vnc would
+            # take the selection over with a Latin-1 copy (it can own it once its selection
+            # window exists, I85) and lose everything outside Latin-1. If the helper dies
+            # mid-session (clip.alive False) forwarding resumes, so nothing is lost.
+            if op == "clipboard" and len(elements) >= 3:
+                if self._clip_up.start(elements[1], elements[2]):
+                    self._clip_ack(elements[1])
+                    return None
+            elif op == "blob" and len(elements) >= 3 and self._clip_up.tracking(elements[1]):
+                self._clip_up.blob(elements[1], elements[2])
+                self._clip_ack(elements[1])
+                return None
+            elif op == "end" and len(elements) >= 2 and self._clip_up.tracking(elements[1]):
+                data = self._clip_up.end(elements[1])
+                if data is not None:
+                    ok = self.clip.send_text(data)
+                    self.trace("clip browser->guest %d bytes %s", len(data),
+                               "handed to the session's X CLIPBOARD" if ok else "NOT delivered (helper gone)")
+                    if not ok and self.guacd is not None:      # helper died at the last moment
+                        sid = elements[1]
+                        self.guacd.sendall("".join(
+                            [encode("clipboard", sid, "text/plain")]
+                            + [encode("blob", sid, base64.b64encode(data[i:i + 3072]).decode("ascii"))
+                               for i in range(0, len(data), 3072)]
+                            + [encode("end", sid)]).encode("utf-8"))
+                return None
         return elements
+
+    # -- bridge clipboard channel (I85/I86) ----------------------------------
+    @staticmethod
+    def _is_clip_stream(stream):
+        try:
+            n = int(stream)
+        except (TypeError, ValueError):
+            return False
+        return bridge.CLIP_STREAM_BASE <= n < bridge.CLIP_STREAM_BASE + bridge.CLIP_STREAM_SPAN
+
+    def _clip_ack(self, stream):
+        """Acknowledge a browser clipboard stream the way guacd would."""
+        try:
+            if self.client is not None:
+                self.client.sendall(encode("ack", stream, "OK", 0).encode("utf-8"))
+        except OSError:
+            pass
+
+    def drop_guacd_clipboard(self, elements):
+        """True when a guacd -> browser clipboard/blob/end must NOT be forwarded: while the
+        helper is attached it supplies the guest's text as UTF-8, and guacd's copy of it comes
+        from x11vnc's STRING request, in which xfreerdp3 writes every non-ASCII character as a
+        literal \\uXXXX (I85). Blobs/ends of other streams (images) are untouched."""
+        op = elements[0] if elements else ""
+        if op == "clipboard" and len(elements) >= 2 and self.clip is not None and self.clip.alive:
+            self._clip_down.add(elements[1])
+            return True
+        if op in ("blob", "end") and len(elements) >= 2 and elements[1] in self._clip_down:
+            if op == "end":
+                self._clip_down.discard(elements[1])
+            return True
+        return False
+
+    def clip_to_client(self, text):
+        """Send guest text (bytes, UTF-8) to the browser as a Guacamole clipboard stream."""
+        sid = bridge.CLIP_STREAM_BASE + self._clip_next % bridge.CLIP_STREAM_SPAN
+        self._clip_next += 1
+        out = [encode("clipboard", sid, "text/plain")]
+        for i in range(0, len(text), 3072):
+            out.append(encode("blob", sid, base64.b64encode(text[i:i + 3072]).decode("ascii")))
+        out.append(encode("end", sid))
+        self.client.sendall("".join(out).encode("utf-8"))
+        self.trace("clip guest->browser %d bytes (stream %d)", len(text), sid)
 
     def _peek_scenario_from_connect(self, elements):
         """On guacd's VNC `connect`, identify the scenario, start the per-connection
@@ -1201,6 +1280,9 @@ class Connection:
             raise Refuse("could not start desktop bridge: %s" % exc)
         self.bridge_key = key
         self.bridge_proc = proc
+        if info.get("CLIPSOCK"):
+            self.clip = bridge.connect_clip(key)
+        self.trace("clip helper %s", "attached" if self.clip else "not available (x11vnc clipboard path only)")
         log.info("uid=%d scenario=%s bridge %s:%s (%s) -> guacd VNC 127.0.0.1:%s",
                  self.uid, scenario, host, port, security, info.get("VNCPORT"))
         self.trace("bridge READY key=%s rdp=%s:%s security=%s geom=%s -> vnc=127.0.0.1:%s "
@@ -1443,13 +1525,26 @@ def handle(client, table, live, guacd_addr, admin_group, shadow_group="cockpit-g
             ready = True
             if conn.uuid:
                 live.register(conn.uuid, conn.terminate)
+        if conn.drop_guacd_clipboard(elements):
+            return
         conn.client.sendall(encode(*elements).encode("utf-8"))
 
+    clip_registered = False
     try:
         while not conn.closed:
             for key, _mask in sel.select(timeout=1.0):
                 who = key.data
                 sock = key.fileobj
+                if who == "clip":
+                    for text in conn.clip.read():
+                        conn.clip_to_client(text)
+                    if not conn.clip.alive:
+                        conn.trace("clip helper closed; falling back to the x11vnc clipboard path")
+                        try:
+                            sel.unregister(sock)
+                        except (KeyError, ValueError, OSError):
+                            pass
+                    continue
                 try:
                     data = sock.recv(65536)
                 except (BlockingIOError, InterruptedError):
@@ -1460,6 +1555,9 @@ def handle(client, table, live, guacd_addr, admin_group, shadow_group="cockpit-g
                 text = conn.decode_chunk(who, data)
                 if who == "client":
                     conn.up_buf = drain(conn.up_buf + text, on_up)
+                    if conn.clip is not None and not clip_registered:
+                        sel.register(conn.clip.sock, selectors.EVENT_READ, "clip")
+                        clip_registered = True
                 else:
                     conn.down_buf = drain(conn.down_buf + text, on_down)
             # keepalive (I8): guacd drops a quiet client at ~18s
@@ -1499,6 +1597,8 @@ def handle(client, table, live, guacd_addr, admin_group, shadow_group="cockpit-g
         # Tear down the FreeRDP3 bridge for this connection. The backing desktop
         # (headless GNOME / physical seat) is independent and lives on, so a
         # reconnect re-bridges to the same desktop.
+        if conn.clip is not None:
+            conn.clip.close()
         if conn.bridge_proc:
             bridge.stop_bridge(conn.bridge_proc, conn.bridge_key)
             log.info("uid=%d bridge %s torn down", uid, conn.bridge_key)

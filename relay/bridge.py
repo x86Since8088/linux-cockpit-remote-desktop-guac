@@ -14,9 +14,12 @@
 # is not exposed in the process list); the loopback VNC endpoint the relay hands guacd
 # is written back to the 0640 .env file. stdlib only.
 
+import base64
 import logging
 import os
 import re
+import socket
+import struct
 import subprocess
 import time
 
@@ -159,6 +162,163 @@ def start_bridge(key, host, port, security, username, password, geom="1600x1000"
     return info, proc
 
 
+# ---------------------------------------------------------------------------
+# Clipboard channel to the per-session helper (I85/I86; bridge/edy-rdp-clip-helper.py).
+# x11vnc cannot carry the browser's text to the guest (I83) and hands the guest's text
+# to guacd as xfreerdp3's winpr-ESCAPED "STRING" ("\\u00c9" for E-acute). The helper owns/reads
+# the session's X CLIPBOARD itself, as UTF-8; the relay talks to it over a 0600 unix
+# socket that lives in this session's own state dir and is named by the bridge key, so
+# one session's text can never reach another session's display.
+# ---------------------------------------------------------------------------
+CLIP_MAX = 262144                   # guacd's clipboard buffer; larger text is truncated, not refused
+CLIP_STREAM_BASE = 20000            # relay-minted guest->browser stream ids (guacd's are small)
+CLIP_STREAM_SPAN = 10000
+CLIP_UP_STREAMS = 8                 # concurrent browser->guest clipboard streams tracked
+
+
+def cap_utf8(data, limit=CLIP_MAX):
+    """`data` as valid UTF-8 of at most `limit` bytes, never splitting a character."""
+    text = data.decode("utf-8", "replace")
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit].decode("utf-8", "ignore").encode("utf-8")
+
+
+def clip_path(key):
+    return os.path.join(BRIDGE_STATE, ".%s.clip.sock" % key)
+
+
+class ClipChannel(object):
+    """Relay end of the helper socket. send_text(): browser text -> guest CLIPBOARD.
+    read(): complete guest texts the helper has sent. `alive` goes False on any error."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.alive = True
+        self._buf = b""
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def send_text(self, data):
+        if not self.alive:
+            return False
+        data = cap_utf8(data)
+        try:
+            self.sock.settimeout(5.0)
+            self.sock.sendall(b"S %d\n" % len(data) + data)
+            return True
+        except OSError:
+            self.close()
+            return False
+        finally:
+            try:
+                self.sock.settimeout(None)
+            except OSError:
+                pass
+
+    def read(self):
+        out = []
+        try:
+            chunk = self.sock.recv(65536)
+        except (BlockingIOError, InterruptedError, socket.timeout):
+            return out
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self.close()
+            return out
+        self._buf += chunk
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl < 0:
+                if len(self._buf) > 32:
+                    self.close()
+                return out
+            head = self._buf[:nl].split()
+            try:
+                if len(head) != 2 or head[0] != b"G":
+                    raise ValueError
+                n = int(head[1])
+                if not 0 <= n <= CLIP_MAX * 4:
+                    raise ValueError
+            except ValueError:
+                self.close()
+                return out
+            if len(self._buf) < nl + 1 + n:
+                return out
+            out.append(cap_utf8(self._buf[nl + 1:nl + 1 + n]))
+            self._buf = self._buf[nl + 1 + n:]
+
+    def close(self):
+        self.alive = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def connect_clip(key):
+    """ClipChannel for this session's helper, or None when the helper is not running
+    (python-xlib missing, no XFIXES, ...): the bridge then keeps its old x11vnc path."""
+    path = clip_path(key)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(2.0)
+        s.connect(path)
+        _pid, uid, _gid = struct.unpack("3i", s.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        if uid != os.getuid():
+            raise OSError("clip helper socket is owned by uid %d" % uid)
+        s.settimeout(None)
+        return ClipChannel(s)
+    except OSError as exc:
+        trace_log.info("clip helper not attached key=%s: %s", key, exc)
+        try:
+            s.close()
+        except OSError:
+            pass
+        return None
+
+
+class UpstreamClip(object):
+    """Collects the browser's Guacamole clipboard streams (clipboard / blob... / end),
+    text/plain only, capped at CLIP_MAX decoded bytes. Never logs contents."""
+
+    def __init__(self):
+        self._s = {}
+
+    def start(self, stream, mimetype):
+        """True when this stream is tracked (text/plain, room for it)."""
+        if (mimetype or "").split(";")[0].strip().lower() != "text/plain":
+            self._s.pop(stream, None)
+            return False
+        if len(self._s) >= CLIP_UP_STREAMS and stream not in self._s:
+            return False
+        self._s[stream] = bytearray()
+        return True
+
+    def tracking(self, stream):
+        return stream in self._s
+
+    def blob(self, stream, b64):
+        buf = self._s.get(stream)
+        if buf is None or len(buf) >= CLIP_MAX:
+            return
+        try:
+            buf += base64.b64decode(b64 or "", validate=False)
+        except (ValueError, TypeError):
+            self._s[stream] = bytearray(CLIP_MAX)   # unusable: stop collecting, drop at end
+
+    def end(self, stream):
+        """The complete text (bytes, <= CLIP_MAX, valid UTF-8) or None."""
+        buf = self._s.pop(stream, None)
+        if buf is None or not buf:
+            return None
+        return cap_utf8(bytes(buf)[:CLIP_MAX])
+
+
 def stop_bridge(proc, key):
     """Terminate the bridge child; its EXIT trap disposes Xvfb/xfreerdp3/x11vnc."""
     trace_log.info("bridge STOP key=%s", key)
@@ -174,6 +334,7 @@ def stop_bridge(proc, key):
     _safe_unlink(_env_path(key))
     _safe_unlink(_req_path(key))
     _safe_unlink(_rdplog_path(key))
+    _safe_unlink(clip_path(key))
 
 
 def _rdplog_path(key):

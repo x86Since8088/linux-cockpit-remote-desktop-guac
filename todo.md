@@ -73,9 +73,12 @@ do. Memory only points here.
   I1/I2 read `OPEN→(design closes)`; I5, I6, I7 and I13 are plain OPEN (I3 and I4 are closed in their addenda; I26 was
   re-attributed and I29 resolved the isolated path). Its section 4 lists 13 defects D-1..D-13 present at v1.3.2, and only D-10
   (I44) is tracked in KNOWN_ISSUES: triage the rest.
-- **Client-to-server clipboard drops happen inside x11vnc (I83, corrected 2026-11-27)**: the clipboard DOES reach the relay and guacd
-  (`up={blob,clipboard,end}` in the 1.11.x journal); x11vnc takes the text but never becomes selection owner. The paragraph below
-  predates that correction. Open: find the x11vnc cause or replace it (I83).
+- **Bridge clipboard fixes (I85, I86, 1.11.7.20261127) are not deployed or live-verified.** Owed after deploy + relay restart + a fresh
+  console reconnect: copy "Hello World! Éé 日本" in the guest and Receive it (must not show `\u00c9`), then Send clip a UTF-8
+  text and paste it in the guest. The relay trace shows `clip helper attached` and `clip browser->guest N bytes`. The last hop (xfreerdp3
+  forwarding the helper-owned CLIPBOARD to the real RDP guest) is verified only up to the Xvfb selection. Follow-ups: INCR (chunked)
+  selections from xfreerdp3 are skipped by the helper; PRIMARY is not set (xfreerdp3 forwards CLIPBOARD only).
+  Superseded wording of the old I83 item:
   Originally: (root-caused 2026-09-28; I58 records it as upstream in
   guacd/x11vnc's VNC clipboard handling). The shipped workaround is "Type Clipboard" (I58). A 2026-09-30 session drop after a
   large copy from the remote logged `guacd[612]: ERROR: Error handling message from VNC server.`; that the large copy caused it
