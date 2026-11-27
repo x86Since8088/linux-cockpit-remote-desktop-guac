@@ -48,6 +48,7 @@ def _env_file_hint():
     return "this host's cockpit-guac-rdp .env (see /etc/cockpit-guac-rdp/install.conf)"
 
 import argparse
+import codecs
 import grp
 import ipaddress
 import json
@@ -164,6 +165,49 @@ def drain(buf, on_instruction):
             return buf[pos:]
         elements, pos = res
         on_instruction(elements)
+
+
+# ---------------------------------------------------------------------------
+# guacd connect-parameter allow-list (I82).
+# The browser fills the guacd `connect` values by NAME, so a hand-built client can
+# set any guacd VNC parameter: disable-copy/disable-paste, read-only, recording-*,
+# dest-host/dest-port (VNC repeater), reverse-connect, audio-servername, sftp-*,
+# hostname/port ... The relay therefore accepts ONLY the names below, per scenario,
+# and only with a value of the expected shape; every other parameter is forced to
+# "" (guacd's own default), and hostname/port/password are always set by the relay
+# (managed scenarios: the bridge/grd loopback endpoint; "vnc": the allow-list
+# checked target). The user's target host/port/credential for "remote"/"vnc" do not
+# travel in these values at all -- they come from the stripped remotehost=/rdpcred=
+# markers -- so they are unaffected.
+# ---------------------------------------------------------------------------
+_BOOL = ("", "true", "false")
+_COMMON_PARAMS = {
+    "enable-audio": _BOOL,
+    "clipboard-encoding": ("", "UTF-8", "ISO8859-1", "UTF-16", "CP1252"),
+}
+SCENARIO_PARAMS = {
+    # direct VNC to an operator-chosen server: display/protocol tuning is legitimate
+    "vnc": {
+        "color-depth": ("", "8", "16", "24", "32"),
+        "swap-red-blue": _BOOL,
+        "cursor": ("", "local", "remote"),
+        "encodings": re.compile(r"^[A-Za-z0-9 ._-]{0,200}$"),
+        "username": re.compile(r"^[^\x00\r\n]{0,256}$"),
+    },
+}
+
+
+def allowed_params(scenario):
+    """name -> (tuple of accepted values | compiled regex) for `scenario`."""
+    out = dict(_COMMON_PARAMS)
+    out.update(SCENARIO_PARAMS.get(scenario, {}))
+    return out
+
+
+def _param_value_ok(spec, value):
+    if hasattr(spec, "match"):
+        return bool(spec.match(value))
+    return value in spec
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +908,12 @@ class Connection:
         self.guacd = None
         self.up_buf = ""    # client -> guacd
         self.down_buf = ""  # guacd -> client
+        # One incremental UTF-8 decoder per direction: a recv() boundary can fall
+        # inside a multibyte character, and decoding each chunk on its own turns the
+        # two halves into U+FFFD (corrupting text and, because Guacamole length
+        # prefixes count characters, desynchronising the framing).
+        self._dec = {"client": codecs.getincrementaldecoder("utf-8")("replace"),
+                     "guacd": codecs.getincrementaldecoder("utf-8")("replace")}
         self.select_seen = False
         self.scenario = None
         self.uuid = None
@@ -881,6 +931,7 @@ class Connection:
         self.desktop_created = None  # that desktop's creation time
         self.session_token = None    # end-to-end correlation/gate token (registered)
         self.session_token_admin = False
+        self._rejected_logged = False
         self.remote_target = None    # browser-supplied "ip:port" for the remote scenario
         self.req_w = None
         self.req_h = None
@@ -899,6 +950,11 @@ class Connection:
 
     def _count(self, table, op):
         table[op] = table.get(op, 0) + 1
+
+    def decode_chunk(self, who, data):
+        """Decode one recv() chunk from `who` ('client' | 'guacd'), keeping any
+        trailing partial UTF-8 sequence for the next chunk."""
+        return self._dec[who].decode(data)
 
     def terminate(self):
         """Force this connection down (control API 'terminate'). Closing the
@@ -1257,7 +1313,22 @@ class Connection:
         values = list(connect_elements[1:])
         if len(values) < len(self.arg_names):
             values += [""] * (len(self.arg_names) - len(values))
-        params = dict(zip(self.arg_names, values))
+        browser = dict(zip(self.arg_names, values))
+        allowed = allowed_params(self.scenario)
+        params, rejected = {}, []
+        for name, val in browser.items():
+            if name.startswith("VERSION_"):
+                params[name] = val        # guacd's protocol-version echo, not a setting
+            elif name in allowed and _param_value_ok(allowed[name], val):
+                params[name] = val
+            elif val != "":
+                rejected.append(name)     # sent, but not the browser's to set
+        if rejected and not self._rejected_logged:
+            self._rejected_logged = True  # once per connection; names only, never values
+            log.warning("uid=%d scenario=%s browser guacd parameters ignored: %s",
+                        self.uid, self.scenario, ",".join(sorted(rejected)))
+            self.trace("REJECTED guacd parameters (ignored): %s", ",".join(sorted(rejected)))
+        # server-enforced: these always win
         params["hostname"] = info["VNCHOST"]
         params["port"] = str(info["VNCPORT"])
         params["password"] = info.get("VNCPASS", "")
@@ -1386,7 +1457,7 @@ def handle(client, table, live, guacd_addr, admin_group, shadow_group="cockpit-g
                 if not data:
                     conn.closed = True
                     break
-                text = data.decode("utf-8", "replace")
+                text = conn.decode_chunk(who, data)
                 if who == "client":
                     conn.up_buf = drain(conn.up_buf + text, on_up)
                 else:

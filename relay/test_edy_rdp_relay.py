@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Unit tests for the relay's security-critical pure logic.
-import os, sys, unittest
+import os, sys, time, unittest
 sys.path.insert(0, os.path.dirname(__file__))
 import edy_rdp_relay as R
 import session_registry as SR
@@ -851,6 +851,173 @@ class NonAdminAccess(unittest.TestCase):
             self._release(c)
         self.assertEqual(c.scenario, "greeter")
         self.assertEqual(out[0], "connect")
+
+
+class Utf8SplitAcrossRecv(unittest.TestCase):
+    """I80: a multibyte character split across recv() boundaries must survive,
+    in both directions, through the real handle() loop."""
+    def _run(self, payload_text, split_at_byte):
+        import socket, threading
+        srv_c, cli = socket.socketpair()        # cli = browser side, srv_c = relay's client sock
+        relay_g, fake_guacd = socket.socketpair()
+        class Live:
+            def register(self, *a): pass
+            def unregister(self, *a): pass
+        orig = R._connect_guacd
+        R._connect_guacd = lambda addr: relay_g
+        try:
+            t = threading.Thread(target=R.handle, args=(
+                srv_c, SR.SessionRegistry(), Live(), ("127.0.0.1", 4822), "sudo"))
+            t.start()
+            wire = R.encode("select", "vnc") + R.encode("clipboard", "1", payload_text)
+            raw = wire.encode("utf-8")
+            cut = raw.index(payload_text.encode("utf-8")) + split_at_byte
+            cli.sendall(raw[:cut]); time.sleep(0.3); cli.sendall(raw[cut:])
+            time.sleep(0.3)
+            # guacd -> browser direction, same treatment
+            back = R.encode("clipboard", "9", payload_text).encode("utf-8")
+            bcut = back.index(payload_text.encode("utf-8")) + split_at_byte
+            fake_guacd.sendall(back[:bcut]); time.sleep(0.3); fake_guacd.sendall(back[bcut:])
+            time.sleep(0.3)
+            fake_guacd.settimeout(2); cli.settimeout(2)
+            got_up = fake_guacd.recv(65536).decode("utf-8")
+            got_down = cli.recv(65536).decode("utf-8")
+            cli.close()
+            t.join(5)
+        finally:
+            R._connect_guacd = orig
+            fake_guacd.close()
+        return got_up, got_down
+
+    def test_cjk_split_mid_character(self):
+        txt = "日本語テキスト"
+        up, down = self._run(txt, 1)             # 1 byte into a 3-byte char
+        self.assertIn(R.encode("clipboard", "1", txt), up)
+        self.assertEqual(down, R.encode("clipboard", "9", txt))
+
+    def test_emoji_split_mid_character(self):
+        txt = "a\U0001F600b"                      # 4-byte sequence
+        for cut in (2, 3, 4):
+            up, down = self._run(txt, cut)
+            self.assertIn(R.encode("clipboard", "1", txt), up)
+            self.assertEqual(down, R.encode("clipboard", "9", txt))
+
+    def test_directions_do_not_share_decoder_state(self):
+        c = R.Connection(client=None, uid=1, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        b = "日".encode("utf-8")
+        self.assertEqual(c.decode_chunk("client", b[:1]), "")
+        self.assertEqual(c.decode_chunk("guacd", "x".encode()), "x")   # must not eat the client's pending byte
+        self.assertEqual(c.decode_chunk("client", b[1:]), "日")
+
+
+class BrowserParamAllowList(unittest.TestCase):
+    """I82: browser-supplied guacd parameters are allow-listed per scenario."""
+    NAMES = ["VERSION_1_5_0", "hostname", "port", "read-only", "username", "password",
+             "color-depth", "swap-red-blue", "cursor", "encodings", "clipboard-encoding",
+             "disable-copy", "disable-paste", "dest-host", "dest-port", "enable-audio",
+             "audio-servername", "recording-path", "recording-name", "reverse-connect",
+             "enable-sftp", "sftp-hostname", "autoretry"]
+
+    def _conn(self, scenario):
+        c = R.Connection(client=None, uid=1000, table=SR.SessionRegistry(),
+                         guacd_addr=("127.0.0.1", 4822), admin_group="sudo")
+        c.arg_names = list(self.NAMES)
+        c.scenario = scenario
+        return c
+
+    def _evil(self, **over):
+        vals = {n: "" for n in self.NAMES}
+        vals.update({"VERSION_1_5_0": "VERSION_1_5_0", "hostname": "evil.example", "port": "1",
+                     "read-only": "true", "disable-copy": "true", "disable-paste": "true",
+                     "dest-host": "10.9.9.9", "dest-port": "22", "audio-servername": "10.9.9.9",
+                     "recording-path": "/tmp", "recording-name": "x", "reverse-connect": "true",
+                     "enable-sftp": "true", "sftp-hostname": "h", "autoretry": "99",
+                     "password": "attacker"})
+        vals.update(over)
+        return ["connect"] + [vals[n] for n in self.NAMES]
+
+    INFO = {"VNCHOST": "127.0.0.1", "VNCPORT": "5999", "VNCPASS": "srv"}
+
+    def _out(self, scenario, **over):
+        c = self._conn(scenario)
+        return c, dict(zip(self.NAMES, c._inject_vnc_target(self._evil(**over), self.INFO)[1:]))
+
+    def test_dangerous_keys_forced_to_default_all_scenarios(self):
+        for sc in ("isolated", "virtual", "console", "greeter", "remote", "wayland-vnc", "vnc"):
+            _c, p = self._out(sc)
+            for k in ("read-only", "disable-copy", "disable-paste", "dest-host", "dest-port",
+                      "audio-servername", "recording-path", "recording-name",
+                      "reverse-connect", "enable-sftp", "sftp-hostname", "autoretry"):
+                self.assertEqual(p[k], "", (sc, k))
+            self.assertEqual((p["hostname"], p["port"], p["password"]), ("127.0.0.1", "5999", "srv"))
+            self.assertEqual(p["VERSION_1_5_0"], "VERSION_1_5_0")
+
+    def test_legit_page_values_pass(self):
+        for sc in ("isolated", "wayland-vnc", "vnc"):
+            _c, p = self._out(sc, **{"enable-audio": "true", "clipboard-encoding": "UTF-8"})
+            self.assertEqual(p["enable-audio"], "true")
+            self.assertEqual(p["clipboard-encoding"], "UTF-8")
+
+    def test_bad_value_for_allowed_key_dropped(self):
+        _c, p = self._out("wayland-vnc", **{"clipboard-encoding": "../../x", "enable-audio": "yes"})
+        self.assertEqual((p["clipboard-encoding"], p["enable-audio"]), ("", ""))
+
+    def test_vnc_only_tuning_keys(self):
+        _c, p = self._out("vnc", **{"color-depth": "16", "swap-red-blue": "true",
+                                   "cursor": "remote", "username": "bob"})
+        self.assertEqual((p["color-depth"], p["swap-red-blue"], p["cursor"], p["username"]),
+                         ("16", "true", "remote", "bob"))
+        _c, p = self._out("isolated", **{"color-depth": "16", "username": "bob"})
+        self.assertEqual((p["color-depth"], p["username"]), ("", ""))
+
+    def test_rejections_logged_once_names_only(self):
+        c = self._conn("isolated")
+        with self.assertLogs(R.log, level="WARNING") as cm:
+            c._inject_vnc_target(self._evil(), self.INFO)
+            c._inject_vnc_target(self._evil(), self.INFO)
+        lines = [l for l in cm.output if "ignored" in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("disable-copy", lines[0])
+        for secret in ("evil.example", "attacker", "10.9.9.9", "/tmp"):
+            self.assertNotIn(secret, lines[0])
+
+    def test_clean_connect_logs_nothing(self):
+        c = self._conn("isolated")
+        vals = ["connect"] + [("VERSION_1_5_0" if n.startswith("VERSION_") else "") for n in self.NAMES]
+        with self.assertRaises(AssertionError):      # assertLogs fails when nothing is logged
+            with self.assertLogs(R.log, level="WARNING"):
+                c._inject_vnc_target(vals, self.INFO)
+
+    def test_end_to_end_vnc_scenario_keeps_user_target_and_credential(self):
+        R.REMOTE_ALLOW = R.parse_remote_allow("10.20.0.7:5901")
+        R.REMOTE_ADMIN_ONLY = False
+        try:
+            c = self._conn(None)
+            vals = self._evil()[:]
+            out = c._peek_scenario_from_connect(
+                vals + ["rdpcred=ignored\x1fvncsecret", "remotehost=10.20.0.7:5901", "scenario=vnc"])
+            p = dict(zip(self.NAMES, out[1:]))
+            self.assertEqual((p["hostname"], p["port"], p["password"]),
+                             ("10.20.0.7", "5901", "vncsecret"))
+            self.assertEqual(p["disable-copy"], "")
+            self.assertEqual(p["dest-host"], "")
+        finally:
+            R.REMOTE_ALLOW = []
+
+    def test_end_to_end_wayland_vnc_server_target_wins(self):
+        orig = R.ensure_waylandvnc_session
+        R.ensure_waylandvnc_session = lambda uid: {"HOST": "127.0.0.1", "PORT": "5901"}
+        try:
+            c = self._conn(None)
+            out = c._peek_scenario_from_connect(
+                self._evil(**{"clipboard-encoding": "UTF-8"}) + ["scenario=wayland-vnc"])
+            p = dict(zip(self.NAMES, out[1:]))
+            self.assertEqual((p["hostname"], p["port"], p["password"]), ("127.0.0.1", "5901", ""))
+            self.assertEqual(p["clipboard-encoding"], "UTF-8")
+            self.assertEqual(p["read-only"], "")
+        finally:
+            R.ensure_waylandvnc_session = orig
 
 
 if __name__ == "__main__":

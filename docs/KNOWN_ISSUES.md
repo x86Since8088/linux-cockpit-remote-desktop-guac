@@ -1553,7 +1553,8 @@ the browser→remote clipboard push is accepted with no error and never actually
 was re-confirmed live on 2026-09-30 by cross-referencing a real browser trace, showing the JS side
 correctly writing to the outbound clipboard stream, against the relay's own per-connection `up={}` opcode
 tally at session close, which showed zero `clipboard` instructions ever reaching the relay from the browser
-across multiple real sessions). Since that path cannot be fixed from this project's side, a new "Type
+across multiple real sessions — **CORRECTED 2026-11-27, see I83: that "zero reached the relay" reading does not
+hold for 1.11.x; the failure is inside x11vnc**). Since that path cannot be fixed from this project's side, a new "Type
 Clipboard" button sidesteps it entirely: it reads the local clipboard the same way "Send clip" does, then
 **types** the text into the session one keysym at a time via `sendGuestKeyEvent` directly — the same
 one-shot-injection call `sendKeysymTap()` already uses for the Win key, and NOT `keyboard.press()`/
@@ -2111,3 +2112,56 @@ The page's `needAdmin` covered `remote` but not `vnc`, while the relay requires 
 `EDY_RDP_REMOTE_ADMIN_ONLY=1`; VNC was refused for everyone on such a host. Now `connectNeedsAdminProof()` covers
 both. Test: `tests/js/security_decisions.test.js`.
 
+### I80 · A multibyte character split across two socket reads was corrupted, and could misframe the Guacamole stream · Sev M · FIXED (1.11.5.20261127)
+`handle()` decoded every `recv()` chunk on its own (`data.decode("utf-8", "replace")`). When a read boundary fell inside a
+multibyte UTF-8 character (CJK, emoji, accented text in a clipboard blob or a connect parameter) each half became U+FFFD.
+Guacamole length prefixes count characters, so the replaced characters changed the counts the parser relied on: the
+instruction was forwarded with a wrong text, or the parser lost its place. Now each `Connection` keeps one incremental
+UTF-8 decoder per direction (`client`, `guacd`), so the trailing partial sequence waits for the next read. Tests:
+`Utf8SplitAcrossRecv` (relay unit suite; runs the real `handle()` over socketpairs with a CJK and a 4-byte emoji split at every
+interior byte, both directions). All three fail on main (e0a12b0).
+
+### I81 · The bridge's Xvfb was open to any local uid through the abstract socket · Sev M · FIXED (1.11.5.20261127)
+`Xvfb :N -nolisten tcp` still listens on `@/tmp/.X11-unix/XN`, an abstract socket that belongs to the network namespace, so
+`PrivateTmp=` does not hide it, and with no `-auth` any local uid could read the session's CLIPBOARD and inject keys. Verified
+in a container on main: a uid-2000 `xdpyinfo -display :133` connected. Now `edy-rdp-bridge-start.sh` starts Xvfb with
+`-nolisten tcp -nolisten local -auth <file>`; `<file>` is a per-session `$STATE/.KEY.xauth` (0600, owned by the bridge's uid,
+cookie from /dev/urandom passed to `xauth` on stdin, never argv, removed on teardown) and exported as `XAUTHORITY`, so
+`xfreerdp3` and `x11vnc` inherit it. The script fails closed if `xauth` is missing (the xvfb packages depend on it).
+Verified in a container: no abstract listener; uid 2000 and root-without-cookie get "Authorization required"; uid 2000 cannot read
+the cookie file; x11vnc attaches; a VNC-authenticated KeyEvent reaches the display (xev saw the keys); the file is gone after
+teardown. Test: `tests/bridge_xauth_test.py` (runs the real script rootless with a stub xfreerdp3; fails on main).
+This is the C18 item of DEFENSE-LAYER.md (its Xvfb half; the file-mode half is unchanged). Not covered: wayvnc (I66).
+
+### I82 · Browser-supplied guacd parameters were passed straight through · Sev M · FIXED (1.11.5.20261127)
+The browser fills guacd's `connect` values by name, and the relay overwrote only `hostname`, `port` and `password`, so a
+hand-built client could set `disable-copy`, `disable-paste`, `read-only`, `recording-path`/`recording-name`, `dest-host`/
+`dest-port` (VNC repeater), `reverse-connect`, `audio-servername`, `enable-sftp`/`sftp-*`, `autoretry` and the rest. Now
+`_inject_vnc_target` keeps a browser value only if its name is on the scenario's allow-list AND the value has the expected
+shape; everything else becomes `""` (guacd's default) and `hostname`/`port`/`password` are always the relay's. All scenarios:
+`enable-audio` (`true`/`false`) and `clipboard-encoding` (`UTF-8`, `ISO8859-1`, `UTF-16`, `CP1252`; the page agent adds UTF-8 for
+wayland-vnc). `vnc` also: `color-depth`, `swap-red-blue`, `cursor`, `encodings`, `username`. `VERSION_*` echoes pass. A rejected
+name is logged once per connection (names only, never values). The user's host, port and credential for `remote` and `vnc` never
+travelled in these values (they come from the stripped `remotehost=`/`rdpcred=` markers) and are unchanged. Tests:
+`BrowserParamAllowList` (six of them fail on main). Consequence: a future page feature that sets another guacd parameter needs
+an entry in `SCENARIO_PARAMS`, or it is silently dropped (and logged).
+
+### I83 · "Send clip" fails inside x11vnc, not before the relay · Sev N/A (record correction) · 2026-11-27
+I58 and todo.md said the relay's `up={}` tally showed no `clipboard` instruction from the browser. The live relay journal on
+1.11.x shows `up={blob:13,clipboard:13,end:13}`: the clipboard reaches the relay and guacd. In the clipboard review harness
+(guacd 1.6.0 -> x11vnc with the bridge's flags -> Xvfb) x11vnc receives the text (`xcut_receive`, `Set PRIMARY`, `Set CLIPBOARD`)
+but never issues `XSetSelectionOwner`: `XGetSelectionOwner` for PRIMARY and CLIPBOARD stays 0 (also seen in xtrace), so no guest
+application can paste it. Reproduced with a plain RFB ClientCutText, so guacd is not involved.
+Variants tried against the bridge's flags (x11vnc 0.9.17, Ubuntu 26.04; none changed the result, owner stays 0x0): `-noprimary`,
+`-nosetprimary`, `-noclipboard`, `-nosetclipboard`, `-noxfixes`, `-noxrecord`, `-nodpms`, `-nocursor -nocursorshape`;
+`-seldir CLIPBOARD` makes x11vnc refuse the text ("NOT recv-ing it"); `-sel`, `-nosel` and `-nocutbuffer` made x11vnc fail to start or serve nothing in the harness.
+So no bridge flag change is made. The cause inside x11vnc is not found; the options left are a different x11vnc build, a patch, or
+an own helper that owns the selection. "Type Clipboard" (I58) remains the workaround.
+
+### I84 · A guest clipboard over 1 MiB aborts the guacd VNC session (status 515) · Sev L · OPEN
+guacd's VNC client (libvncclient) refuses a server cut-text message larger than 1 MiB and treats it as a protocol error, so
+the whole session is dropped with guac status 515 ("Aborted"). Repro (from the clipboard review harness, guacd 1.6.0): put 1,048,577 bytes on the guest clipboard. With `wayland-vnc` it loops: wayvnc re-sends the clipboard on every new connection, so each reconnect aborts again.
+guacd has no parameter or environment setting for this limit (it is a compile-time constant of libvncclient, and guacd's own
+clipboard buffer is a separate cap); the pinned Janua image's units and requires.txt show no setting for it (the image itself was not
+pulled or run for this check). Not fixable from this repo without a patched or newer libvncclient in the guacd image;
+tracked in todo.md. Not fixed here (no guacd build in this change). Workaround: clear or shrink the guest clipboard, then reconnect.
